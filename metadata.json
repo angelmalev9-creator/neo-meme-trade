@@ -1,0 +1,6 @@
+{
+  "name": "Solana Meme Trading Bot Simulator & AI Scanner",
+  "description": "A high-speed simulated Solana meme coin trading bot featuring real-time Twitter sentiment analysis, DEX Paid radar, elite copy trading, and an AI-powered smart contract scam scanner.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
