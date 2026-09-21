@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="bg">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NEO Meme Coins</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="brand-row">
+        <div class="brand-mark">N</div>
+        <div>
+          <div class="brand">NEO Meme Coins</div>
+          <div class="sub">Device-first risk scanner</div>
+        </div>
+        <span class="alpha">ALPHA</span>
+      </header>
+
+      <section class="scan-card">
+        <label for="tokenInput">TOKEN / DEXSCREENER URL</label>
+        <textarea id="tokenInput" rows="3" placeholder="Paste Solana token address or DexScreener URL"></textarea>
+        <button id="scanBtn">АНАЛИЗИРАЙ</button>
+        <div id="error" class="error hidden"></div>
+      </section>
+
+      <section id="result" class="hidden">
+        <div id="decision" class="decision">
+          <div class="eyebrow">NEO POSTURE</div>
+          <div id="posture" class="posture">WATCH</div>
+          <div id="tokenName" class="token-name"></div>
+        </div>
+
+        <div class="metrics">
+          <div class="metric">
+            <span>RISK</span>
+            <strong id="risk">-</strong>
+          </div>
+          <div class="metric">
+            <span>LIQ / CAP</span>
+            <strong id="liqRatio">-</strong>
+          </div>
+          <div class="metric">
+            <span>TOP 5</span>
+            <strong id="top5">-</strong>
+          </div>
+        </div>
+
+        <div class="section-title">СИГНАЛИ</div>
+        <div id="signals" class="signals"></div>
+        <div id="holderWarning" class="warning hidden"></div>
+      </section>
+
+      <details class="settings">
+        <summary>RPC настройки</summary>
+        <label for="rpcInput">Custom Solana RPC URL</label>
+        <input id="rpcInput" type="url" placeholder="https://..." />
+        <button id="saveRpcBtn" class="secondary">ЗАПАЗИ ЛОКАЛНО</button>
+        <p>Default public RPC е безплатен, но rate-limited. Custom URL се пази само в Chrome storage на това устройство.</p>
+      </details>
+
+      <footer>NEO показва рискови сигнали, не гарантира печалба.</footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
