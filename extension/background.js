@@ -76,20 +76,175 @@ async function fetchHolders(tokenAddress, rpcUrl) {
 
   const supply = numberOrZero(supplyResult?.value?.uiAmountString ?? supplyResult?.value?.uiAmount);
   const largest = Array.isArray(largestResult?.value) ? largestResult.value.slice(0, 10) : [];
-  const percentages = largest.map((entry) => {
+  if (!supply || !largest.length) throw new Error('Holder distribution unavailable.');
+
+  const addresses = largest.map((entry) => String(entry.address));
+  let parsedAccounts = [];
+  try {
+    const parsed = await rpcCall(rpcUrl, 'getMultipleAccounts', [
+      addresses,
+      { encoding: 'jsonParsed', commitment: 'confirmed' },
+    ]);
+    parsedAccounts = Array.isArray(parsed?.value) ? parsed.value : [];
+  } catch {
+    parsedAccounts = [];
+  }
+
+  const holderRows = largest.map((entry, index) => {
     const amount = numberOrZero(entry.uiAmountString ?? entry.uiAmount);
-    return supply > 0 ? (amount / supply) * 100 : 0;
+    return {
+      tokenAccount: String(entry.address),
+      owner: parsedAccounts[index]?.data?.parsed?.info?.owner || null,
+      percentage: supply > 0 ? (amount / supply) * 100 : 0,
+    };
   });
+
+  const percentages = holderRows.map((entry) => entry.percentage);
   const sum = (count) => percentages.slice(0, count).reduce((a, b) => a + b, 0);
 
   return {
     top1Pct: sum(1),
     top5Pct: sum(5),
     top10Pct: sum(10),
+    holderRows,
   };
 }
 
-function score(market, holders) {
+function extractIncomingTransfers(transaction, wallet) {
+  const transfers = [];
+  const inspect = (instruction) => {
+    const parsed = instruction?.parsed;
+    const info = parsed?.info;
+    if (!parsed || !info) return;
+    if (String(instruction?.program || '').toLowerCase() !== 'system') return;
+    if (!String(parsed.type || '').toLowerCase().includes('transfer')) return;
+
+    const destination = String(info.destination || info.to || '');
+    const source = String(info.source || info.from || '');
+    const lamports = numberOrZero(info.lamports);
+    if (destination === wallet && source && source !== wallet && lamports > 0) {
+      transfers.push({ source, lamports });
+    }
+  };
+
+  const outer = transaction?.transaction?.message?.instructions;
+  if (Array.isArray(outer)) outer.forEach(inspect);
+  const inner = transaction?.meta?.innerInstructions;
+  if (Array.isArray(inner)) {
+    for (const group of inner) {
+      if (Array.isArray(group?.instructions)) group.instructions.forEach(inspect);
+    }
+  }
+  return transfers;
+}
+
+async function inspectWalletFunding(wallet, holderPercentage, rpcUrl) {
+  const signatures = await rpcCall(rpcUrl, 'getSignaturesForAddress', [
+    wallet,
+    { limit: 41, commitment: 'confirmed' },
+  ]);
+  const valid = Array.isArray(signatures)
+    ? signatures.filter((entry) => entry?.signature && !entry.err)
+    : [];
+  const times = valid.map((entry) => numberOrZero(entry.blockTime)).filter((value) => value > 0);
+  const oldestAt = times.length ? Math.min(...times) * 1000 : null;
+  const likelyFresh = valid.length <= 40 && Boolean(oldestAt && oldestAt >= Date.now() - 24 * 60 * 60 * 1000);
+
+  const oldestCandidates = [...valid]
+    .sort((a, b) => numberOrZero(a.blockTime) - numberOrZero(b.blockTime))
+    .slice(0, 4);
+
+  let funding = null;
+  for (const entry of oldestCandidates) {
+    try {
+      const tx = await rpcCall(rpcUrl, 'getTransaction', [
+        entry.signature,
+        { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+      ]);
+      if (!tx) continue;
+      const at = numberOrZero(tx?.blockTime || entry.blockTime) * 1000;
+      const incoming = extractIncomingTransfers(tx, wallet);
+      for (const transfer of incoming) {
+        if (!funding || (at > 0 && at < funding.at)) {
+          funding = { source: transfer.source, at, lamports: transfer.lamports };
+        }
+      }
+    } catch {
+      // Public RPC history can be pruned/rate-limited. Keep the rest of the scan alive.
+    }
+  }
+
+  return {
+    wallet,
+    holderPercentage,
+    likelyFresh,
+    signatureCount: valid.length,
+    oldestAt,
+    fundingSource: funding?.source || null,
+    fundingAt: funding?.at || null,
+    fundingLamports: funding?.lamports || null,
+  };
+}
+
+async function fetchFundingForensics(holders, rpcUrl) {
+  const owners = holders.holderRows
+    .filter((holder) => holder.owner)
+    .filter((holder, index, all) => all.findIndex((item) => item.owner === holder.owner) === index)
+    .slice(0, 5);
+
+  const evidence = [];
+  for (const holder of owners) {
+    try {
+      evidence.push(await inspectWalletFunding(holder.owner, holder.percentage, rpcUrl));
+    } catch {
+      // Best-effort evidence only.
+    }
+  }
+
+  const bySource = new Map();
+  for (const item of evidence) {
+    if (!item.fundingSource) continue;
+    const group = bySource.get(item.fundingSource) || [];
+    group.push(item);
+    bySource.set(item.fundingSource, group);
+  }
+
+  const commonFundingClusters = [...bySource.entries()]
+    .filter(([, group]) => group.length >= 2)
+    .map(([source, group]) => ({
+      source,
+      wallets: group.map((item) => item.wallet),
+      holderSupplyPct: group.reduce((sum, item) => sum + item.holderPercentage, 0),
+    }))
+    .sort((a, b) => b.wallets.length - a.wallets.length || b.holderSupplyPct - a.holderSupplyPct);
+
+  const timed = evidence.filter((item) => item.fundingAt).sort((a, b) => a.fundingAt - b.fundingAt);
+  let synchronizedCluster = null;
+  for (let start = 0; start < timed.length; start += 1) {
+    const group = timed.filter((item) => item.fundingAt >= timed[start].fundingAt && item.fundingAt - timed[start].fundingAt <= 10 * 60 * 1000);
+    if (group.length >= 2 && (!synchronizedCluster || group.length > synchronizedCluster.wallets.length)) {
+      const startAt = Math.min(...group.map((item) => item.fundingAt));
+      const endAt = Math.max(...group.map((item) => item.fundingAt));
+      synchronizedCluster = {
+        wallets: group.map((item) => item.wallet),
+        holderSupplyPct: group.reduce((sum, item) => sum + item.holderPercentage, 0),
+        spreadMinutes: (endAt - startAt) / 60000,
+      };
+    }
+  }
+
+  const linked = new Set(commonFundingClusters.flatMap((cluster) => cluster.wallets));
+  return {
+    sampledWallets: evidence.length,
+    evidence,
+    commonFundingClusters,
+    synchronizedCluster,
+    linkedWalletPct: evidence.length ? (linked.size / evidence.length) * 100 : 0,
+    linkedHolderSupplyPct: evidence.filter((item) => linked.has(item.wallet)).reduce((sum, item) => sum + item.holderPercentage, 0),
+  };
+}
+
+function score(market, holders, forensics) {
   let risk = 8;
   const signals = [];
   const cap = market.marketCapUsd;
@@ -118,6 +273,25 @@ function score(market, holders) {
     if (holders.top5Pct >= 55) add('Top 5 control most supply', `${holders.top5Pct.toFixed(1)}% combined`, 20, 'critical');
     else if (holders.top5Pct >= 35) add('Concentrated top 5', `${holders.top5Pct.toFixed(1)}% combined`, 10, 'warning');
     else add('Top accounts relatively distributed', `${holders.top5Pct.toFixed(1)}% combined`, -4, 'positive');
+  }
+
+  if (forensics?.commonFundingClusters?.length) {
+    const cluster = forensics.commonFundingClusters[0];
+    if (cluster.wallets.length >= 3) {
+      add('Shared funding cluster', `${cluster.wallets.length} sampled top wallets share one visible first funder; ~${cluster.holderSupplyPct.toFixed(1)}% supply`, 22, 'critical');
+    } else {
+      add('Possible wallet link', `2 sampled top wallets share one visible first funder; ~${cluster.holderSupplyPct.toFixed(1)}% supply`, 9, 'warning');
+    }
+  }
+
+  if (forensics?.synchronizedCluster?.wallets?.length >= 3) {
+    add('Synchronized funding', `${forensics.synchronizedCluster.wallets.length} sampled wallets funded within ${forensics.synchronizedCluster.spreadMinutes.toFixed(1)}m`, 14, 'warning');
+  }
+
+  if (forensics?.linkedWalletPct >= 70) {
+    add('High linked-wallet share', `${forensics.linkedWalletPct.toFixed(0)}% of sampled wallets are common-funder linked`, 12, 'critical');
+  } else if (forensics?.linkedWalletPct >= 50) {
+    add('Linked-wallet share', `${forensics.linkedWalletPct.toFixed(0)}% of sampled wallets are common-funder linked`, 7, 'warning');
   }
 
   const txns = market.buys1h + market.sells1h;
@@ -149,11 +323,21 @@ async function analyze(input) {
     holderError = error instanceof Error ? error.message : String(error);
   }
 
-  const scored = score(market, holders);
+  let forensics = null;
+  if (holders) {
+    try {
+      forensics = await fetchFundingForensics(holders, rpcUrl);
+    } catch {
+      forensics = null;
+    }
+  }
+
+  const scored = score(market, holders, forensics);
   return {
     tokenAddress,
     market,
     holders,
+    forensics,
     holderError,
     ...scored,
     generatedAt: Date.now(),
