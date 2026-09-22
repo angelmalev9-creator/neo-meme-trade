@@ -12,15 +12,15 @@
         <div class="brand-mark">N</div>
         <div>
           <div class="brand">NEO Meme Coins</div>
-          <div class="sub">Terminal-feed Realtime Sentinel</div>
+          <div class="sub">Resilient Feed Realtime Sentinel</div>
         </div>
-        <span class="alpha">v0.8</span>
+        <span class="alpha">v0.8.1</span>
       </header>
 
       <section class="auto-card">
         <div class="live-row"><span class="dot"></span><span>SENTINEL ACTIVE</span></div>
         <h1>NEO слуша самия terminal feed.</h1>
-        <p id="statusText">Стартирам network/WebSocket discovery + multichain realtime анализ.</p>
+        <p id="statusText">Стартирам structured feed extraction + multichain realtime анализ.</p>
         <div class="terminal-row"><span>Терминал</span><strong id="terminalName">—</strong></div>
         <div class="terminal-row"><span>Radar</span><strong id="currentCoin">Чакам данни…</strong></div>
         <button id="rescanBtn">ОБНОВИ SENTINEL</button>
@@ -37,8 +37,8 @@
       </section>
 
       <section class="how-card">
-        <div class="eyebrow">КАК РАБОТИ v0.8</div>
-        <p>NEO вече не разчита само на видимия HTML. Чете публичните network/WebSocket отговори, които самият Fomo/Axiom/Photon получава, извлича token contract-и и market context, валидира ги и ги следи в realtime.</p>
+        <div class="eyebrow">КАК РАБОТИ v0.8.1</div>
+        <p>NEO чете network/WebSocket данните на терминала, свързва contract address с symbol/name/price/market cap от същия feed и чак тогава валидира кандидата. Ако DEX индексаторът още не вижда новия coin, NEO може временно да го следи като feed-only candidate с по-ниска увереност.</p>
       </section>
 
       <details class="settings">
