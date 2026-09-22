@@ -27,7 +27,7 @@ button { cursor: pointer; }
   background: rgba(52, 211, 153, .08); color: #6ee7b7; padding: 4px 6px;
   font-size: 8px; font-weight: 900; letter-spacing: .14em;
 }
-.scan-card, .settings, .decision, .metric, .signal, .warning {
+.scan-card, .settings, .decision, .metric, .signal, .warning, .forecast-card {
   border: 1px solid rgba(255,255,255,.09);
   background: rgba(255,255,255,.025);
   border-radius: 16px;
@@ -68,7 +68,16 @@ textarea:focus, input:focus { border-color: rgba(52, 211, 153, .45); }
 .metric { padding: 10px; }
 .metric span { display: block; color: #697386; font-size: 8px; font-weight: 900; letter-spacing: .12em; }
 .metric strong { display: block; margin-top: 6px; color: white; font-size: 15px; }
+.forecast-card { margin-top: 8px; padding: 11px; border-color: rgba(96,165,250,.18); background: rgba(96,165,250,.05); }
+.forecast-row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:5px; }
+.forecast-row strong { color:#bfdbfe; font-size:13px; }
+.forecast-row span { color:#93c5fd; font-size:10px; font-weight:900; }
+.forecast-card p { margin:5px 0 0; color:#738196; font-size:9px; line-height:1.5; }
 .section-title { margin: 14px 2px 8px; }
+.socials { display:flex; flex-wrap:wrap; gap:6px; }
+.social-link { min-height:29px; display:inline-flex; align-items:center; padding:0 9px; border:1px solid rgba(255,255,255,.09); border-radius:9px; background:rgba(255,255,255,.03); color:#e5e7eb; text-decoration:none; font-size:9px; font-weight:800; }
+.social-link:hover { border-color:rgba(52,211,153,.28); color:#6ee7b7; }
+.social-empty { color:#697386; font-size:9px; }
 .signals { display: grid; gap: 7px; }
 .signal { padding: 10px 11px; }
 .signal-top { display: flex; justify-content: space-between; gap: 8px; }
