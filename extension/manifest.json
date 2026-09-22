@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "NEO Meme Coins",
-  "version": "0.5.0",
-  "description": "Autonomous device-first Solana Sentinel for Fomo, Axiom and Photon: full-terminal radar, automatic deep checks, holder/funding forensics, narratives, socials and local 15m/60m validation.",
+  "version": "0.5.1",
+  "description": "Autonomous device-first Solana Sentinel for Fomo, Axiom and Photon: full-terminal radar, automatic deep checks, mint/holder/funding forensics, narratives, socials and local 15m/60m validation.",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
     "https://api.dexscreener.com/*",
@@ -11,7 +11,7 @@
   ],
   "optional_host_permissions": ["https://*/*"],
   "background": {
-    "service_worker": "background.js",
+    "service_worker": "background-v2.js",
     "type": "module"
   },
   "content_scripts": [
