@@ -12,6 +12,10 @@ const signalsEl = document.getElementById('signals');
 const holderWarningEl = document.getElementById('holderWarning');
 const rpcInput = document.getElementById('rpcInput');
 const saveRpcBtn = document.getElementById('saveRpcBtn');
+const outlookEl = document.getElementById('outlook');
+const outlookScoreEl = document.getElementById('outlookScore');
+const outlookNoteEl = document.getElementById('outlookNote');
+const socialsEl = document.getElementById('socials');
 
 function showError(message) {
   errorBox.textContent = message;
@@ -31,22 +35,41 @@ function setLoading(loading) {
 function renderResult(result) {
   resultBox.classList.remove('hidden');
   postureEl.textContent = result.posture;
-  tokenNameEl.textContent = `${result.market.name} · $${result.market.symbol}`;
+  tokenNameEl.textContent = `${result.market.name} · $${result.market.symbol} · confidence ${result.confidence ?? 0}%`;
   riskEl.textContent = `${result.risk}/100`;
   liqRatioEl.textContent = `${result.liquidityRatio.toFixed(result.liquidityRatio >= 10 ? 1 : 2)}%`;
   top5El.textContent = result.holders ? `${result.holders.top5Pct.toFixed(1)}%` : 'N/A';
+  decisionBox.className = `decision ${String(result.posture || '').toLowerCase()}`;
 
-  decisionBox.className = `decision ${result.posture.toLowerCase()}`;
+  outlookEl.textContent = result.outlook?.label || 'MIXED';
+  outlookScoreEl.textContent = `${result.outlook?.score ?? 50}/100`;
+  outlookNoteEl.textContent = `${result.outlook?.horizon || '15–60m evidence window'} · ${result.outlook?.note || ''}`;
+
+  socialsEl.innerHTML = '';
+  for (const item of (result.social?.links || []).slice(0, 8)) {
+    const link = document.createElement('a');
+    link.className = 'social-link';
+    link.href = item.url;
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+    link.textContent = item.type;
+    socialsEl.appendChild(link);
+  }
+  if (!socialsEl.children.length) {
+    const empty = document.createElement('span');
+    empty.className = 'social-empty';
+    empty.textContent = 'Няма намерени социални/project линкове.';
+    socialsEl.appendChild(empty);
+  }
+
   signalsEl.innerHTML = '';
-
-  for (const signal of result.signals) {
+  for (const signal of result.signals || []) {
     const row = document.createElement('div');
     const className = signal.severity === 'warning' ? 'warning-signal' : signal.severity;
     row.className = `signal ${className}`;
 
     const top = document.createElement('div');
     top.className = 'signal-top';
-
     const title = document.createElement('strong');
     title.textContent = signal.label;
     const points = document.createElement('span');
@@ -61,7 +84,7 @@ function renderResult(result) {
   }
 
   if (result.holderError) {
-    holderWarningEl.textContent = `Holder scan unavailable: ${result.holderError}`;
+    holderWarningEl.textContent = `Holder/RPC scan е непълен: ${result.holderError}. SETUP е блокиран при недостатъчно evidence.`;
     holderWarningEl.classList.remove('hidden');
   } else {
     holderWarningEl.classList.add('hidden');
@@ -128,10 +151,8 @@ saveRpcBtn.addEventListener('click', async () => {
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.url?.includes('dexscreener.com/solana/')) {
-      tokenInput.value = tab.url;
-    }
+    if (tab?.url?.includes('dexscreener.com/solana/')) tokenInput.value = tab.url;
   } catch {
-    // activeTab URL is optional; manual paste still works.
+    // Manual paste always remains available.
   }
 })();
