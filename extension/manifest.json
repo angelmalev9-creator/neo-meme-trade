@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "NEO Meme Coins",
-  "version": "0.1.0",
-  "description": "Device-first Solana meme coin risk intelligence: liquidity, holders, fresh-wallet sampling and deterministic risk signals.",
+  "version": "0.2.0",
+  "description": "Device-first Solana meme coin intelligence for Photon and Axiom: risk, holders, wallet funding, socials and momentum outlook.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [
     "https://api.dexscreener.com/*",
@@ -14,6 +14,18 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://photon-sol.tinyastro.io/*",
+        "https://photon.tinyastro.io/*",
+        "https://axiom.trade/*",
+        "https://backup.axiom.trade/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "action": {
     "default_title": "NEO Meme Coins",
     "default_popup": "popup.html"
