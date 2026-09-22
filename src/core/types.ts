@@ -59,6 +59,46 @@ export interface HolderSnapshot {
   dataComplete: boolean;
 }
 
+export interface WalletFundingEvidence {
+  wallet: string;
+  holderPercentage: number;
+  likelyFresh?: boolean;
+  sampledSignatureCount: number;
+  oldestSampledSignatureAt?: number;
+  firstFundingSource?: string;
+  firstFundingAt?: number;
+  firstFundingLamports?: number;
+}
+
+export interface FundingCluster {
+  source: string;
+  wallets: string[];
+  holderSupplyPct: number;
+  firstFundingAtMin?: number;
+  firstFundingAtMax?: number;
+}
+
+export interface FundingTimeCluster {
+  wallets: string[];
+  holderSupplyPct: number;
+  startAt: number;
+  endAt: number;
+  spreadMinutes: number;
+}
+
+export interface WalletForensicsSnapshot {
+  sampledWallets: number;
+  walletsWithFundingEvidence: number;
+  freshWallets: number;
+  commonFundingClusters: FundingCluster[];
+  synchronizedFundingClusters: FundingTimeCluster[];
+  linkedWalletPct: number;
+  linkedHolderSupplyPct: number;
+  confidence: number;
+  evidence: WalletFundingEvidence[];
+  warnings: string[];
+}
+
 export type NarrativeCategory =
   | 'pure-meme'
   | 'culture'
@@ -86,6 +126,7 @@ export interface RiskAssessment {
   generatedAt: number;
   market: MarketSnapshot;
   holders?: HolderSnapshot;
+  forensics?: WalletForensicsSnapshot;
   narrative: NarrativeSnapshot;
   riskScore: number;
   qualityScore: number;
@@ -101,6 +142,9 @@ export interface DeviceSettings {
   deepWalletScan: boolean;
   freshWalletMaxAgeHours: number;
   freshWalletMaxSampledSignatures: number;
+  fundingForensicsEnabled: boolean;
+  maxForensicWallets: number;
+  fundingTimeWindowMinutes: number;
 }
 
 export const DEFAULT_DEVICE_SETTINGS: DeviceSettings = {
@@ -108,4 +152,7 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceSettings = {
   deepWalletScan: true,
   freshWalletMaxAgeHours: 24,
   freshWalletMaxSampledSignatures: 40,
+  fundingForensicsEnabled: true,
+  maxForensicWallets: 5,
+  fundingTimeWindowMinutes: 10,
 };
