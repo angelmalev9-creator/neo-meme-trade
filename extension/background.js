@@ -50,9 +50,9 @@ async function fetchMarket(tokenAddress) {
   const payload = await response.json();
   const pairs = Array.isArray(payload) ? payload : Array.isArray(payload?.pairs) ? payload.pairs : [];
   const pair = pairs
-    .filter((item) => item?.chainId === 'solana')
+    .filter((item) => item?.chainId === 'solana' && item?.baseToken?.address === tokenAddress)
     .sort((a, b) => numberOrZero(b?.liquidity?.usd) - numberOrZero(a?.liquidity?.usd))[0];
-  if (!pair) throw new Error('No active Solana pair found.');
+  if (!pair) throw new Error('No base-token Solana pair found. Quote-side pairs are ignored to avoid mixing assets.');
 
   return {
     name: pair.baseToken?.name || 'Unknown token',
@@ -244,8 +244,9 @@ async function fetchFundingForensics(holders, rpcUrl) {
   };
 }
 
-function score(market, holders, forensics) {
+function score(market, holders, forensics, holderError) {
   let risk = 8;
+  let confidence = 35;
   const signals = [];
   const cap = market.marketCapUsd;
   const liquidityRatio = cap > 0 ? (market.liquidityUsd / cap) * 100 : 0;
@@ -260,6 +261,7 @@ function score(market, holders, forensics) {
   else if (market.liquidityUsd >= 50000) add('Meaningful liquidity', `$${market.liquidityUsd.toFixed(0)} visible liquidity`, -4, 'positive');
 
   if (cap > 0) {
+    confidence += 8;
     if (liquidityRatio < 2) add('Liquidity tiny vs cap', `${liquidityRatio.toFixed(2)}% liquidity / market cap`, 24, 'critical');
     else if (liquidityRatio < 5) add('Weak liquidity ratio', `${liquidityRatio.toFixed(2)}% liquidity / market cap`, 14, 'warning');
     else if (liquidityRatio < 10) add('Liquidity ratio needs caution', `${liquidityRatio.toFixed(2)}% liquidity / market cap`, 7, 'warning');
@@ -267,13 +269,18 @@ function score(market, holders, forensics) {
   }
 
   if (holders) {
+    confidence += 24;
     if (holders.top1Pct >= 20) add('Single-account concentration', `Top raw token account: ${holders.top1Pct.toFixed(1)}%`, 22, 'critical');
     else if (holders.top1Pct >= 10) add('Large top holder', `Top raw token account: ${holders.top1Pct.toFixed(1)}%`, 12, 'warning');
 
     if (holders.top5Pct >= 55) add('Top 5 control most supply', `${holders.top5Pct.toFixed(1)}% combined`, 20, 'critical');
     else if (holders.top5Pct >= 35) add('Concentrated top 5', `${holders.top5Pct.toFixed(1)}% combined`, 10, 'warning');
     else add('Top accounts relatively distributed', `${holders.top5Pct.toFixed(1)}% combined`, -4, 'positive');
+  } else {
+    add('Holder evidence unavailable', holderError || 'Core holder concentration checks did not run.', 0, 'warning');
   }
+
+  if (forensics?.evidence?.length) confidence += Math.min(10, forensics.evidence.length * 2);
 
   if (forensics?.commonFundingClusters?.length) {
     const cluster = forensics.commonFundingClusters[0];
@@ -296,6 +303,7 @@ function score(market, holders, forensics) {
 
   const txns = market.buys1h + market.sells1h;
   if (txns > 0) {
+    confidence += 5;
     const buyShare = market.buys1h / txns;
     if (buyShare > 0.92 || buyShare < 0.08) add('Extreme transaction imbalance', `${(buyShare * 100).toFixed(0)}% buys in 1h`, 8, 'warning');
   }
@@ -305,8 +313,15 @@ function score(market, holders, forensics) {
   }
 
   risk = Math.max(0, Math.min(100, Math.round(risk)));
-  const posture = risk >= 65 ? 'SKIP' : risk >= 45 ? 'WAIT' : risk >= 25 ? 'WATCH' : 'SETUP';
-  return { risk, posture, liquidityRatio, signals };
+  confidence = Math.max(0, Math.min(100, Math.round(confidence)));
+  const posture = risk >= 65
+    ? 'SKIP'
+    : risk >= 45
+      ? 'WAIT'
+      : risk >= 25 || confidence < 60
+        ? 'WATCH'
+        : 'SETUP';
+  return { risk, posture, liquidityRatio, confidence, signals };
 }
 
 async function analyze(input) {
@@ -332,7 +347,7 @@ async function analyze(input) {
     }
   }
 
-  const scored = score(market, holders, forensics);
+  const scored = score(market, holders, forensics, holderError);
   return {
     tokenAddress,
     market,
