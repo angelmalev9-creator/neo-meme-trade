@@ -13,11 +13,6 @@ const saveRpcBtn = document.getElementById('saveRpcBtn');
 
 let activeTabId = null;
 
-function short(value, size = 5) {
-  const text = String(value || '');
-  return text.length > size * 2 + 2 ? `${text.slice(0, size)}…${text.slice(-size)}` : text;
-}
-
 function showError(message) {
   errorBox.textContent = message;
   errorBox.classList.remove('hidden');
@@ -44,14 +39,19 @@ function renderStatus(response) {
   if (!response?.ok) return;
 
   terminalName.textContent = response.source || '—';
-  currentCoin.textContent = response.token ? short(response.token) : 'Чакам coin…';
+  const top = Array.isArray(response.radarTop) ? response.radarTop[0] : null;
+  currentCoin.textContent = top
+    ? `${response.observedCount || 0} видими · $${top.symbol || '?'} ${top.status || ''}`
+    : `${response.observedCount || 0} candidates`;
 
-  if (response.scanning) {
-    statusText.textContent = 'NEO засече coin и в момента го анализира автоматично.';
-  } else if (response.result) {
-    statusText.textContent = 'AUTO WATCH е активен. При смяна на coin ще стартира нов анализ.';
+  if (response.deepScanning) {
+    statusText.textContent = 'Sentinel продължава да гледа целия екран, докато върви deep holder/funding анализ.';
+  } else if (response.radarScanning) {
+    statusText.textContent = 'NEO в момента преоценява видимите token-и и market flow.';
+  } else if (response.observedCount > 0) {
+    statusText.textContent = 'Sentinel е активен: следи feed/cards/swaps и сам избира кои token-и заслужават deep check.';
   } else {
-    statusText.textContent = 'AUTO WATCH е активен. Отвори coin в терминала — не е нужно да копираш CA.';
+    statusText.textContent = 'Sentinel е активен и чака terminal-ът да покаже разпознаваеми Solana token addresses.';
   }
 
   if (response.result) {
@@ -75,7 +75,7 @@ async function readStatus() {
   if (!terminal || !activeTabId) {
     terminalName.textContent = 'НЕПОДДЪРЖАН TAB';
     currentCoin.textContent = '—';
-    statusText.textContent = 'Отвори Fomo, Axiom или Photon. Там NEO работи автоматично.';
+    statusText.textContent = 'Отвори Fomo, Axiom или Photon. Там Sentinel наблюдава страницата автоматично.';
     resultBox.classList.add('hidden');
     return;
   }
@@ -86,7 +86,7 @@ async function readStatus() {
     const response = await chrome.tabs.sendMessage(activeTabId, { type: 'NEO_STATUS' });
     renderStatus(response);
   } catch {
-    statusText.textContent = 'Терминалът е отворен, но тази страница още няма зареден NEO content script.';
+    statusText.textContent = 'Терминалът е отворен, но content script-ът още не е зареден.';
     showError('Refresh-ни Fomo/Axiom/Photon веднъж след обновяването на extension-а.');
   }
 }
@@ -94,12 +94,12 @@ async function readStatus() {
 rescanBtn.addEventListener('click', async () => {
   clearError();
   rescanBtn.disabled = true;
-  rescanBtn.textContent = 'ПРОВЕРЯВАМ…';
+  rescanBtn.textContent = 'ОБНОВЯВАМ…';
   try {
     if (!activeTabId) await readStatus();
     if (!activeTabId) return;
     await chrome.tabs.sendMessage(activeTabId, { type: 'NEO_RESCAN' });
-    statusText.textContent = 'Преглеждам текущия екран за coin…';
+    statusText.textContent = 'Sentinel прави нов page-wide scan…';
     setTimeout(readStatus, 900);
     setTimeout(readStatus, 2600);
   } catch (error) {
@@ -107,7 +107,7 @@ rescanBtn.addEventListener('click', async () => {
   } finally {
     setTimeout(() => {
       rescanBtn.disabled = false;
-      rescanBtn.textContent = 'ПРОВЕРИ ТЕКУЩИЯ ЕКРАН';
+      rescanBtn.textContent = 'ОБНОВИ SENTINEL';
     }, 900);
   }
 });
