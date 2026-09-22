@@ -1,6 +1,6 @@
 {
-  "name": "Solana Meme Trading Bot Simulator & AI Scanner",
-  "description": "A high-speed simulated Solana meme coin trading bot featuring real-time Twitter sentiment analysis, DEX Paid radar, elite copy trading, and an AI-powered smart contract scam scanner.",
+  "name": "NEO Meme Coins",
+  "description": "Device-first Solana meme coin risk intelligence with holder concentration, fresh-wallet, common-funder, synchronized-funding, liquidity and market-flow analysis.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": ["DEVICE_SIDE_SOLANA_RPC", "DEXSCREENER_PUBLIC_DATA", "BROWSER_EXTENSION"]
 }
