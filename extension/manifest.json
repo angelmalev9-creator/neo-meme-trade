@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "NEO Meme Coins",
-  "version": "0.3.0",
-  "description": "Device-first Solana meme coin intelligence for Fomo, Axiom and Photon with automatic coin detection, risk, holders, wallet funding, socials and momentum outlook.",
+  "version": "0.4.0",
+  "description": "Autonomous device-first Solana Sentinel for Fomo, Axiom and Photon: page-wide radar, selective deep checks, holders, wallet funding, socials, narratives and momentum evidence.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [
     "https://api.dexscreener.com/*",
@@ -29,7 +29,7 @@
     }
   ],
   "action": {
-    "default_title": "NEO Meme Coins",
+    "default_title": "NEO Meme Coins Sentinel",
     "default_popup": "popup.html"
   }
 }
