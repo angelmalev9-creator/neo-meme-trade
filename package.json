@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "vite build && node scripts/package-extension.mjs",
+    "check:extension": "node --check extension/sentinel-v2.js && node --check extension/background-v2.js && node --check extension/engine-v2.js && node --check extension/fomo-discovery.js && node --check extension/radar.js && node --check extension/popup.js",
+    "build": "npm run check:extension && vite build && node scripts/package-extension.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "lint": "tsc --noEmit"
   },
