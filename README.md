@@ -17,9 +17,13 @@ The current `neo-meme-coins-v1` branch includes:
 - transaction imbalance and extreme volume/liquidity heuristics
 - Solana holder concentration through RPC
 - sampled fresh-wallet detection in the web app
+- **device-side funding-source forensics for sampled top-holder wallets**
+- **shared-funder cluster detection**
+- **synchronized funding-time cluster detection**
+- confidence scoring that is reduced when public RPC evidence is incomplete
 - local chart history with an early staircase-pattern heuristic
 - deterministic narrative classification
-- confidence scoring and explicit data limitations
+- explicit data limitations and false-positive warnings
 - device-local RPC settings
 - Chrome Manifest V3 extension with a compact scanner popup
 - DexScreener URL auto-detection in the extension
@@ -30,7 +34,7 @@ The current `neo-meme-coins-v1` branch includes:
 NEO is not designed as a magic BUY/SELL oracle. The engine separates:
 
 1. **Observed data** — market, liquidity, transaction and holder data.
-2. **Heuristics** — measurable but imperfect signals such as concentration or unusual flow.
+2. **Heuristics** — measurable but imperfect signals such as concentration, common funding or unusual flow.
 3. **Confidence** — how complete the available evidence is.
 4. **Posture** — whether the token should be skipped, watched, waited on, or allowed into a user's own trading setup.
 
@@ -45,7 +49,8 @@ User browser / extension
         |     market cap, liquidity, volume, txns, pair age, socials
         |
         |-- Solana JSON-RPC
-        |     supply, largest accounts, account owners, wallet history samples
+        |     supply, largest accounts, account owners
+        |     wallet signature history + sampled transactions
         |
         |-- Local browser storage
         |     RPC preference, local price history, future journal/guardrails
@@ -54,26 +59,32 @@ User browser / extension
               liquidity risk
               holder concentration
               fresh-wallet signals
+              common-funder clusters
+              synchronized funding-time clusters
               transaction imbalance
               chart heuristics
               narrative classification
               confidence + posture
 ```
 
-The default public Solana RPC is useful for alpha/testing and can be rate-limited. The product therefore supports user-provided RPC endpoints without sending those settings to an NEO backend.
+The default public Solana RPC is useful for alpha/testing and can be rate-limited or have incomplete historical transaction coverage. The product therefore supports user-provided RPC endpoints without sending those settings to an NEO backend.
+
+### Funding-forensics caveat
+
+A common funding wallet is a coordination clue, not automatic proof of a bundle or scam. Centralized exchanges, bridges, faucets and shared funding services can make unrelated wallets appear linked. NEO surfaces the evidence and confidence instead of silently treating it as proof.
 
 ## Planned analysis modules
 
 The next research/build phases include:
 
-- linked-wallet / bundle graph detection
-- funding-source and synchronized funding-time analysis
-- stronger fake-volume / fake-chart detection using historical samples
+- deeper linked-wallet / bundle graph detection beyond first-funder evidence
+- stronger fake-volume / fake-chart detection using richer historical samples
 - tracker-wallet performance with consistency scoring, not one lucky trade
 - richer narrative + catalyst analysis
 - New Pairs / Final Stretch / Migrated filtering
 - position-size and fee/slippage awareness
 - trade journal and behavioral guardrails for revenge trading, overtrading and strategy drift
+- historical validation dataset for rugs, bundles and successful launches
 - optional user-controlled wallet actions only after explicit confirmation
 
 Every heuristic must be validated against real historical tokens before becoming a strong rule.
@@ -107,4 +118,4 @@ A custom Solana RPC can be added from the extension settings. The URL is stored 
 
 ## Project status
 
-This is an **alpha research product**. Meme coins are extremely high-risk. Signals such as fresh wallets, raw top-token-account concentration, social presence and chart shape are evidence to investigate, not standalone proof of fraud or future performance.
+This is an **alpha research product**. Meme coins are extremely high-risk. Signals such as fresh wallets, raw top-token-account concentration, social presence, shared funding sources and chart shape are evidence to investigate, not standalone proof of fraud or future performance.
