@@ -20,6 +20,7 @@ The current `neo-meme-coins-v1` branch includes:
 - **device-side funding-source forensics for sampled top-holder wallets**
 - **shared-funder cluster detection**
 - **synchronized funding-time cluster detection**
+- the same shared-funder checks inside the Chrome/Chromium extension
 - confidence scoring that is reduced when public RPC evidence is incomplete
 - local chart history with an early staircase-pattern heuristic
 - deterministic narrative classification
