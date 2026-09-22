@@ -9,7 +9,7 @@ interface RpcResponse<T> {
 
 let rpcId = 1;
 
-async function rpcCall<T>(rpcUrl: string, method: string, params: unknown[]): Promise<T> {
+export async function rpcCall<T>(rpcUrl: string, method: string, params: unknown[]): Promise<T> {
   const response = await fetch(rpcUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
