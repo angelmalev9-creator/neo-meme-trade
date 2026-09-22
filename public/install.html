@@ -11,12 +11,12 @@
 </head>
 <body>
 <main>
-  <div class="brand"><div class="mark">N</div><div><strong>NEO Meme Coins</strong><div class="muted">Sentinel v0.5.1 · Fomo + Axiom + Photon</div></div></div>
+  <div class="brand"><div class="mark">N</div><div><strong>NEO Meme Coins</strong><div class="muted">Realtime Sentinel v0.6 · Fomo + Axiom + Photon</div></div></div>
   <section class="hero">
-    <div class="tag">v0.5.1 AUTONOMOUS SENTINEL</div>
-    <h1>Оставяш терминала отворен. NEO сам отсява и проверява.</h1>
-    <p>Sentinel сканира всички видими candidates, resolve-ва Fomo token-и без да иска CA, прави market precheck, автоматично пуска deep on-chain проверка на най-силните WATCH/DEEP candidates и записва 15m/60m outcomes локално, за да можеш да валидираш реално сигналите.</p>
-    <a class="download" href="/neo-meme-coins-extension.zip" download>ИЗТЕГЛИ NEO MEME COINS v0.5.1</a>
+    <div class="tag">v0.6 REALTIME SENTINEL</div>
+    <h1>Оставяш терминала отворен. NEO наблюдава без да чакаш.</h1>
+    <p>Fast market loop се обновява приблизително през 3 секунди, holder concentration през 15 секунди, а public X/project-site scanner-ът върти най-силните candidates. Deep wallet/funding анализът и 15m/60m validation работят паралелно и локално на устройството.</p>
+    <a class="download" href="/neo-meme-coins-extension.zip" download>ИЗТЕГЛИ NEO MEME COINS v0.6</a>
   </section>
 
   <div class="grid">
@@ -25,20 +25,20 @@
       <ol>
         <li>Изтегли ZIP файла и го разархивирай.</li>
         <li>Отвори <b>chrome://extensions</b> или <b>edge://extensions</b>.</li>
-        <li>Премахни старата NEO версия или замени папката.</li>
+        <li>Премахни старата NEO версия.</li>
         <li>Включи <b>Developer mode</b> и натисни <b>Load unpacked</b>.</li>
-        <li>Избери папката с <b>manifest.json</b> и refresh-ни терминала веднъж.</li>
+        <li>Избери папката с <b>manifest.json</b> и refresh-ни терминала.</li>
+        <li>v0.6 има широк read-only page access, защото трябва да отваря и прочита public project/X страници за social validation.</li>
       </ol>
     </section>
     <section class="card">
-      <h2>Какво вече проверява</h2>
+      <h2>Realtime слоеве</h2>
       <ul>
-        <li>visible token-и, price/market-cap matching и duplicate filtering;</li>
-        <li>liquidity, flow, 5m/1h momentum и suspicious ratios;</li>
-        <li>holders, fresh-wallet sample, shared funders и synchronized funding;</li>
-        <li>mint authority, freeze authority и рискови Token-2022 extensions;</li>
-        <li>narrative subcategories и public social/project footprint;</li>
-        <li>автоматичен deep queue + локална 15m/60m signal validation.</li>
+        <li>~3s: цена, liquidity, volume, buy/sell flow и краткосрочен acceleration;</li>
+        <li>~15s: top-holder concentration pulse за водещите candidates;</li>
+        <li>~45s: X/public website scan на rotation за най-интересните token-и;</li>
+        <li>автоматично: holders, fresh wallets, shared funders, funding time и mint controls;</li>
+        <li>локално: 15m/60m проверка дали предишните outlook-и реално са се потвърдили.</li>
       </ul>
     </section>
   </div>
@@ -49,7 +49,7 @@
     <a href="https://axiom.trade/" target="_blank" rel="noreferrer">Отвори Axiom</a>
   </div>
 
-  <div class="warn">PRE-RISK е само бърз market triage. Финалният Risk идва след on-chain evidence. Public Solana RPC има rate limits, затова deep checks вървят последователно. NEO не иска seed phrase/private key, не изпълнява сделки и не може да гарантира бъдещо движение.</div>
+  <div class="warn">Realtime не означава безкрайни RPC заявки. Fast market flow е отделен от по-тежкия on-chain анализ, защото public Solana RPC е rate-limited и официално не е предназначен за production-heavy workloads. Social scanner-ът само чете/скролва public project страници; не отваря DMs, не публикува, не харесва и не взаимодейства с wallet-а.</div>
 </main>
 </body>
 </html>
