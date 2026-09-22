@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "NEO Meme Coins",
-  "version": "0.7.0",
-  "description": "Autonomous multichain realtime crypto Sentinel for Fomo, Axiom and Photon: Solana, Robinhood Chain, Base, Ethereum, BNB Chain and Monad discovery, market radar, automatic deep analysis, social observation and local validation.",
+  "version": "0.8.0",
+  "description": "Autonomous realtime crypto Sentinel for Fomo, Axiom and Photon with main-world network/WebSocket token discovery, multichain market radar, automatic deep analysis, social observation and local validation.",
   "permissions": ["storage", "activeTab", "scripting", "tabs"],
   "host_permissions": [
     "https://api.dexscreener.com/*",
@@ -11,7 +11,7 @@
     "https://*/*"
   ],
   "background": {
-    "service_worker": "background-main-v2.js",
+    "service_worker": "background-main-v3.js",
     "type": "module"
   },
   "content_scripts": [
@@ -24,8 +24,21 @@
         "https://axiom.trade/*",
         "https://backup.axiom.trade/*"
       ],
-      "js": ["sentinel-v3.js"],
-      "run_at": "document_idle"
+      "js": ["page-tap-v08.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://fomo.family/*",
+        "https://*.fomo.family/*",
+        "https://photon-sol.tinyastro.io/*",
+        "https://photon.tinyastro.io/*",
+        "https://axiom.trade/*",
+        "https://backup.axiom.trade/*"
+      ],
+      "js": ["sentinel-v4.js"],
+      "run_at": "document_start"
     }
   ],
   "action": {
