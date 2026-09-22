@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "check:extension": "node --check extension/page-tap-v08.js && node --check extension/sentinel-v4.js && node --check extension/multichain-bg-v2.js && node --check extension/background-main-v3.js && node --check extension/realtime-bg.js && node --check extension/engine-v2.js && node --check extension/popup.js",
+    "check:extension": "node --check extension/page-tap-v081.js && node --check extension/sentinel-v5.js && node --check extension/resolver-v081.js && node --check extension/background-main-v4.js && node --check extension/realtime-bg.js && node --check extension/engine-v2.js && node --check extension/popup.js",
     "build": "npm run check:extension && vite build && node scripts/package-extension.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "lint": "tsc --noEmit"
