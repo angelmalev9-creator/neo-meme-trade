@@ -12,15 +12,15 @@
         <div class="brand-mark">N</div>
         <div>
           <div class="brand">NEO Meme Coins</div>
-          <div class="sub">Multichain Realtime Sentinel</div>
+          <div class="sub">Terminal-feed Realtime Sentinel</div>
         </div>
-        <span class="alpha">v0.7</span>
+        <span class="alpha">v0.8</span>
       </header>
 
       <section class="auto-card">
         <div class="live-row"><span class="dot"></span><span>SENTINEL ACTIVE</span></div>
-        <h1>NEO следи пазара постоянно.</h1>
-        <p id="statusText">Стартирам multichain discovery и realtime анализ.</p>
+        <h1>NEO слуша самия terminal feed.</h1>
+        <p id="statusText">Стартирам network/WebSocket discovery + multichain realtime анализ.</p>
         <div class="terminal-row"><span>Терминал</span><strong id="terminalName">—</strong></div>
         <div class="terminal-row"><span>Radar</span><strong id="currentCoin">Чакам данни…</strong></div>
         <button id="rescanBtn">ОБНОВИ SENTINEL</button>
@@ -37,8 +37,8 @@
       </section>
 
       <section class="how-card">
-        <div class="eyebrow">КАК РАБОТИ v0.7</div>
-        <p>NEO търси token-и по contract address, име, symbol, market cap и page context. Следи Solana, Robinhood Chain, Base, Ethereum, BNB Chain и Monad, обновява market flow през няколко секунди и пуска automatic deep analysis.</p>
+        <div class="eyebrow">КАК РАБОТИ v0.8</div>
+        <p>NEO вече не разчита само на видимия HTML. Чете публичните network/WebSocket отговори, които самият Fomo/Axiom/Photon получава, извлича token contract-и и market context, валидира ги и ги следи в realtime.</p>
       </section>
 
       <details class="settings">
@@ -46,7 +46,7 @@
         <label for="rpcInput">Custom Solana RPC URL</label>
         <input id="rpcInput" type="url" placeholder="https://..." />
         <button id="saveRpcBtn" class="secondary">ЗАПАЗИ ЛОКАЛНО</button>
-        <p>Custom RPC се използва само за Solana holder/funding deep checks. Останалите market scans не изискват платен owner API.</p>
+        <p>Не е задължително. Custom RPC се използва само за Solana holder/funding deep checks.</p>
       </details>
 
       <footer>NEO не чете seed/private keys и не изпълнява сделки. Risk/Outlook са анализ на налични данни, не гаранция.</footer>
