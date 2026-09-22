@@ -35,11 +35,11 @@ async function sendToSentinel(message, allowRepair = true) {
   } catch (error) {
     if (!allowRepair || repairingConnection) throw error;
     repairingConnection = true;
-    statusText.textContent = 'NEO активира Sentinel v0.5 върху текущия terminal…';
+    statusText.textContent = 'NEO активира realtime Sentinel v0.6 върху текущия terminal…';
     clearError();
     try {
-      await chrome.scripting.executeScript({ target: { tabId: activeTabId }, files: ['fomo-discovery.js', 'sentinel-v2.js'] });
-      await sleep(600);
+      await chrome.scripting.executeScript({ target: { tabId: activeTabId }, files: ['fomo-discovery.js', 'sentinel-v2.js', 'realtime-layer.js'] });
+      await sleep(700);
       return await chrome.tabs.sendMessage(activeTabId, message);
     } finally { repairingConnection = false; }
   }
@@ -56,9 +56,9 @@ function renderStatus(response) {
   const queue = Number(response.queue || 0);
   const v15 = response.validation?.m15;
   const validationText = v15?.total ? ` · 15m validation ${v15.correct}/${v15.total}` : '';
-  if (response.deepScanning) statusText.textContent = `Deep holder/funding анализ върви. Radar продължава паралелно${queue ? ` · queue ${queue}` : ''}${validationText}.`;
+  if (response.deepScanning) statusText.textContent = `Deep holder/funding анализ върви. 3s market engine продължава паралелно${queue ? ` · queue ${queue}` : ''}${validationText}.`;
   else if (response.radarScanning) statusText.textContent = `NEO преоценява market flow, liquidity и candidates${validationText}.`;
-  else if (response.observedCount > 0) statusText.textContent = `Sentinel следи целия екран и автоматично deep-check-ва най-силните WATCH candidates${queue ? ` · queue ${queue}` : ''}${validationText}.`;
+  else if (response.observedCount > 0) statusText.textContent = `Realtime Sentinel следи market flow през ~3s, holder pulse и автоматични deep checks${queue ? ` · queue ${queue}` : ''}${validationText}.`;
   else statusText.textContent = 'Sentinel е активен. Търси CA директно или resolve-ва Fomo token name/symbol + market cap.';
 
   if (response.result) {
