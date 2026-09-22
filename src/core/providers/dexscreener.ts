@@ -41,9 +41,16 @@ export async function fetchSolanaTokenMarket(tokenAddress: string): Promise<Mark
       ? payload.pairs
       : [];
 
-  const solanaPairs = pairs.filter((pair) => pair?.chainId === 'solana');
+  // DEX Screener pair fields (price, cap, txns, metadata) are expressed from the
+  // base-token perspective. Never mix a quote-side pair with holder data for the
+  // requested mint; only score pairs where the requested token is the base asset.
+  const requestedAddress = tokenAddress.trim();
+  const solanaPairs = pairs.filter(
+    (pair) => pair?.chainId === 'solana' && pair?.baseToken?.address === requestedAddress,
+  );
+
   if (!solanaPairs.length) {
-    throw new Error('No active Solana liquidity pair was found for this token.');
+    throw new Error('No active Solana pair with this mint as the base token was found. Quote-side pairs are ignored to avoid mixing market data from another asset.');
   }
 
   const best = [...solanaPairs].sort(
