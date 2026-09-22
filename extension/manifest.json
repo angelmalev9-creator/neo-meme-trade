@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "NEO Meme Coins",
-  "version": "0.8.0",
-  "description": "Autonomous realtime crypto Sentinel for Fomo, Axiom and Photon with main-world network/WebSocket token discovery, multichain market radar, automatic deep analysis, social observation and local validation.",
+  "version": "0.8.1",
+  "description": "Autonomous realtime crypto Sentinel for Fomo, Axiom and Photon with resilient main-world feed extraction, multichain token resolution, market radar, automatic deep analysis, social observation and local validation.",
   "permissions": ["storage", "activeTab", "scripting", "tabs"],
   "host_permissions": [
     "https://api.dexscreener.com/*",
@@ -11,7 +11,7 @@
     "https://*/*"
   ],
   "background": {
-    "service_worker": "background-main-v3.js",
+    "service_worker": "background-main-v4.js",
     "type": "module"
   },
   "content_scripts": [
@@ -24,7 +24,7 @@
         "https://axiom.trade/*",
         "https://backup.axiom.trade/*"
       ],
-      "js": ["page-tap-v08.js"],
+      "js": ["page-tap-v081.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
@@ -37,7 +37,7 @@
         "https://axiom.trade/*",
         "https://backup.axiom.trade/*"
       ],
-      "js": ["sentinel-v4.js"],
+      "js": ["sentinel-v5.js"],
       "run_at": "document_start"
     }
   ],
