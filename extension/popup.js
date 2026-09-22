@@ -19,11 +19,11 @@ function terminalFromUrl(raw){ try{ const h=new URL(raw).hostname.toLowerCase();
 async function send(message,repair=true){
   if(!activeTabId)throw new Error('Няма активен terminal tab.');
   try{return await chrome.tabs.sendMessage(activeTabId,message);}catch(error){
-    if(!repair||repairingConnection)throw error; repairingConnection=true; statusText.textContent='Активирам Sentinel v0.8.1…';
+    if(!repair||repairingConnection)throw error; repairingConnection=true; statusText.textContent='Активирам Sentinel v0.9…';
     try{
       await chrome.scripting.executeScript({target:{tabId:activeTabId},files:['page-tap-v081.js'],world:'MAIN'});
-      await chrome.scripting.executeScript({target:{tabId:activeTabId},files:['sentinel-v5.js']});
-      await sleep(850);
+      await chrome.scripting.executeScript({target:{tabId:activeTabId},files:['visual-label-discovery-v09.js','sentinel-v5.js']});
+      await sleep(900);
       return await chrome.tabs.sendMessage(activeTabId,message);
     }finally{repairingConnection=false;}
   }
@@ -35,8 +35,8 @@ function render(r){
   const feedText=d.feed?` · feed ${d.feed}/${d.feedStructured||0} structured`:'';
   if(r.deepScanning)statusText.textContent=`Deep анализът върви; realtime market scan продължава${feedText}.`;
   else if(r.radarScanning)statusText.textContent=`NEO обновява market flow и liquidity${feedText}.`;
-  else if((r.observedCount||0)>0)statusText.textContent=`Sentinel v0.8.1 е активен · ${r.observedCount} resolved${feedText}.`;
-  else statusText.textContent=`Слушам terminal network/WebSocket feed + DOM${feedText}.`;
+  else if((r.observedCount||0)>0)statusText.textContent=`Sentinel v0.9 е активен · ${r.observedCount} resolved${feedText}.`;
+  else statusText.textContent=`Слушам terminal feed + visual DOM discovery${feedText}.`;
   if(r.result){resultBox.classList.remove('hidden');postureEl.textContent=r.result.posture||'—';tokenNameEl.textContent=`${r.result.name||'Token'}${r.result.symbol?` · $${r.result.symbol}`:''}`;riskEl.textContent=`${r.result.risk??'-'}/100`;confidenceEl.textContent=`${r.result.confidence??'-'}%`;postureEl.className=`posture ${String(r.result.posture||'').toLowerCase()}`;}else resultBox.classList.add('hidden');
 }
 async function readStatus(){
