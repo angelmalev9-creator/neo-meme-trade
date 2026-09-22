@@ -1,21 +1,22 @@
-const tokenInput = document.getElementById('tokenInput');
-const scanBtn = document.getElementById('scanBtn');
+const statusText = document.getElementById('statusText');
+const terminalName = document.getElementById('terminalName');
+const currentCoin = document.getElementById('currentCoin');
+const rescanBtn = document.getElementById('rescanBtn');
 const errorBox = document.getElementById('error');
 const resultBox = document.getElementById('result');
-const decisionBox = document.getElementById('decision');
 const postureEl = document.getElementById('posture');
 const tokenNameEl = document.getElementById('tokenName');
 const riskEl = document.getElementById('risk');
-const liqRatioEl = document.getElementById('liqRatio');
-const top5El = document.getElementById('top5');
-const signalsEl = document.getElementById('signals');
-const holderWarningEl = document.getElementById('holderWarning');
+const confidenceEl = document.getElementById('confidence');
 const rpcInput = document.getElementById('rpcInput');
 const saveRpcBtn = document.getElementById('saveRpcBtn');
-const outlookEl = document.getElementById('outlook');
-const outlookScoreEl = document.getElementById('outlookScore');
-const outlookNoteEl = document.getElementById('outlookNote');
-const socialsEl = document.getElementById('socials');
+
+let activeTabId = null;
+
+function short(value, size = 5) {
+  const text = String(value || '');
+  return text.length > size * 2 + 2 ? `${text.slice(0, size)}…${text.slice(-size)}` : text;
+}
 
 function showError(message) {
   errorBox.textContent = message;
@@ -27,93 +28,88 @@ function clearError() {
   errorBox.classList.add('hidden');
 }
 
-function setLoading(loading) {
-  scanBtn.disabled = loading;
-  scanBtn.textContent = loading ? 'АНАЛИЗИРАМ…' : 'АНАЛИЗИРАЙ';
+function terminalFromUrl(rawUrl) {
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase();
+    if (host === 'fomo.family' || host.endsWith('.fomo.family')) return 'FOMO';
+    if (host.includes('axiom.trade')) return 'AXIOM';
+    if (host.includes('tinyastro.io')) return 'PHOTON';
+  } catch {
+    // Ignore invalid URL.
+  }
+  return null;
 }
 
-function renderResult(result) {
-  resultBox.classList.remove('hidden');
-  postureEl.textContent = result.posture;
-  tokenNameEl.textContent = `${result.market.name} · $${result.market.symbol} · confidence ${result.confidence ?? 0}%`;
-  riskEl.textContent = `${result.risk}/100`;
-  liqRatioEl.textContent = `${result.liquidityRatio.toFixed(result.liquidityRatio >= 10 ? 1 : 2)}%`;
-  top5El.textContent = result.holders ? `${result.holders.top5Pct.toFixed(1)}%` : 'N/A';
-  decisionBox.className = `decision ${String(result.posture || '').toLowerCase()}`;
+function renderStatus(response) {
+  if (!response?.ok) return;
 
-  outlookEl.textContent = result.outlook?.label || 'MIXED';
-  outlookScoreEl.textContent = `${result.outlook?.score ?? 50}/100`;
-  outlookNoteEl.textContent = `${result.outlook?.horizon || '15–60m evidence window'} · ${result.outlook?.note || ''}`;
+  terminalName.textContent = response.source || '—';
+  currentCoin.textContent = response.token ? short(response.token) : 'Чакам coin…';
 
-  socialsEl.innerHTML = '';
-  for (const item of (result.social?.links || []).slice(0, 8)) {
-    const link = document.createElement('a');
-    link.className = 'social-link';
-    link.href = item.url;
-    link.target = '_blank';
-    link.rel = 'noreferrer';
-    link.textContent = item.type;
-    socialsEl.appendChild(link);
-  }
-  if (!socialsEl.children.length) {
-    const empty = document.createElement('span');
-    empty.className = 'social-empty';
-    empty.textContent = 'Няма намерени социални/project линкове.';
-    socialsEl.appendChild(empty);
-  }
-
-  signalsEl.innerHTML = '';
-  for (const signal of result.signals || []) {
-    const row = document.createElement('div');
-    const className = signal.severity === 'warning' ? 'warning-signal' : signal.severity;
-    row.className = `signal ${className}`;
-
-    const top = document.createElement('div');
-    top.className = 'signal-top';
-    const title = document.createElement('strong');
-    title.textContent = signal.label;
-    const points = document.createElement('span');
-    points.className = 'points';
-    points.textContent = `${signal.points > 0 ? '+' : ''}${signal.points}`;
-    top.append(title, points);
-
-    const detail = document.createElement('p');
-    detail.textContent = signal.detail;
-    row.append(top, detail);
-    signalsEl.appendChild(row);
-  }
-
-  if (result.holderError) {
-    holderWarningEl.textContent = `Holder/RPC scan е непълен: ${result.holderError}. SETUP е блокиран при недостатъчно evidence.`;
-    holderWarningEl.classList.remove('hidden');
+  if (response.scanning) {
+    statusText.textContent = 'NEO засече coin и в момента го анализира автоматично.';
+  } else if (response.result) {
+    statusText.textContent = 'AUTO WATCH е активен. При смяна на coin ще стартира нов анализ.';
   } else {
-    holderWarningEl.classList.add('hidden');
+    statusText.textContent = 'AUTO WATCH е активен. Отвори coin в терминала — не е нужно да копираш CA.';
+  }
+
+  if (response.result) {
+    resultBox.classList.remove('hidden');
+    postureEl.textContent = response.result.posture || '—';
+    tokenNameEl.textContent = `${response.result.name || 'Token'}${response.result.symbol ? ` · $${response.result.symbol}` : ''}`;
+    riskEl.textContent = `${response.result.risk ?? '-'}/100`;
+    confidenceEl.textContent = `${response.result.confidence ?? '-'}%`;
+    postureEl.className = `posture ${String(response.result.posture || '').toLowerCase()}`;
+  } else {
+    resultBox.classList.add('hidden');
   }
 }
 
-async function scan() {
-  const input = tokenInput.value.trim();
-  if (!input) {
-    showError('Постави Solana token address или DexScreener URL.');
+async function readStatus() {
+  clearError();
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  activeTabId = tab?.id ?? null;
+  const terminal = terminalFromUrl(tab?.url || '');
+
+  if (!terminal || !activeTabId) {
+    terminalName.textContent = 'НЕПОДДЪРЖАН TAB';
+    currentCoin.textContent = '—';
+    statusText.textContent = 'Отвори Fomo, Axiom или Photon. Там NEO работи автоматично.';
+    resultBox.classList.add('hidden');
     return;
   }
 
-  clearError();
-  setLoading(true);
+  terminalName.textContent = terminal;
+
   try {
-    const response = await chrome.runtime.sendMessage({ type: 'NEO_ANALYZE', input });
-    if (!response?.ok) throw new Error(response?.error || 'Unknown scan error');
-    renderResult(response.result);
-  } catch (error) {
-    showError(error instanceof Error ? error.message : String(error));
-  } finally {
-    setLoading(false);
+    const response = await chrome.tabs.sendMessage(activeTabId, { type: 'NEO_STATUS' });
+    renderStatus(response);
+  } catch {
+    statusText.textContent = 'Терминалът е отворен, но тази страница още няма зареден NEO content script.';
+    showError('Refresh-ни Fomo/Axiom/Photon веднъж след обновяването на extension-а.');
   }
 }
 
-scanBtn.addEventListener('click', scan);
-tokenInput.addEventListener('keydown', (event) => {
-  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') scan();
+rescanBtn.addEventListener('click', async () => {
+  clearError();
+  rescanBtn.disabled = true;
+  rescanBtn.textContent = 'ПРОВЕРЯВАМ…';
+  try {
+    if (!activeTabId) await readStatus();
+    if (!activeTabId) return;
+    await chrome.tabs.sendMessage(activeTabId, { type: 'NEO_RESCAN' });
+    statusText.textContent = 'Преглеждам текущия екран за coin…';
+    setTimeout(readStatus, 900);
+    setTimeout(readStatus, 2600);
+  } catch (error) {
+    showError(error instanceof Error ? error.message : String(error));
+  } finally {
+    setTimeout(() => {
+      rescanBtn.disabled = false;
+      rescanBtn.textContent = 'ПРОВЕРИ ТЕКУЩИЯ ЕКРАН';
+    }, 900);
+  }
 });
 
 saveRpcBtn.addEventListener('click', async () => {
@@ -148,11 +144,6 @@ saveRpcBtn.addEventListener('click', async () => {
   } catch {
     rpcInput.value = '';
   }
-
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.url?.includes('dexscreener.com/solana/')) tokenInput.value = tab.url;
-  } catch {
-    // Manual paste always remains available.
-  }
+  await readStatus();
+  setTimeout(readStatus, 1200);
 })();
