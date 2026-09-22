@@ -12,6 +12,11 @@ const rpcInput = document.getElementById('rpcInput');
 const saveRpcBtn = document.getElementById('saveRpcBtn');
 
 let activeTabId = null;
+let repairingConnection = false;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function showError(message) {
   errorBox.textContent = message;
@@ -33,6 +38,31 @@ function terminalFromUrl(rawUrl) {
     // Ignore invalid URL.
   }
   return null;
+}
+
+async function sendToSentinel(message, allowRepair = true) {
+  if (!activeTabId) throw new Error('Няма активен terminal tab.');
+
+  try {
+    return await chrome.tabs.sendMessage(activeTabId, message);
+  } catch (error) {
+    if (!allowRepair || repairingConnection) throw error;
+
+    repairingConnection = true;
+    statusText.textContent = 'NEO активира Sentinel върху текущия terminal…';
+    clearError();
+
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: activeTabId },
+        files: ['content.js'],
+      });
+      await sleep(350);
+      return await chrome.tabs.sendMessage(activeTabId, message);
+    } finally {
+      repairingConnection = false;
+    }
+  }
 }
 
 function renderStatus(response) {
@@ -83,11 +113,11 @@ async function readStatus() {
   terminalName.textContent = terminal;
 
   try {
-    const response = await chrome.tabs.sendMessage(activeTabId, { type: 'NEO_STATUS' });
+    const response = await sendToSentinel({ type: 'NEO_STATUS' }, true);
     renderStatus(response);
-  } catch {
-    statusText.textContent = 'Терминалът е отворен, но content script-ът още не е зареден.';
-    showError('Refresh-ни Fomo/Axiom/Photon веднъж след обновяването на extension-а.');
+  } catch (error) {
+    statusText.textContent = 'Не успях да стартирам Sentinel върху този tab.';
+    showError(error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -98,7 +128,7 @@ rescanBtn.addEventListener('click', async () => {
   try {
     if (!activeTabId) await readStatus();
     if (!activeTabId) return;
-    await chrome.tabs.sendMessage(activeTabId, { type: 'NEO_RESCAN' });
+    await sendToSentinel({ type: 'NEO_RESCAN' }, true);
     statusText.textContent = 'Sentinel прави нов page-wide scan…';
     setTimeout(readStatus, 900);
     setTimeout(readStatus, 2600);
