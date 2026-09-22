@@ -55,9 +55,9 @@ async function sendToSentinel(message, allowRepair = true) {
     try {
       await chrome.scripting.executeScript({
         target: { tabId: activeTabId },
-        files: ['content.js'],
+        files: ['fomo-discovery.js', 'content.js'],
       });
-      await sleep(350);
+      await sleep(500);
       return await chrome.tabs.sendMessage(activeTabId, message);
     } finally {
       repairingConnection = false;
@@ -79,9 +79,9 @@ function renderStatus(response) {
   } else if (response.radarScanning) {
     statusText.textContent = 'NEO в момента преоценява видимите token-и и market flow.';
   } else if (response.observedCount > 0) {
-    statusText.textContent = 'Sentinel е активен: следи feed/cards/swaps и сам избира кои token-и заслужават deep check.';
+    statusText.textContent = 'Sentinel е активен: следи visible coins, market caps, routes/swaps и сам избира кои заслужават deep check.';
   } else {
-    statusText.textContent = 'Sentinel е активен и чака terminal-ът да покаже разпознаваеми Solana token addresses.';
+    statusText.textContent = 'Sentinel е активен. На Fomo вече търси и по видим token name/symbol + market cap, дори когато CA не е в DOM.';
   }
 
   if (response.result) {
