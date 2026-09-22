@@ -5,6 +5,7 @@ import type {
   NarrativeSnapshot,
   RiskAssessment,
   TradePosture,
+  WalletForensicsSnapshot,
 } from './types';
 import { detectSuspiciousStaircase } from './localHistory';
 import type { LocalPricePoint } from './types';
@@ -27,11 +28,19 @@ function money(value: number): string {
 export function scoreToken(input: {
   market: MarketSnapshot;
   holders?: HolderSnapshot;
+  forensics?: WalletForensicsSnapshot;
   narrative: NarrativeSnapshot;
   priceHistory?: LocalPricePoint[];
   dataWarnings?: string[];
 }): RiskAssessment {
-  const { market, holders, narrative, priceHistory = [], dataWarnings = [] } = input;
+  const {
+    market,
+    holders,
+    forensics,
+    narrative,
+    priceHistory = [],
+    dataWarnings = [],
+  } = input;
   const signals: AnalysisSignal[] = [];
 
   const push = (signal: AnalysisSignal) => signals.push(signal);
@@ -243,6 +252,65 @@ export function scoreToken(input: {
     dataWarnings.push('Holder data was not available. Risk confidence is reduced.');
   }
 
+  if (forensics) {
+    confidence += Math.round((forensics.confidence / 100) * 12);
+
+    const biggestFundingCluster = forensics.commonFundingClusters[0];
+    if (biggestFundingCluster) {
+      if (biggestFundingCluster.wallets.length >= 3) {
+        push({
+          id: 'common-funder-critical',
+          title: 'Multiple top wallets share one funding source',
+          detail: `${biggestFundingCluster.wallets.length} sampled holder wallets were first funded by the same visible source and together represent about ${pct(biggestFundingCluster.holderSupplyPct)} of supply. This is a strong coordination clue, but exchange/bridge funding can create false positives.`,
+          severity: 'critical',
+          riskPoints: 22,
+          confidence: Math.max(60, forensics.confidence),
+        });
+      } else {
+        push({
+          id: 'common-funder-warning',
+          title: 'Two top wallets share a funding source',
+          detail: `Two sampled holder wallets share the same visible funding source and represent about ${pct(biggestFundingCluster.holderSupplyPct)} of supply. Verify whether the source is an exchange, bridge or private funder.`,
+          severity: 'warning',
+          riskPoints: 9,
+          confidence: Math.max(55, forensics.confidence),
+        });
+      }
+    } else if (forensics.walletsWithFundingEvidence >= 3) {
+      push({
+        id: 'common-funder-clear',
+        title: 'No common funder found in the sampled wallets',
+        detail: `${forensics.walletsWithFundingEvidence} wallets had usable first-funding evidence and no shared source cluster was found.`,
+        severity: 'positive',
+        riskPoints: -3,
+        confidence: forensics.confidence,
+      });
+    }
+
+    const biggestTimeCluster = forensics.synchronizedFundingClusters[0];
+    if (biggestTimeCluster && biggestTimeCluster.wallets.length >= 3) {
+      push({
+        id: 'funding-time-cluster',
+        title: 'Synchronized wallet funding detected',
+        detail: `${biggestTimeCluster.wallets.length} sampled wallets were funded within ${biggestTimeCluster.spreadMinutes.toFixed(1)} minutes and together represent about ${pct(biggestTimeCluster.holderSupplyPct)} of supply. Time correlation alone is not proof of common control.`,
+        severity: 'warning',
+        riskPoints: 14,
+        confidence: Math.max(55, forensics.confidence - 5),
+      });
+    }
+
+    if (forensics.linkedWalletPct >= 50 && forensics.commonFundingClusters.length > 0) {
+      push({
+        id: 'linked-wallet-share',
+        title: 'Large part of the sample is funding-linked',
+        detail: `${pct(forensics.linkedWalletPct)} of sampled wallets are in a shared-funder cluster, representing roughly ${pct(forensics.linkedHolderSupplyPct)} of token supply.`,
+        severity: forensics.linkedWalletPct >= 70 ? 'critical' : 'warning',
+        riskPoints: forensics.linkedWalletPct >= 70 ? 12 : 7,
+        confidence: forensics.confidence,
+      });
+    }
+  }
+
   const chartPattern = detectSuspiciousStaircase(priceHistory);
   if (chartPattern.suspicious) {
     push({
@@ -325,6 +393,7 @@ export function scoreToken(input: {
     generatedAt: Date.now(),
     market,
     holders,
+    forensics,
     narrative,
     riskScore: risk,
     qualityScore,
