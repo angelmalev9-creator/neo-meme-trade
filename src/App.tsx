@@ -33,6 +33,7 @@ import {
 
 const SETTINGS_KEY = 'neo-meme-coins-settings-v1';
 const FOMO_MONITOR_URL = 'https://neo-meme-api.169-58-211-177.sslip.io';
+const FOMO_VNC_URL = `${FOMO_MONITOR_URL}/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify`;
 
 type BackendCandidate = {
   url: string;
@@ -191,6 +192,7 @@ export default function App() {
   const [settings, setSettings] = useState<DeviceSettings>(DEFAULT_DEVICE_SETTINGS);
   const [fomoMonitor, setFomoMonitor] = useState<FomoMonitorState | null>(null);
   const [fomoMonitorError, setFomoMonitorError] = useState('');
+  const [fomoLoginOpen, setFomoLoginOpen] = useState(false);
 
   useEffect(() => {
     try {
@@ -584,9 +586,10 @@ export default function App() {
                 <div className="rounded-xl border border-white/[0.07] bg-black/20 p-3"><div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">Win rate</div><div className="mt-1 text-lg font-black text-white">{fomoMonitor?.history.length ? `${fomoWinRate.toFixed(0)}%` : '—'}</div></div>
               </div>
               <div className="mt-3 rounded-xl border border-white/[0.07] bg-white/[0.02] p-3 text-[10px] leading-4 text-slate-500">Python + Chromium на VPS · browser DOM monitoring · без extension · без външен market API · само симулация</div>
-              {fomoMonitor?.login_required && <div className="mt-3 rounded-xl border border-amber-400/20 bg-amber-400/[0.06] p-3 text-[10px] leading-4 text-amber-100/80">Нужен е еднократен login във Fomo backend browser session. След него monitor-ът остава логнат и работи 24/7.</div>}
+              {fomoMonitor?.login_required && <div className="mt-3 rounded-xl border border-amber-400/20 bg-amber-400/[0.06] p-3 text-[10px] leading-4 text-amber-100/80">Влез директно във Fomo от бутона отдолу. Login-ът се пази в persistent browser-а на VPS и после monitor-ът работи 24/7.</div>}
               {fomoMonitorError && <div className="mt-3 rounded-xl border border-red-500/20 bg-red-500/[0.06] p-3 text-[10px] leading-4 text-red-200">{fomoMonitorError}</div>}
-              <button onClick={() => controlFomoMonitor(fomoMonitor?.running ? 'stop' : 'start')} disabled={!fomoMonitor || fomoMonitor.login_required} className={`mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-xl text-xs font-black transition disabled:cursor-not-allowed disabled:opacity-45 ${fomoMonitor?.running ? 'border border-red-400/20 bg-red-500/10 text-red-200' : 'bg-emerald-400 text-[#06100c]'}`}><Zap className="h-4 w-4" /> {fomoMonitor?.running ? 'STOP MONITOR' : 'START MONITOR'}</button>
+              <button onClick={() => setFomoLoginOpen(true)} className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-400 text-xs font-black text-[#06100c] transition hover:bg-emerald-300"><ExternalLink className="h-4 w-4" /> {fomoMonitor?.login_required ? 'ВХОД ВЪВ FOMO' : 'ОТВОРИ FOMO LIVE'}</button>
+              <button onClick={() => controlFomoMonitor(fomoMonitor?.running ? 'stop' : 'start')} disabled={!fomoMonitor || fomoMonitor.login_required} className={`mt-2 flex h-10 w-full items-center justify-center gap-2 rounded-xl text-xs font-black transition disabled:cursor-not-allowed disabled:opacity-45 ${fomoMonitor?.running ? 'border border-red-400/20 bg-red-500/10 text-red-200' : 'bg-emerald-400 text-[#06100c]'}`}><Zap className="h-4 w-4" /> {fomoMonitor?.running ? 'STOP MONITOR' : 'START MONITOR'}</button>
               <button onClick={() => controlFomoMonitor('rescan')} disabled={!fomoMonitor || fomoMonitor.login_required} className="mt-2 flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] text-[10px] font-black text-white disabled:opacity-40"><RefreshCw className="h-3.5 w-3.5" /> FORCE SCAN</button>
               <div className="mt-3 text-[10px] leading-4 text-slate-500">{fomoMonitor?.message || 'Connecting to backend monitor…'}</div>
               {(fomoMonitor?.positions.length || 0) > 0 && <div className="mt-4 space-y-2 border-t border-white/[0.07] pt-4">{fomoMonitor?.positions.map((position) => { const pnlPct = position.pnl_pct ?? (position.entry_price > 0 ? ((position.current_price - position.entry_price) / position.entry_price) * 100 : 0); return <div key={position.id} className="rounded-xl border border-white/[0.07] bg-black/20 p-3"><div className="flex items-center justify-between gap-2"><div><div className="text-xs font-black text-white">${position.symbol}</div><div className="mt-0.5 text-[9px] text-slate-600">start ${position.entry_price.toPrecision(6)} · score {position.score.toFixed(0)}</div></div><div className={`text-xs font-black ${pnlPct >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%</div></div></div>; })}</div>}
@@ -635,6 +638,25 @@ export default function App() {
           </div>
         </footer>
       </main>
+
+      {fomoLoginOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-2 backdrop-blur-sm sm:p-5">
+          <div className="flex h-[94vh] w-full max-w-[1500px] flex-col overflow-hidden rounded-2xl border border-emerald-400/25 bg-[#07090b] shadow-2xl shadow-black">
+            <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+              <div>
+                <div className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-300">Persistent VPS browser</div>
+                <div className="mt-0.5 text-sm font-black text-white">Fomo Live Login & Monitoring</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => { controlFomoMonitor('rescan'); setFomoLoginOpen(false); }} className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-[10px] font-black text-emerald-200">ГОТОВО — ПРОВЕРИ LOGIN</button>
+                <button onClick={() => setFomoLoginOpen(false)} className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-white"><XCircle className="h-4 w-4" /></button>
+              </div>
+            </div>
+            <div className="border-b border-white/[0.07] bg-amber-400/[0.05] px-4 py-2 text-[10px] leading-4 text-amber-100/70">Първо отключи remote browser-а с monitor access кода, после се логни във Fomo нормално. Fomo паролата не се въвежда в NEO — пишеш я директно в отдалечения Chromium.</div>
+            <iframe title="Fomo persistent browser" src={FOMO_VNC_URL} className="min-h-0 flex-1 border-0 bg-black" allow="clipboard-read; clipboard-write" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
