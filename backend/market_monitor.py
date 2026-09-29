@@ -10,6 +10,7 @@ HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
 SCAN_SECONDS = int(os.getenv('NEO_SCAN_SECONDS', '15'))
 STATE_PATH = Path(os.getenv('NEO_MARKET_STATE_PATH', '/var/lib/neo-market/state.json'))
+AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.jsonl'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
 ENTRY_SCORE = 75.0
@@ -65,6 +66,11 @@ class State:
         self.events: list[dict[str, Any]] = []
         self.price_history: dict[str, list[dict[str, Any]]] = {}
         self.source_status = {'dexscreener': 'starting'}
+        self.demo_starting_balance_usd = STARTING_BALANCE_USD
+        self.demo_balance_usd = STARTING_BALANCE_USD
+        self.demo_started_at = now_ms()
+        self.demo_session_id = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
+        self.trade_seq = 0
         self.load()
 
     def load(self) -> None:
@@ -75,6 +81,11 @@ class State:
             self.positions = data.get('positions', [])[-20:]
             self.history = data.get('history', [])[-300:]
             self.events = data.get('events', [])[-100:]
+            self.demo_starting_balance_usd = num(data.get('demo_starting_balance_usd'), STARTING_BALANCE_USD)
+            self.demo_balance_usd = num(data.get('demo_balance_usd'), self.demo_starting_balance_usd)
+            self.demo_started_at = int(data.get('demo_started_at') or self.demo_started_at)
+            self.demo_session_id = str(data.get('demo_session_id') or self.demo_session_id)
+            self.trade_seq = int(data.get('trade_seq') or 0)
             raw = data.get('price_history', {})
             if isinstance(raw, dict):
                 self.price_history = {k: v[-480:] for k, v in raw.items() if isinstance(v, list)}
@@ -85,11 +96,17 @@ class State:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         keep = {c.get('address') for c in self.feed[:50]}
         keep |= {p.get('address') for p in self.positions}
+        keep |= {t.get('address') for t in self.history[:100]}
         price_history = {k: v[-480:] for k, v in self.price_history.items() if k in keep}
         STATE_PATH.write_text(json.dumps({
             'positions': self.positions[-20:],
             'history': self.history[-300:],
             'events': self.events[-100:],
+            'demo_starting_balance_usd': self.demo_starting_balance_usd,
+            'demo_balance_usd': self.demo_balance_usd,
+            'demo_started_at': self.demo_started_at,
+            'demo_session_id': self.demo_session_id,
+            'trade_seq': self.trade_seq,
             'price_history': price_history,
         }, ensure_ascii=False))
 
@@ -97,6 +114,18 @@ class State:
         self.events.insert(0, {'ts': now_ms(), 'text': text[:500]})
         self.events = self.events[:100]
         self.message = text[:500]
+
+    def reserved_usd(self) -> float:
+        return sum(num(p.get('notional_usd')) for p in self.positions)
+
+    def unrealized_pnl_usd(self) -> float:
+        return sum(num(p.get('pnl_usd')) for p in self.positions)
+
+    def available_balance_usd(self) -> float:
+        return max(0.0, self.demo_balance_usd - self.reserved_usd())
+
+    def equity_usd(self) -> float:
+        return self.demo_balance_usd + self.unrealized_pnl_usd()
 
     def realized_today(self) -> float:
         day = time.strftime('%Y-%m-%d', time.gmtime())
@@ -129,6 +158,16 @@ class State:
                     'wins': wins,
                     'win_rate': round((wins / closed) * 100, 1) if closed else 0,
                     'realized_today_usd': round(self.realized_today(), 2),
+                    'demo_starting_balance_usd': round(self.demo_starting_balance_usd, 2),
+                    'demo_balance_usd': round(self.demo_balance_usd, 2),
+                    'demo_equity_usd': round(self.equity_usd(), 2),
+                    'demo_available_usd': round(self.available_balance_usd(), 2),
+                    'demo_reserved_usd': round(self.reserved_usd(), 2),
+                    'unrealized_pnl_usd': round(self.unrealized_pnl_usd(), 2),
+                    'realized_total_usd': round(self.demo_balance_usd - self.demo_starting_balance_usd, 2),
+                    'return_pct': round(((self.equity_usd() - self.demo_starting_balance_usd) / max(self.demo_starting_balance_usd, 1)) * 100, 3),
+                    'demo_started_at': self.demo_started_at,
+                    'demo_session_id': self.demo_session_id,
                 },
                 'config': {
                     'scan_seconds': SCAN_SECONDS,
@@ -141,11 +180,16 @@ class State:
                     'min_liquidity_usd': MIN_LIQUIDITY_USD,
                     'trade_notional_usd': TRADE_NOTIONAL_USD,
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
+                    'starting_balance_usd': STARTING_BALANCE_USD,
                 },
             }
     def token_snapshot(self, address: str) -> dict[str, Any] | None:
         with self.lock:
             coin = next((c for c in self.feed if c.get('address') == address), None)
+            if not coin:
+                trade = next((t for t in self.history if t.get('address') == address), None)
+                if trade:
+                    coin = trade.get('coin_snapshot')
             if not coin:
                 return None
             return {
@@ -154,6 +198,16 @@ class State:
                 'position': next((p for p in self.positions if p.get('address') == address), None),
                 'trades': [t for t in self.history if t.get('address') == address][:20],
             }
+
+
+def append_audit(event: str, payload: dict[str, Any]) -> None:
+    try:
+        AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record = {'ts': now_ms(), 'event': event, 'session_id': STATE.demo_session_id, **payload}
+        with AUDIT_PATH.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + '\n')
+    except Exception:
+        pass
 
 
 STATE = State()
@@ -388,8 +442,9 @@ class Monitor:
                 next_positions.append(position)
                 continue
             peak = max(num(position.get('peak_price'), entry), price)
-            pnl_pct = ((price - entry) / entry) * 100
-            pnl_usd = num(position.get('notional_usd'), TRADE_NOTIONAL_USD) * pnl_pct / 100
+            pnl_pct = round(((price - entry) / entry) * 100, 6)
+            quantity = num(position.get('quantity')) or (num(position.get('notional_usd'), TRADE_NOTIONAL_USD) / entry)
+            pnl_usd = quantity * (price - entry)
             hold_min = (now_ms() - int(position.get('opened_at', now_ms()))) / 60000
             trailing_armed = peak >= entry * (1 + TRAILING_PCT / 100)
             trailing_floor = peak * (1 - TRAILING_PCT / 100)
@@ -408,16 +463,30 @@ class Monitor:
                 'updated_at': now_ms(), 'current_score': coin.get('score'),
             }
             if exit_reason:
-                closed = {**updated, 'closed_at': now_ms(), 'exit_price': price, 'exit_reason': exit_reason}
+                balance_before = STATE.demo_balance_usd
+                STATE.demo_balance_usd = round(STATE.demo_balance_usd + pnl_usd, 8)
+                closed = {
+                    **updated, 'closed_at': now_ms(), 'exit_price': price, 'exit_reason': exit_reason,
+                    'quantity': quantity, 'balance_before': round(balance_before, 8),
+                    'balance_after': round(STATE.demo_balance_usd, 8),
+                    'exit_score': coin.get('score'), 'exit_liquidity_usd': coin.get('liquidityUsd'),
+                    'exit_volume_h1': (coin.get('volume') or {}).get('h1'),
+                    'exit_market_cap': coin.get('marketCap') or coin.get('fdv'),
+                    'exit_change_m5': (coin.get('priceChange') or {}).get('m5'),
+                    'exit_scan_count': STATE.scan_count,
+                }
                 STATE.history.insert(0, closed)
                 STATE.history = STATE.history[:300]
-                STATE.event(f"PAPER EXIT ${closed['symbol']} {exit_reason} · {pnl_pct:+.2f}%")
+                append_audit('EXIT', closed)
+                STATE.event(f"PAPER EXIT #{closed.get('trade_no')} ${closed['symbol']} {exit_reason} · {pnl_pct:+.2f}% · balance ${STATE.demo_balance_usd:.2f}")
             else:
                 next_positions.append(updated)
         STATE.positions = next_positions
 
     def maybe_open(self, feed: list[dict[str, Any]]) -> None:
         if len(STATE.positions) >= MAX_POSITIONS or STATE.realized_today() <= -MAX_DAILY_LOSS_USD:
+            return
+        if STATE.available_balance_usd() < min(TRADE_NOTIONAL_USD, 10.0):
             return
         open_addresses = {p.get('address') for p in STATE.positions}
         cutoff = now_ms() - 2 * 60 * 60 * 1000
@@ -440,25 +509,50 @@ class Monitor:
                 continue
             positive = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'positive'][:4]
             risks = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'risk'][:4]
+            notional = min(TRADE_NOTIONAL_USD, STATE.available_balance_usd())
+            if notional < 10:
+                continue
+            quantity = notional / price
+            available_before = STATE.available_balance_usd()
+            STATE.trade_seq += 1
             position = {
                 'id': f'{address}:{now_ms()}', 'address': address,
                 'pairAddress': coin.get('pairAddress'), 'name': coin.get('name'),
                 'symbol': coin.get('symbol'), 'imageUrl': coin.get('imageUrl'),
                 'entry_price': price, 'current_price': price, 'peak_price': price,
-                'notional_usd': TRADE_NOTIONAL_USD, 'score': coin.get('score'),
+                'trade_no': STATE.trade_seq, 'session_id': STATE.demo_session_id,
+                'notional_usd': round(notional, 8), 'quantity': quantity, 'score': coin.get('score'),
                 'current_score': coin.get('score'), 'opened_at': now_ms(),
                 'updated_at': now_ms(), 'pnl_pct': 0, 'pnl_usd': 0,
                 'why_entry': positive, 'risks_at_entry': risks,
+                'balance_at_entry': round(STATE.demo_balance_usd, 8),
+                'available_before_entry': round(available_before, 8),
+                'available_after_entry': round(max(0.0, available_before - notional), 8),
+                'entry_liquidity_usd': coin.get('liquidityUsd'),
+                'entry_volume_h1': (coin.get('volume') or {}).get('h1'),
+                'entry_market_cap': coin.get('marketCap') or coin.get('fdv'),
+                'entry_change_m5': (coin.get('priceChange') or {}).get('m5'),
+                'entry_scan_count': STATE.scan_count, 'dex_url': coin.get('dexUrl'),
+                'coin_snapshot': coin,
             }
             STATE.positions.append(position)
+            append_audit('ENTRY', position)
             open_addresses.add(address)
-            STATE.event(f"PAPER ENTRY ${coin.get('symbol')} @ ${price:.10g} · NEO score {coin.get('score'):.0f}/100")
+            STATE.event(f"PAPER ENTRY #{position['trade_no']} ${coin.get('symbol')} @ ${price:.10g} · ${notional:.2f} · NEO {coin.get('score'):.0f}/100")
 
     def scan_once(self) -> None:
         if not STATE.running or not self.scan_lock.acquire(blocking=False):
             return
         try:
             addresses, metadata = discover()
+            for position in STATE.positions:
+                address = position.get('address')
+                if address and address not in addresses:
+                    addresses.append(address)
+                    metadata[address] = metadata.get(address) or {
+                        'sources': ['open-position'], 'icon': position.get('imageUrl') or '',
+                        'header': '', 'description': '', 'links': [], 'boost_amount': 0,
+                    }
             if not addresses:
                 raise RuntimeError('No Solana tokens returned by discovery sources.')
             pairs = fetch_pairs(addresses)
@@ -576,7 +670,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 STATE.history = []
                 STATE.events = []
                 STATE.price_history = {}
-                STATE.event('Paper simulation history reset.')
+                STATE.demo_starting_balance_usd = STARTING_BALANCE_USD
+                STATE.demo_balance_usd = STARTING_BALANCE_USD
+                STATE.demo_started_at = now_ms()
+                STATE.demo_session_id = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
+                STATE.trade_seq = 0
+                append_audit('RESET', {'starting_balance_usd': STARTING_BALANCE_USD})
+                STATE.event(f'New demo session started with ${STARTING_BALANCE_USD:.2f}.')
                 STATE.save()
             self.send_json(STATE.snapshot())
             return
