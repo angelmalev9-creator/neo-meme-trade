@@ -23,7 +23,6 @@ import {
   Zap,
 } from 'lucide-react';
 import { analyzeToken } from './core/analyzeToken';
-import { fetchLatestSolanaProfiles, fetchSolanaTokenMarket } from './core/providers/dexscreener';
 import {
   DEFAULT_DEVICE_SETTINGS,
   type AnalysisSignal,
@@ -31,16 +30,6 @@ import {
   type RiskAssessment,
   type SignalSeverity,
 } from './core/types';
-import {
-  DEFAULT_PAPER_RISK_CONFIG,
-  canOpenPaperTrade,
-  closePaperPositionManually,
-  getPaperStats,
-  loadPaperState,
-  openPaperTrade,
-  resetPaperState,
-  updatePaperPositions,
-} from './core/paperTrading';
 
 const SETTINGS_KEY = 'neo-meme-coins-settings-v1';
 const FOMO_MONITOR_URL = 'https://neo-meme-api.169-58-211-177.sslip.io';
@@ -77,7 +66,7 @@ type FomoMonitorState = {
   positions: BackendPosition[];
   history: BackendPosition[];
   events: Array<{ ts: number; text: string }>;
-  config: { max_positions: number; entry_score: number; scan_seconds: number };
+  config: { max_positions: number; entry_score: number; scan_seconds: number; stop_loss_pct?: number; take_profit_pct?: number; trailing_pct?: number; max_hold_minutes?: number };
 };
 
 function formatMoney(value: number): string {
@@ -200,13 +189,6 @@ export default function App() {
   const [error, setError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<DeviceSettings>(DEFAULT_DEVICE_SETTINGS);
-  const [latestProfiles, setLatestProfiles] = useState<Array<{ tokenAddress: string; description: string }>>([]);
-  const [latestLoading, setLatestLoading] = useState(true);
-  const [descriptionByAddress, setDescriptionByAddress] = useState<Record<string, string>>({});
-  const [paperState, setPaperState] = useState(() => loadPaperState());
-  const [paperAuto, setPaperAuto] = useState(false);
-  const [paperBusy, setPaperBusy] = useState(false);
-  const [paperMessage, setPaperMessage] = useState('Paper bot is idle.');
   const [fomoMonitor, setFomoMonitor] = useState<FomoMonitorState | null>(null);
   const [fomoMonitorError, setFomoMonitorError] = useState('');
 
@@ -242,90 +224,6 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLatestLoading(true);
-      try {
-        const profiles = await fetchLatestSolanaProfiles(14);
-        if (!cancelled) {
-          setLatestProfiles(profiles);
-          setDescriptionByAddress(Object.fromEntries(profiles.map((p) => [p.tokenAddress, p.description])));
-        }
-      } catch {
-        if (!cancelled) setLatestProfiles([]);
-      } finally {
-        if (!cancelled) setLatestLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  const positionKey = paperState.positions.map((position) => position.tokenAddress).sort().join('|');
-
-  useEffect(() => {
-    if (!positionKey) return;
-    let cancelled = false;
-
-    const refreshOpenPositions = async () => {
-      const prices: Record<string, number> = {};
-      await Promise.all(paperState.positions.map(async (position) => {
-        try {
-          const market = await fetchSolanaTokenMarket(position.tokenAddress);
-          if (market.priceUsd > 0) prices[position.tokenAddress] = market.priceUsd;
-        } catch {
-          // Keep the last known paper price when the public market feed is unavailable.
-        }
-      }));
-      if (!cancelled && Object.keys(prices).length > 0) {
-        setPaperState((current) => updatePaperPositions(current, prices));
-      }
-    };
-
-    refreshOpenPositions();
-    const interval = window.setInterval(refreshOpenPositions, 15_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [positionKey]);
-
-  useEffect(() => {
-    if (!paperAuto || latestProfiles.length === 0) return;
-    let cancelled = false;
-    let running = false;
-    let cursor = 0;
-
-    const scanNext = async () => {
-      if (running || cancelled) return;
-      running = true;
-      setPaperBusy(true);
-      const profile = latestProfiles[cursor % latestProfiles.length];
-      cursor += 1;
-      try {
-        const result = await analyzeToken(profile.tokenAddress, settings, descriptionByAddress[profile.tokenAddress] || '');
-        if (cancelled) return;
-        const decision = canOpenPaperTrade(result, paperState);
-        setPaperMessage(`${result.market.symbol}: ${decision.allowed ? 'eligible paper setup' : decision.reasons[0] || result.posture}`);
-        if (decision.allowed) {
-          setPaperState((current) => openPaperTrade(result, current));
-        }
-      } catch (scanError) {
-        if (!cancelled) setPaperMessage(scanError instanceof Error ? scanError.message : 'Auto scan failed.');
-      } finally {
-        if (!cancelled) setPaperBusy(false);
-        running = false;
-      }
-    };
-
-    scanNext();
-    const interval = window.setInterval(scanNext, 45_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [paperAuto, latestProfiles, settings, descriptionByAddress]);
-
   const saveSettings = (next: DeviceSettings) => {
     setSettings(next);
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
@@ -342,7 +240,7 @@ export default function App() {
     setLoading(true);
     setError('');
     try {
-      const result = await analyzeToken(clean, settings, descriptionByAddress[clean] || '');
+      const result = await analyzeToken(clean, settings, '');
       setAssessment(result);
     } catch (scanError) {
       setAssessment(null);
@@ -360,21 +258,6 @@ export default function App() {
 
   const criticalCount = assessment?.signals.filter((signal) => signal.severity === 'critical').length || 0;
   const warningCount = assessment?.signals.filter((signal) => signal.severity === 'warning').length || 0;
-
-  const paperStats = useMemo(() => getPaperStats(paperState), [paperState]);
-  const entryDecision = useMemo(
-    () => assessment ? canOpenPaperTrade(assessment, paperState) : null,
-    [assessment, paperState],
-  );
-
-  const openCurrentPaperTrade = () => {
-    if (!assessment) return;
-    setPaperState((current) => openPaperTrade(assessment, current));
-  };
-
-  const closePaperPosition = (positionId: string) => {
-    setPaperState((current) => closePaperPositionManually(current, positionId));
-  };
 
   const fomoHistoryWins = fomoMonitor?.history.filter((trade) => (trade.pnl_pct || 0) > 0).length || 0;
   const fomoWinRate = fomoMonitor?.history.length
@@ -418,14 +301,14 @@ export default function App() {
                 <span className="font-black tracking-tight text-white">NEO Meme Coins</span>
                 <span className="rounded-md border border-emerald-400/15 bg-emerald-400/[0.07] px-1.5 py-0.5 text-[8px] font-black tracking-[0.18em] text-emerald-300">ALPHA</span>
               </div>
-              <div className="text-[10px] text-slate-500">Device-first Solana intelligence</div>
+              <div className="text-[10px] text-slate-500">Backend Fomo browser intelligence</div>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             <div className="hidden items-center gap-2 rounded-lg border border-white/10 bg-white/[0.025] px-3 py-1.5 text-[10px] font-bold text-slate-400 sm:flex">
               <Database className="h-3.5 w-3.5 text-emerald-300" />
-              NO OWNER API KEY
+              BROWSER MONITOR
             </div>
             <button
               onClick={() => setSettingsOpen((value) => !value)}
@@ -445,7 +328,7 @@ export default function App() {
               <div className="mb-6 flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
                 <div className="max-w-3xl">
                   <div className="mb-2 flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.22em] text-emerald-300">
-                    <Zap className="h-3.5 w-3.5" /> Live deterministic scan
+                    <Zap className="h-3.5 w-3.5" /> 24/7 backend monitor
                   </div>
                   <h1 className="text-2xl font-black tracking-tight text-white sm:text-3xl lg:text-4xl">
                     NEO следи Fomo и избира сам.
@@ -456,7 +339,7 @@ export default function App() {
                 </div>
                 <div className="flex items-center gap-2 text-[10px] text-slate-500">
                   <ShieldCheck className="h-4 w-4 text-emerald-300" />
-                  Ключове и RPC настройки се пазят локално.
+                  Backend monitor работи 24/7 на VPS.
                 </div>
               </div>
 
@@ -478,18 +361,18 @@ export default function App() {
               <div className="grid gap-4 md:grid-cols-3">
                 <div className="rounded-2xl border border-white/10 bg-white/[0.025] p-5">
                   <ShieldAlert className="h-5 w-5 text-red-300" />
-                  <h3 className="mt-4 font-bold text-white">Rug / bundle risk</h3>
-                  <p className="mt-2 text-xs leading-5 text-slate-500">Holder concentration, fresh-wallet sampling, liquidity depth и подозрителни market ratios.</p>
+                  <h3 className="mt-4 font-bold text-white">Browser monitoring</h3>
+                  <p className="mt-2 text-xs leading-5 text-slate-500">Python + Chromium следят Fomo директно от VPS, без extension и без ръчно избиране на coin.</p>
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/[0.025] p-5">
                   <Activity className="h-5 w-5 text-amber-300" />
-                  <h3 className="mt-4 font-bold text-white">Fake-volume heuristics</h3>
-                  <p className="mt-2 text-xs leading-5 text-slate-500">Следим transaction imbalance, volume/liquidity extremes и локално научен staircase pattern.</p>
+                  <h3 className="mt-4 font-bold text-white">Automatic selection</h3>
+                  <p className="mt-2 text-xs leading-5 text-slate-500">NEO събира видимите coin карти, оценява ги и отваря най-силните кандидати сам.</p>
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/[0.025] p-5">
                   <BrainCircuit className="h-5 w-5 text-emerald-300" />
-                  <h3 className="mt-4 font-bold text-white">Trader discipline</h3>
-                  <p className="mt-2 text-xs leading-5 text-slate-500">Резултатът е SKIP / WAIT / WATCH / SETUP, а не обещание за печалба или импулсивен BUY сигнал.</p>
+                  <h3 className="mt-4 font-bold text-white">Paper tracking</h3>
+                  <p className="mt-2 text-xs leading-5 text-slate-500">Входът и изходът са симулирани. Пазим стартова цена, текуща цена, PnL, причина и история.</p>
                 </div>
               </div>
             )}
@@ -669,41 +552,18 @@ export default function App() {
               <div className="rounded-3xl border border-emerald-400/20 bg-[#0d1110] p-5 shadow-xl shadow-black/20">
                 <div className="mb-5 flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-300">Device settings</div>
-                    <h3 className="mt-1 text-lg font-black text-white">Локален data access</h3>
+                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-300">Backend settings</div>
+                    <h3 className="mt-1 text-lg font-black text-white">Fomo browser monitor</h3>
                   </div>
                   <Settings2 className="h-4 w-4 text-emerald-300" />
                 </div>
-
-                <label className="block text-[10px] font-black uppercase tracking-[0.14em] text-slate-500">Solana RPC URL</label>
-                <input
-                  value={settings.rpcUrl}
-                  onChange={(event) => saveSettings({ ...settings, rpcUrl: event.target.value })}
-                  className="mt-2 h-10 w-full rounded-xl border border-white/10 bg-black/30 px-3 font-mono text-[10px] text-white outline-none focus:border-emerald-400/40"
-                />
-                <p className="mt-2 text-[10px] leading-4 text-slate-500">
-                  Default public RPC е безплатен, но е rate-limited. За по-сериозна употреба можеш да поставиш собствен RPC URL; пази се само в този browser.
-                </p>
-
-                <label className="mt-5 flex cursor-pointer items-center justify-between gap-4 rounded-xl border border-white/[0.07] bg-white/[0.025] p-3">
-                  <div>
-                    <div className="text-xs font-bold text-white">Deep wallet sample</div>
-                    <div className="mt-1 text-[10px] leading-4 text-slate-500">Проверява кратка история на част от top-holder owners.</div>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={settings.deepWalletScan}
-                    onChange={(event) => saveSettings({ ...settings, deepWalletScan: event.target.checked })}
-                    className="h-4 w-4 accent-emerald-400"
-                  />
-                </label>
-
-                <button
-                  onClick={() => saveSettings(DEFAULT_DEVICE_SETTINGS)}
-                  className="mt-4 flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] text-[10px] font-black text-white transition hover:bg-white/[0.06]"
-                >
-                  <RefreshCw className="h-3.5 w-3.5" /> RESET DEFAULTS
-                </button>
+                <div className="space-y-2 text-xs">
+                  <div className="flex items-center justify-between rounded-xl border border-white/[0.07] bg-white/[0.025] p-3"><span className="text-slate-500">Scan</span><span className="font-black text-white">{fomoMonitor?.config.scan_seconds ?? 20}s</span></div>
+                  <div className="flex items-center justify-between rounded-xl border border-white/[0.07] bg-white/[0.025] p-3"><span className="text-slate-500">Selection score</span><span className="font-black text-white">{fomoMonitor?.config.entry_score ?? 66}+</span></div>
+                  <div className="flex items-center justify-between rounded-xl border border-white/[0.07] bg-white/[0.025] p-3"><span className="text-slate-500">Max simulations</span><span className="font-black text-white">{fomoMonitor?.config.max_positions ?? 2}</span></div>
+                  <div className="flex items-center justify-between rounded-xl border border-white/[0.07] bg-white/[0.025] p-3"><span className="text-slate-500">Risk exits</span><span className="font-black text-white">-{fomoMonitor?.config.stop_loss_pct ?? 8}% / +{fomoMonitor?.config.take_profit_pct ?? 16}%</span></div>
+                </div>
+                <p className="mt-4 text-[10px] leading-4 text-slate-500">Fomo се наблюдава през Chromium на VPS. Няма extension и автоматичният monitor не използва външен market API.</p>
               </div>
             )}
 
@@ -771,7 +631,7 @@ export default function App() {
         <footer className="mt-8 flex flex-col justify-between gap-3 border-t border-white/[0.07] py-6 text-[10px] leading-5 text-slate-600 sm:flex-row">
           <div>NEO Meme Coins · analysis & risk intelligence · alpha</div>
           <div className="max-w-2xl sm:text-right">
-            Meme coins са високорискови. NEO показва измерими сигнали и несигурност; не гарантира печалба и не трябва да изпълнява сделка без изрично действие от потребителя.
+            Meme coins са високорискови. NEO тук записва само симулирани позиции; реални BUY/SELL действия не се изпълняват.
           </div>
         </footer>
       </main>
