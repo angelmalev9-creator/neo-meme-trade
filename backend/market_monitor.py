@@ -1,0 +1,601 @@
+#!/usr/bin/env python3
+import json, math, os, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+import requests
+
+HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
+PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
+SCAN_SECONDS = int(os.getenv('NEO_SCAN_SECONDS', '15'))
+STATE_PATH = Path(os.getenv('NEO_MARKET_STATE_PATH', '/var/lib/neo-market/state.json'))
+DEX_API = 'https://api.dexscreener.com'
+MAX_FEED = 70
+ENTRY_SCORE = 75.0
+MAX_POSITIONS = 2
+STOP_LOSS_PCT = 8.0
+TAKE_PROFIT_PCT = 16.0
+TRAILING_PCT = 6.0
+MAX_HOLD_MINUTES = 45
+STARTING_BALANCE_USD = 1000.0
+TRADE_NOTIONAL_USD = 100.0
+MAX_DAILY_LOSS_USD = 30.0
+MIN_LIQUIDITY_USD = 10000.0
+SESSION = requests.Session()
+SESSION.headers.update({'User-Agent': 'NEO-Meme-Market-Monitor/2.0', 'Accept': 'application/json'})
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def num(value: Any, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+        return out if math.isfinite(out) else default
+    except Exception:
+        return default
+
+
+def clamp(value: float) -> float:
+    return max(0.0, min(100.0, value))
+
+
+def api(path: str) -> Any:
+    response = SESSION.get(f'{DEX_API}{path}', timeout=15)
+    response.raise_for_status()
+    return response.json()
+
+
+def signal(kind: str, title: str, detail: str) -> dict[str, str]:
+    return {'kind': kind, 'title': title, 'detail': detail}
+
+
+class State:
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.running = True
+        self.status = 'starting'
+        self.message = 'Starting NEO live market monitor.'
+        self.last_scan_at = 0
+        self.scan_count = 0
+        self.feed: list[dict[str, Any]] = []
+        self.positions: list[dict[str, Any]] = []
+        self.history: list[dict[str, Any]] = []
+        self.events: list[dict[str, Any]] = []
+        self.price_history: dict[str, list[dict[str, Any]]] = {}
+        self.source_status = {'dexscreener': 'starting'}
+        self.load()
+
+    def load(self) -> None:
+        if not STATE_PATH.exists():
+            return
+        try:
+            data = json.loads(STATE_PATH.read_text())
+            self.positions = data.get('positions', [])[-20:]
+            self.history = data.get('history', [])[-300:]
+            self.events = data.get('events', [])[-100:]
+            raw = data.get('price_history', {})
+            if isinstance(raw, dict):
+                self.price_history = {k: v[-480:] for k, v in raw.items() if isinstance(v, list)}
+        except Exception:
+            pass
+
+    def save(self) -> None:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        keep = {c.get('address') for c in self.feed[:50]}
+        keep |= {p.get('address') for p in self.positions}
+        price_history = {k: v[-480:] for k, v in self.price_history.items() if k in keep}
+        STATE_PATH.write_text(json.dumps({
+            'positions': self.positions[-20:],
+            'history': self.history[-300:],
+            'events': self.events[-100:],
+            'price_history': price_history,
+        }, ensure_ascii=False))
+
+    def event(self, text: str) -> None:
+        self.events.insert(0, {'ts': now_ms(), 'text': text[:500]})
+        self.events = self.events[:100]
+        self.message = text[:500]
+
+    def realized_today(self) -> float:
+        day = time.strftime('%Y-%m-%d', time.gmtime())
+        total = 0.0
+        for trade in self.history:
+            stamp = int(trade.get('closed_at', 0)) / 1000
+            if stamp and time.strftime('%Y-%m-%d', time.gmtime(stamp)) == day:
+                total += num(trade.get('pnl_usd'))
+        return total
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            wins = sum(1 for t in self.history if num(t.get('pnl_pct')) > 0)
+            closed = len(self.history)
+            return {
+                'running': self.running,
+                'status': self.status,
+                'message': self.message,
+                'last_scan_at': self.last_scan_at,
+                'scan_count': self.scan_count,
+                'feed': self.feed,
+                'positions': self.positions,
+                'history': self.history[:100],
+                'events': self.events[:30],
+                'source_status': self.source_status,
+                'stats': {
+                    'feed_count': len(self.feed),
+                    'open_positions': len(self.positions),
+                    'closed_trades': closed,
+                    'wins': wins,
+                    'win_rate': round((wins / closed) * 100, 1) if closed else 0,
+                    'realized_today_usd': round(self.realized_today(), 2),
+                },
+                'config': {
+                    'scan_seconds': SCAN_SECONDS,
+                    'entry_score': ENTRY_SCORE,
+                    'max_positions': MAX_POSITIONS,
+                    'stop_loss_pct': STOP_LOSS_PCT,
+                    'take_profit_pct': TAKE_PROFIT_PCT,
+                    'trailing_pct': TRAILING_PCT,
+                    'max_hold_minutes': MAX_HOLD_MINUTES,
+                    'min_liquidity_usd': MIN_LIQUIDITY_USD,
+                    'trade_notional_usd': TRADE_NOTIONAL_USD,
+                    'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
+                },
+            }
+    def token_snapshot(self, address: str) -> dict[str, Any] | None:
+        with self.lock:
+            coin = next((c for c in self.feed if c.get('address') == address), None)
+            if not coin:
+                return None
+            return {
+                'coin': coin,
+                'history': self.price_history.get(address, [])[-480:],
+                'position': next((p for p in self.positions if p.get('address') == address), None),
+                'trades': [t for t in self.history if t.get('address') == address][:20],
+            }
+
+
+STATE = State()
+
+
+def discover() -> tuple[list[str], dict[str, dict[str, Any]]]:
+    metadata: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    sources = [
+        ('latest', '/token-profiles/latest/v1'),
+        ('boosted', '/token-boosts/top/v1'),
+        ('boosted-latest', '/token-boosts/latest/v1'),
+    ]
+    for source_name, path in sources:
+        try:
+            rows = api(path)
+        except Exception as exc:
+            STATE.event(f'{source_name} discovery warning: {exc}')
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if row.get('chainId') != 'solana':
+                continue
+            address = row.get('tokenAddress')
+            if not address:
+                continue
+            if address not in metadata:
+                metadata[address] = {
+                    'sources': [], 'icon': row.get('icon') or '',
+                    'header': row.get('header') or '',
+                    'description': row.get('description') or '',
+                    'links': row.get('links') or [], 'boost_amount': 0,
+                }
+                order.append(address)
+            info = metadata[address]
+            if source_name not in info['sources']:
+                info['sources'].append(source_name)
+            info['icon'] = info['icon'] or row.get('icon') or ''
+            info['header'] = info['header'] or row.get('header') or ''
+            info['description'] = info['description'] or row.get('description') or ''
+            info['links'] = info['links'] or row.get('links') or []
+            info['boost_amount'] = max(num(info['boost_amount']), num(row.get('amount')), num(row.get('totalAmount')))
+    return order[:90], metadata
+
+
+def fetch_pairs(addresses: list[str]) -> list[dict[str, Any]]:
+    pairs: list[dict[str, Any]] = []
+    for i in range(0, len(addresses), 30):
+        batch = addresses[i:i + 30]
+        if not batch:
+            continue
+        try:
+            rows = api('/tokens/v1/solana/' + ','.join(batch))
+            if isinstance(rows, list):
+                pairs.extend(rows)
+        except Exception as exc:
+            STATE.event(f'Market batch warning: {exc}')
+    return pairs
+
+
+def best_pairs(pairs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    best: dict[str, dict[str, Any]] = {}
+    for pair in pairs:
+        if pair.get('chainId') != 'solana':
+            continue
+        address = (pair.get('baseToken') or {}).get('address')
+        if not address:
+            continue
+        liquidity = num((pair.get('liquidity') or {}).get('usd'))
+        old = best.get(address)
+        old_liquidity = num((old.get('liquidity') or {}).get('usd')) if old else -1
+        if old is None or liquidity > old_liquidity:
+            best[address] = pair
+    return best
+
+
+def score_pair(pair: dict[str, Any], meta: dict[str, Any]):
+    liq = num((pair.get('liquidity') or {}).get('usd'))
+    volume = pair.get('volume') or {}
+    vol_h1 = num(volume.get('h1'))
+    mc = num(pair.get('marketCap')) or num(pair.get('fdv'))
+    changes = pair.get('priceChange') or {}
+    change_m5 = num(changes.get('m5'))
+    change_h1 = num(changes.get('h1'))
+    tx5 = (pair.get('txns') or {}).get('m5') or {}
+    buys, sells = num(tx5.get('buys')), num(tx5.get('sells'))
+    tx_count = buys + sells
+    created = int(pair.get('pairCreatedAt') or 0)
+    age = max(0.0, (now_ms() - created) / 60000) if created else 999999
+    buy_sell = buys / max(sells, 1)
+    vol_liq = vol_h1 / max(liq, 1)
+    liq_mc = liq / max(mc, 1) if mc else 0
+    score, signals = 36.0, []
+
+    if liq >= 50000:
+        score += 18; signals.append(signal('positive', 'Силна ликвидност', f'${liq:,.0f}'))
+    elif liq >= 20000:
+        score += 13; signals.append(signal('positive', 'Добра ликвидност', f'${liq:,.0f}'))
+    elif liq >= 10000:
+        score += 7; signals.append(signal('neutral', 'Приемлива ликвидност', f'${liq:,.0f}'))
+    elif liq < 5000:
+        score -= 22; signals.append(signal('risk', 'Много ниска ликвидност', f'${liq:,.0f}'))
+    else:
+        score -= 7; signals.append(signal('risk', 'Тънка ликвидност', f'${liq:,.0f}'))
+
+    if vol_h1 >= 50000:
+        score += 12; signals.append(signal('positive', 'Силен 1h volume', f'${vol_h1:,.0f}'))
+    elif vol_h1 >= 10000:
+        score += 7; signals.append(signal('positive', 'Активен 1h volume', f'${vol_h1:,.0f}'))
+    elif vol_h1 < 1000:
+        score -= 8; signals.append(signal('risk', 'Слаб volume', f'${vol_h1:,.0f}'))
+
+    if tx_count >= 120:
+        score += 10; signals.append(signal('positive', 'Много активни сделки', f'{int(tx_count)} tx / 5m'))
+    elif tx_count >= 35:
+        score += 6; signals.append(signal('positive', 'Добра активност', f'{int(tx_count)} tx / 5m'))
+    elif tx_count < 8:
+        score -= 6; signals.append(signal('risk', 'Малко сделки', f'{int(tx_count)} tx / 5m'))
+
+    if 1.05 <= buy_sell <= 2.8:
+        score += 8; signals.append(signal('positive', 'Купувачите водят', f'Buy/Sell {buy_sell:.2f}x'))
+    elif buy_sell > 5:
+        score -= 6; signals.append(signal('risk', 'Неестествен buy imbalance', f'{buy_sell:.2f}x'))
+    elif buy_sell < 0.65:
+        score -= 8; signals.append(signal('risk', 'Продавачите доминират', f'{buy_sell:.2f}x'))
+
+    if 1.5 <= change_m5 <= 18:
+        score += 8; signals.append(signal('positive', 'Здрав кратък momentum', f'{change_m5:+.1f}% / 5m'))
+    elif 18 < change_m5 <= 45:
+        score += 3; signals.append(signal('neutral', 'Бърз pump', f'{change_m5:+.1f}% / 5m'))
+    elif change_m5 > 60:
+        score -= 12; signals.append(signal('risk', 'Вертикален pump', f'{change_m5:+.1f}% / 5m'))
+    elif change_m5 < -20:
+        score -= 12; signals.append(signal('risk', 'Силен спад', f'{change_m5:+.1f}% / 5m'))
+
+    if 3 <= age <= 360:
+        score += 8; signals.append(signal('positive', 'Ранен етап', f'{age:.0f} мин.'))
+    elif age < 2:
+        score -= 7; signals.append(signal('risk', 'Твърде нов pair', f'{age:.1f} мин.'))
+    elif age > 4320:
+        score -= 4
+    if mc > 0:
+        if liq_mc >= 0.15:
+            score += 9; signals.append(signal('positive', 'Добро liquidity/MC', f'{liq_mc * 100:.1f}%'))
+        elif liq_mc < 0.03:
+            score -= 10; signals.append(signal('risk', 'Слаб liquidity/MC', f'{liq_mc * 100:.1f}%'))
+
+    if 0.10 <= vol_liq <= 4.0:
+        score += 6
+    elif vol_liq > 7:
+        score -= 12; signals.append(signal('risk', 'Volume/liquidity extreme', f'{vol_liq:.1f}x'))
+
+    if any('boost' in source for source in meta.get('sources', [])):
+        score += 4; signals.append(signal('neutral', 'Boosted discovery', 'Повишена market видимост'))
+    if abs(change_h1) > 250:
+        score -= 8; signals.append(signal('risk', 'Екстремен 1h move', f'{change_h1:+.0f}%'))
+
+    score = round(clamp(score), 1)
+    risk = round(100 - score, 1)
+    posture = 'SETUP' if score >= ENTRY_SCORE else 'WATCH' if score >= 60 else 'WAIT' if score >= 45 else 'SKIP'
+    return score, risk, posture, signals[:8]
+
+
+def make_coin(address: str, pair: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    score, risk, posture, signals = score_pair(pair, meta)
+    base, info = pair.get('baseToken') or {}, pair.get('info') or {}
+    volume, changes, txns = pair.get('volume') or {}, pair.get('priceChange') or {}, pair.get('txns') or {}
+    created = int(pair.get('pairCreatedAt') or 0)
+    return {
+        'address': address,
+        'pairAddress': pair.get('pairAddress') or '',
+        'dexId': pair.get('dexId') or '',
+        'dexUrl': pair.get('url') or '',
+        'name': base.get('name') or 'Unknown token',
+        'symbol': base.get('symbol') or 'TOKEN',
+        'imageUrl': info.get('imageUrl') or meta.get('icon') or '',
+        'headerUrl': info.get('header') or meta.get('header') or '',
+        'description': meta.get('description') or '',
+        'priceUsd': num(pair.get('priceUsd')),
+        'priceNative': num(pair.get('priceNative')),
+        'marketCap': num(pair.get('marketCap')),
+        'fdv': num(pair.get('fdv')),
+        'liquidityUsd': num((pair.get('liquidity') or {}).get('usd')),
+        'volume': {k: num(volume.get(k)) for k in ('m5', 'h1', 'h6', 'h24')},
+        'priceChange': {k: num(changes.get(k)) for k in ('m5', 'h1', 'h6', 'h24')},
+        'txns': {
+            k: {'buys': int(num((txns.get(k) or {}).get('buys'))), 'sells': int(num((txns.get(k) or {}).get('sells')))}
+            for k in ('m5', 'h1', 'h6', 'h24')
+        },
+        'pairCreatedAt': created,
+        'ageMinutes': round(max(0, (now_ms() - created) / 60000), 1) if created else None,
+        'sources': meta.get('sources', []),
+        'boostAmount': num(meta.get('boost_amount')),
+        'websites': (info.get('websites') or [])[:3],
+        'socials': (info.get('socials') or [])[:5],
+        'score': score, 'riskScore': risk, 'posture': posture,
+        'signals': signals, 'updatedAt': now_ms(),
+    }
+
+class Monitor:
+    def __init__(self) -> None:
+        self.stop_event = threading.Event()
+        self.scan_lock = threading.Lock()
+
+    def update_price_history(self, feed: list[dict[str, Any]]) -> None:
+        stamp = now_ms()
+        for coin in feed[:50]:
+            price = num(coin.get('priceUsd'))
+            if price <= 0:
+                continue
+            address = coin['address']
+            points = STATE.price_history.setdefault(address, [])
+            points.append({
+                'ts': stamp,
+                'price': price,
+                'liquidity': round(num(coin.get('liquidityUsd')), 2),
+                'volumeH1': round(num((coin.get('volume') or {}).get('h1')), 2),
+                'score': num(coin.get('score')),
+            })
+            STATE.price_history[address] = points[-480:]
+
+    def update_positions(self, by_address: dict[str, dict[str, Any]]) -> None:
+        next_positions = []
+        for position in STATE.positions:
+            coin = by_address.get(position.get('address'))
+            if not coin:
+                next_positions.append(position)
+                continue
+            price, entry = num(coin.get('priceUsd')), num(position.get('entry_price'))
+            if price <= 0 or entry <= 0:
+                next_positions.append(position)
+                continue
+            peak = max(num(position.get('peak_price'), entry), price)
+            pnl_pct = ((price - entry) / entry) * 100
+            pnl_usd = num(position.get('notional_usd'), TRADE_NOTIONAL_USD) * pnl_pct / 100
+            hold_min = (now_ms() - int(position.get('opened_at', now_ms()))) / 60000
+            trailing_armed = peak >= entry * (1 + TRAILING_PCT / 100)
+            trailing_floor = peak * (1 - TRAILING_PCT / 100)
+            exit_reason = None
+            if pnl_pct <= -STOP_LOSS_PCT:
+                exit_reason = 'STOP_LOSS'
+            elif pnl_pct >= TAKE_PROFIT_PCT:
+                exit_reason = 'TAKE_PROFIT'
+            elif trailing_armed and price <= trailing_floor:
+                exit_reason = 'TRAILING_STOP'
+            elif hold_min >= MAX_HOLD_MINUTES:
+                exit_reason = 'MAX_HOLD'
+            updated = {
+                **position, 'current_price': price, 'peak_price': peak,
+                'pnl_pct': round(pnl_pct, 3), 'pnl_usd': round(pnl_usd, 3),
+                'updated_at': now_ms(), 'current_score': coin.get('score'),
+            }
+            if exit_reason:
+                closed = {**updated, 'closed_at': now_ms(), 'exit_price': price, 'exit_reason': exit_reason}
+                STATE.history.insert(0, closed)
+                STATE.history = STATE.history[:300]
+                STATE.event(f"PAPER EXIT ${closed['symbol']} {exit_reason} · {pnl_pct:+.2f}%")
+            else:
+                next_positions.append(updated)
+        STATE.positions = next_positions
+
+    def maybe_open(self, feed: list[dict[str, Any]]) -> None:
+        if len(STATE.positions) >= MAX_POSITIONS or STATE.realized_today() <= -MAX_DAILY_LOSS_USD:
+            return
+        open_addresses = {p.get('address') for p in STATE.positions}
+        cutoff = now_ms() - 2 * 60 * 60 * 1000
+        recent = {t.get('address') for t in STATE.history if int(t.get('closed_at', 0)) >= cutoff}
+        for coin in feed:
+            if len(STATE.positions) >= MAX_POSITIONS:
+                break
+            address = coin.get('address')
+            if not address or address in open_addresses or address in recent:
+                continue
+            if coin.get('posture') != 'SETUP' or num(coin.get('score')) < ENTRY_SCORE:
+                continue
+            if num(coin.get('liquidityUsd')) < MIN_LIQUIDITY_USD:
+                continue
+            age = num(coin.get('ageMinutes'), 999999)
+            if age < 2 or age > 1440:
+                continue
+            price = num(coin.get('priceUsd'))
+            if price <= 0:
+                continue
+            positive = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'positive'][:4]
+            risks = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'risk'][:4]
+            position = {
+                'id': f'{address}:{now_ms()}', 'address': address,
+                'pairAddress': coin.get('pairAddress'), 'name': coin.get('name'),
+                'symbol': coin.get('symbol'), 'imageUrl': coin.get('imageUrl'),
+                'entry_price': price, 'current_price': price, 'peak_price': price,
+                'notional_usd': TRADE_NOTIONAL_USD, 'score': coin.get('score'),
+                'current_score': coin.get('score'), 'opened_at': now_ms(),
+                'updated_at': now_ms(), 'pnl_pct': 0, 'pnl_usd': 0,
+                'why_entry': positive, 'risks_at_entry': risks,
+            }
+            STATE.positions.append(position)
+            open_addresses.add(address)
+            STATE.event(f"PAPER ENTRY ${coin.get('symbol')} @ ${price:.10g} · NEO score {coin.get('score'):.0f}/100")
+
+    def scan_once(self) -> None:
+        if not STATE.running or not self.scan_lock.acquire(blocking=False):
+            return
+        try:
+            addresses, metadata = discover()
+            if not addresses:
+                raise RuntimeError('No Solana tokens returned by discovery sources.')
+            pairs = fetch_pairs(addresses)
+            chosen = best_pairs(pairs)
+            feed = []
+            for address in addresses:
+                pair = chosen.get(address)
+                if not pair:
+                    continue
+                coin = make_coin(address, pair, metadata.get(address, {}))
+                if coin['priceUsd'] > 0:
+                    feed.append(coin)
+            feed.sort(key=lambda c: (num(c.get('score')), num((c.get('volume') or {}).get('h1'))), reverse=True)
+            feed = feed[:MAX_FEED]
+            by_address = {c['address']: c for c in feed}
+            with STATE.lock:
+                STATE.feed = feed
+                STATE.last_scan_at = now_ms()
+                STATE.scan_count += 1
+                STATE.status = 'monitoring'
+                STATE.source_status = {'dexscreener': 'online'}
+                self.update_price_history(feed)
+                self.update_positions(by_address)
+                self.maybe_open(feed)
+                setups = sum(1 for c in feed if c.get('posture') == 'SETUP')
+                STATE.message = f'Live market scan · {len(feed)} coins · {setups} SETUP candidates · {len(STATE.positions)} paper positions.'
+                STATE.save()
+        except Exception as exc:
+            with STATE.lock:
+                STATE.status = 'error'
+                STATE.source_status = {'dexscreener': 'error'}
+                STATE.event(f'Market monitor error: {exc}')
+                STATE.save()
+        finally:
+            self.scan_lock.release()
+
+    def run(self) -> None:
+        with STATE.lock:
+            STATE.status = 'starting'
+            STATE.event('NEO public market monitor started.')
+        while not self.stop_event.is_set():
+            self.scan_once()
+            self.stop_event.wait(SCAN_SECONDS)
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+
+MONITOR = Monitor()
+
+class ApiHandler(BaseHTTPRequestHandler):
+    server_version = 'NEOMarketMonitor/2.0'
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        return
+
+    def send_json(self, payload: Any, status: int = 200) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == '/health':
+            self.send_json({'ok': True, 'status': STATE.status, 'running': STATE.running, 'feed_count': len(STATE.feed)})
+            return
+        if parsed.path == '/state':
+            self.send_json(STATE.snapshot())
+            return
+        if parsed.path == '/token':
+            address = (parse_qs(parsed.query).get('address') or [''])[0]
+            result = STATE.token_snapshot(address)
+            self.send_json(result if result else {'error': 'token_not_found'}, 200 if result else 404)
+            return
+        self.send_json({'error': 'not_found'}, 404)
+
+    def do_POST(self) -> None:
+        path = urlparse(self.path).path
+        if path == '/control/start':
+            with STATE.lock:
+                STATE.running = True
+                STATE.status = 'starting'
+                STATE.event('Monitoring enabled.')
+            threading.Thread(target=MONITOR.scan_once, daemon=True).start()
+            self.send_json(STATE.snapshot())
+            return
+        if path == '/control/stop':
+            with STATE.lock:
+                STATE.running = False
+                STATE.status = 'paused'
+                STATE.event('Monitoring paused.')
+            self.send_json(STATE.snapshot())
+            return
+        if path == '/control/rescan':
+            threading.Thread(target=MONITOR.scan_once, daemon=True).start()
+            self.send_json({'ok': True})
+            return
+        if path == '/control/reset':
+            with STATE.lock:
+                STATE.positions = []
+                STATE.history = []
+                STATE.events = []
+                STATE.price_history = {}
+                STATE.event('Paper simulation history reset.')
+                STATE.save()
+            self.send_json(STATE.snapshot())
+            return
+        self.send_json({'error': 'not_found'}, 404)
+
+
+def main() -> None:
+    thread = threading.Thread(target=MONITOR.run, name='neo-market-monitor', daemon=True)
+    thread.start()
+    server = ThreadingHTTPServer((HOST, PORT), ApiHandler)
+    print(f'NEO market monitor API listening on http://{HOST}:{PORT}', flush=True)
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        MONITOR.stop()
+        server.shutdown()
+
+
+if __name__ == '__main__':
+    main()
