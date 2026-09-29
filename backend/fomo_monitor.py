@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+os.environ.setdefault('DISPLAY', ':99')
+
 from playwright.sync_api import sync_playwright
 
 BASE_URL = os.getenv('FOMO_URL', 'https://fomo.family/')
@@ -194,9 +196,9 @@ class FomoMonitor:
         self.context = self.playwright.chromium.launch_persistent_context(
             str(PROFILE_DIR),
             executable_path=chromium,
-            headless=True,
+            headless=False,
             viewport={'width': 1440, 'height': 1000},
-            args=['--no-sandbox', '--disable-dev-shm-usage'],
+            args=['--no-sandbox', '--disable-dev-shm-usage', '--window-size=1440,1000'],
         )
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         self.page.goto(BASE_URL, wait_until='domcontentloaded', timeout=60_000)
