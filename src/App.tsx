@@ -226,6 +226,13 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (fomoLoginOpen && fomoMonitor && !fomoMonitor.login_required) {
+      setFomoLoginOpen(false);
+      void controlFomoMonitor('rescan');
+    }
+  }, [fomoLoginOpen, fomoMonitor?.login_required]);
+
   const saveSettings = (next: DeviceSettings) => {
     setSettings(next);
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
