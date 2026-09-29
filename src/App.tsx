@@ -644,7 +644,7 @@ export default function App() {
           <div className="flex h-[94vh] w-full max-w-[1500px] flex-col overflow-hidden rounded-2xl border border-emerald-400/25 bg-[#07090b] shadow-2xl shadow-black">
             <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
               <div>
-                <div className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-300">Persistent VPS browser</div>
+                <div className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-300">Fomo browser</div>
                 <div className="mt-0.5 text-sm font-black text-white">Fomo Live Login & Monitoring</div>
               </div>
               <div className="flex items-center gap-2">
@@ -652,7 +652,7 @@ export default function App() {
                 <button onClick={() => setFomoLoginOpen(false)} className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-white"><XCircle className="h-4 w-4" /></button>
               </div>
             </div>
-            <div className="border-b border-white/[0.07] bg-amber-400/[0.05] px-4 py-2 text-[10px] leading-4 text-amber-100/70">Първо отключи remote browser-а с monitor access кода, после се логни във Fomo нормално. Fomo паролата не се въвежда в NEO — пишеш я директно в отдалечения Chromium.</div>
+            <div className="border-b border-white/[0.07] bg-amber-400/[0.05] px-4 py-2 text-[10px] leading-4 text-amber-100/70">Логни се директно във Fomo в прозореца отдолу. След успешен вход NEO ще засече активната сесия и ще продължи monitoring-а автоматично.</div>
             <iframe title="Fomo persistent browser" src={FOMO_VNC_URL} className="min-h-0 flex-1 border-0 bg-black" allow="clipboard-read; clipboard-write" />
           </div>
         </div>
