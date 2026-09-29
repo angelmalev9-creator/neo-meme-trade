@@ -23,7 +23,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { analyzeToken } from './core/analyzeToken';
-import { fetchLatestSolanaProfiles } from './core/providers/dexscreener';
+import { fetchLatestSolanaProfiles, fetchSolanaTokenMarket } from './core/providers/dexscreener';
 import {
   DEFAULT_DEVICE_SETTINGS,
   type AnalysisSignal,
@@ -31,6 +31,16 @@ import {
   type RiskAssessment,
   type SignalSeverity,
 } from './core/types';
+import {
+  DEFAULT_PAPER_RISK_CONFIG,
+  canOpenPaperTrade,
+  closePaperPositionManually,
+  getPaperStats,
+  loadPaperState,
+  openPaperTrade,
+  resetPaperState,
+  updatePaperPositions,
+} from './core/paperTrading';
 
 const SETTINGS_KEY = 'neo-meme-coins-settings-v1';
 
@@ -157,6 +167,10 @@ export default function App() {
   const [latestProfiles, setLatestProfiles] = useState<Array<{ tokenAddress: string; description: string }>>([]);
   const [latestLoading, setLatestLoading] = useState(true);
   const [descriptionByAddress, setDescriptionByAddress] = useState<Record<string, string>>({});
+  const [paperState, setPaperState] = useState(() => loadPaperState());
+  const [paperAuto, setPaperAuto] = useState(false);
+  const [paperBusy, setPaperBusy] = useState(false);
+  const [paperMessage, setPaperMessage] = useState('Paper bot is idle.');
 
   useEffect(() => {
     try {
@@ -185,6 +199,71 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  const positionKey = paperState.positions.map((position) => position.tokenAddress).sort().join('|');
+
+  useEffect(() => {
+    if (!positionKey) return;
+    let cancelled = false;
+
+    const refreshOpenPositions = async () => {
+      const prices: Record<string, number> = {};
+      await Promise.all(paperState.positions.map(async (position) => {
+        try {
+          const market = await fetchSolanaTokenMarket(position.tokenAddress);
+          if (market.priceUsd > 0) prices[position.tokenAddress] = market.priceUsd;
+        } catch {
+          // Keep the last known paper price when the public market feed is unavailable.
+        }
+      }));
+      if (!cancelled && Object.keys(prices).length > 0) {
+        setPaperState((current) => updatePaperPositions(current, prices));
+      }
+    };
+
+    refreshOpenPositions();
+    const interval = window.setInterval(refreshOpenPositions, 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [positionKey]);
+
+  useEffect(() => {
+    if (!paperAuto || latestProfiles.length === 0) return;
+    let cancelled = false;
+    let running = false;
+    let cursor = 0;
+
+    const scanNext = async () => {
+      if (running || cancelled) return;
+      running = true;
+      setPaperBusy(true);
+      const profile = latestProfiles[cursor % latestProfiles.length];
+      cursor += 1;
+      try {
+        const result = await analyzeToken(profile.tokenAddress, settings, descriptionByAddress[profile.tokenAddress] || '');
+        if (cancelled) return;
+        const decision = canOpenPaperTrade(result, paperState);
+        setPaperMessage(`${result.market.symbol}: ${decision.allowed ? 'eligible paper setup' : decision.reasons[0] || result.posture}`);
+        if (decision.allowed) {
+          setPaperState((current) => openPaperTrade(result, current));
+        }
+      } catch (scanError) {
+        if (!cancelled) setPaperMessage(scanError instanceof Error ? scanError.message : 'Auto scan failed.');
+      } finally {
+        if (!cancelled) setPaperBusy(false);
+        running = false;
+      }
+    };
+
+    scanNext();
+    const interval = window.setInterval(scanNext, 45_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [paperAuto, latestProfiles, settings, descriptionByAddress]);
 
   const saveSettings = (next: DeviceSettings) => {
     setSettings(next);
@@ -220,6 +299,21 @@ export default function App() {
 
   const criticalCount = assessment?.signals.filter((signal) => signal.severity === 'critical').length || 0;
   const warningCount = assessment?.signals.filter((signal) => signal.severity === 'warning').length || 0;
+
+  const paperStats = useMemo(() => getPaperStats(paperState), [paperState]);
+  const entryDecision = useMemo(
+    () => assessment ? canOpenPaperTrade(assessment, paperState) : null,
+    [assessment, paperState],
+  );
+
+  const openCurrentPaperTrade = () => {
+    if (!assessment) return;
+    setPaperState((current) => openPaperTrade(assessment, current));
+  };
+
+  const closePaperPosition = (positionId: string) => {
+    setPaperState((current) => closePaperPositionManually(current, positionId));
+  };
 
   const copyAddress = async () => {
     if (!assessment) return;
@@ -547,6 +641,97 @@ export default function App() {
                 </button>
               </div>
             )}
+
+            <div className="rounded-3xl border border-emerald-400/20 bg-[#0d1110] p-5 shadow-xl shadow-black/20">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-300">Paper bot v1.0</div>
+                  <h3 className="mt-1 text-base font-black text-white">NEO Auto Trader</h3>
+                </div>
+                <div className={`rounded-lg border px-2 py-1 text-[9px] font-black ${paperAuto ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200' : 'border-white/10 bg-white/[0.03] text-slate-500'}`}>
+                  {paperBusy ? 'SCANNING' : paperAuto ? 'ARMED' : 'OFF'}
+                </div>
+              </div>
+
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                <div className="rounded-xl border border-white/[0.07] bg-black/20 p-3">
+                  <div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">Balance</div>
+                  <div className="mt-1 text-lg font-black text-white">${paperState.balanceUsd.toFixed(2)}</div>
+                </div>
+                <div className="rounded-xl border border-white/[0.07] bg-black/20 p-3">
+                  <div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">Daily PnL</div>
+                  <div className={`mt-1 text-lg font-black ${paperState.dailyPnlUsd >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                    {paperState.dailyPnlUsd >= 0 ? '+' : ''}${paperState.dailyPnlUsd.toFixed(2)}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-white/[0.07] bg-black/20 p-3">
+                  <div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">Open</div>
+                  <div className="mt-1 text-lg font-black text-white">{paperState.positions.length}/{DEFAULT_PAPER_RISK_CONFIG.maxOpenPositions}</div>
+                </div>
+                <div className="rounded-xl border border-white/[0.07] bg-black/20 p-3">
+                  <div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">Win rate</div>
+                  <div className="mt-1 text-lg font-black text-white">{paperStats.closed ? `${paperStats.winRate.toFixed(0)}%` : '—'}</div>
+                </div>
+              </div>
+
+              <div className="mt-3 rounded-xl border border-white/[0.07] bg-white/[0.02] p-3 text-[10px] leading-4 text-slate-500">
+                1% risk · 8% hard SL · 16% TP · 6% trailing · 45m max hold · live execution locked
+              </div>
+
+              <button
+                onClick={() => setPaperAuto((value) => !value)}
+                className={`mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-xl text-xs font-black transition ${paperAuto ? 'border border-red-400/20 bg-red-500/10 text-red-200 hover:bg-red-500/15' : 'bg-emerald-400 text-[#06100c] hover:bg-emerald-300'}`}
+              >
+                <Zap className="h-4 w-4" /> {paperAuto ? 'STOP AUTO PAPER BOT' : 'START AUTO PAPER BOT'}
+              </button>
+
+              {assessment && (
+                <button
+                  onClick={openCurrentPaperTrade}
+                  disabled={!entryDecision?.allowed}
+                  className="mt-2 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.035] text-xs font-black text-white transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <ShieldCheck className="h-4 w-4" /> {entryDecision?.allowed ? `OPEN PAPER ${assessment.market.symbol}` : 'CURRENT ENTRY BLOCKED'}
+                </button>
+              )}
+
+              <div className="mt-3 text-[10px] leading-4 text-slate-500">{paperMessage}</div>
+              {paperState.lastEvent && <div className="mt-1 text-[10px] leading-4 text-slate-600">{paperState.lastEvent}</div>}
+
+              {paperState.positions.length > 0 && (
+                <div className="mt-4 space-y-2 border-t border-white/[0.07] pt-4">
+                  {paperState.positions.map((position) => {
+                    const pnlPct = position.entryPrice > 0 ? ((position.currentPrice - position.entryPrice) / position.entryPrice) * 100 : 0;
+                    return (
+                      <div key={position.id} className="rounded-xl border border-white/[0.07] bg-black/20 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <div className="text-xs font-black text-white">${position.symbol}</div>
+                            <div className="mt-0.5 text-[9px] text-slate-600">${position.notionalUsd.toFixed(2)} paper notional</div>
+                          </div>
+                          <div className={`text-xs font-black ${pnlPct >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                            {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => closePaperPosition(position.id)}
+                          className="mt-2 h-7 w-full rounded-lg border border-white/10 bg-white/[0.03] text-[9px] font-black text-white hover:bg-white/[0.06]"
+                        >
+                          CLOSE PAPER POSITION
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <button
+                onClick={() => { setPaperAuto(false); setPaperState(resetPaperState()); setPaperMessage('Paper bot reset.'); }}
+                className="mt-3 h-8 w-full rounded-lg border border-white/[0.07] bg-transparent text-[9px] font-black text-slate-500 transition hover:bg-white/[0.03] hover:text-white"
+              >
+                RESET PAPER RESULTS
+              </button>
+            </div>
 
             <div className="rounded-3xl border border-white/10 bg-[#0d0f13]/90 p-5">
               <div className="flex items-center justify-between gap-3">
