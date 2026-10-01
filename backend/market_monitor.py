@@ -13,7 +13,7 @@ STATE_PATH = Path(os.getenv('NEO_MARKET_STATE_PATH', '/var/lib/neo-market/state.
 AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.jsonl'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
-ENTRY_SCORE = 75.0
+ENTRY_SCORE = 80.0
 MAX_POSITIONS = 2
 STOP_LOSS_PCT = 8.0
 TAKE_PROFIT_PCT = 16.0
@@ -499,11 +499,30 @@ class Monitor:
                 continue
             if coin.get('posture') != 'SETUP' or num(coin.get('score')) < ENTRY_SCORE:
                 continue
-            if num(coin.get('liquidityUsd')) < MIN_LIQUIDITY_USD:
-                continue
+            score = num(coin.get('score'))
+            liquidity = num(coin.get('liquidityUsd'))
             age = num(coin.get('ageMinutes'), 999999)
-            if age < 2 or age > 1440:
+            change_m5 = num((coin.get('priceChange') or {}).get('m5'))
+            tx_m5 = (coin.get('txns') or {}).get('m5') or {}
+            buys_m5 = num(tx_m5.get('buys'))
+            sells_m5 = num(tx_m5.get('sells'))
+            buy_sell_ratio = buys_m5 / max(sells_m5, 1.0)
+            market_cap = num(coin.get('marketCap') or coin.get('fdv'))
+            liquidity_mc_ratio = liquidity / max(market_cap, 1.0)
+
+            precision_core = (
+                score >= 80 and liquidity >= 20000 and -20 <= change_m5 <= 30
+                and buy_sell_ratio >= 0.9 and liquidity_mc_ratio >= 0.10
+                and 2 <= age <= 480
+            )
+            breakout_strict = (
+                score >= 80 and liquidity >= 30000 and 30 < change_m5 <= 50
+                and buy_sell_ratio >= 3.0 and liquidity_mc_ratio >= 0.10
+                and 2 <= age <= 480
+            )
+            if not (precision_core or breakout_strict):
                 continue
+            strategy_id = 'PRECISION_V1' if precision_core else 'BREAKOUT_STRICT_V1'
             price = num(coin.get('priceUsd'))
             if price <= 0:
                 continue
@@ -520,7 +539,7 @@ class Monitor:
                 'pairAddress': coin.get('pairAddress'), 'name': coin.get('name'),
                 'symbol': coin.get('symbol'), 'imageUrl': coin.get('imageUrl'),
                 'entry_price': price, 'current_price': price, 'peak_price': price,
-                'trade_no': STATE.trade_seq, 'session_id': STATE.demo_session_id,
+                'trade_no': STATE.trade_seq, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
                 'notional_usd': round(notional, 8), 'quantity': quantity, 'score': coin.get('score'),
                 'current_score': coin.get('score'), 'opened_at': now_ms(),
                 'updated_at': now_ms(), 'pnl_pct': 0, 'pnl_usd': 0,
@@ -532,13 +551,15 @@ class Monitor:
                 'entry_volume_h1': (coin.get('volume') or {}).get('h1'),
                 'entry_market_cap': coin.get('marketCap') or coin.get('fdv'),
                 'entry_change_m5': (coin.get('priceChange') or {}).get('m5'),
+                'entry_buy_sell_ratio': round(buy_sell_ratio, 4),
+                'entry_liquidity_mc_ratio': round(liquidity_mc_ratio, 4),
                 'entry_scan_count': STATE.scan_count, 'dex_url': coin.get('dexUrl'),
                 'coin_snapshot': coin,
             }
             STATE.positions.append(position)
             append_audit('ENTRY', position)
             open_addresses.add(address)
-            STATE.event(f"PAPER ENTRY #{position['trade_no']} ${coin.get('symbol')} @ ${price:.10g} · ${notional:.2f} · NEO {coin.get('score'):.0f}/100")
+            STATE.event(f"PAPER ENTRY #{position['trade_no']} ${coin.get('symbol')} @ ${price:.10g} · ${notional:.2f} · {strategy_id} · NEO {coin.get('score'):.0f}/100")
 
     def scan_once(self) -> None:
         if not STATE.running or not self.scan_lock.acquire(blocking=False):
