@@ -22,7 +22,7 @@ MAX_HOLD_MINUTES = 10
 WEAK_CHECK_MINUTES = 5
 STALE_EXIT_MINUTES = 7
 STALE_MIN_PROFIT_PCT = 3.0
-LEARNING_WINDOW = 120
+LEARNING_WINDOW = 60
 STARTING_BALANCE_USD = 1000.0
 TRADE_NOTIONAL_USD = 100.0
 MAX_DAILY_LOSS_USD = 30.0
@@ -228,12 +228,9 @@ def adaptive_profile(setup: dict[str, Any]) -> dict[str, Any]:
         bs = num(t.get('entry_buy_sell_ratio'), num(tx.get('buys')) / max(num(tx.get('sells')), 1.0))
         mc = num(t.get('entry_market_cap') or snap.get('marketCap') or snap.get('fdv'))
         lmc = num(t.get('entry_liquidity_mc_ratio'), liq / max(mc, 1.0))
-        sid = t.get('strategy_id')
-        if not sid:
-            if score >= 80 and liq >= 20000 and -20 <= m5 <= 30 and bs >= .9 and lmc >= .10 and 2 <= age <= 480:
-                sid = 'PRECISION_V1'
-            elif score >= 80 and liq >= 30000 and 30 < m5 <= 50 and bs >= 3 and lmc >= .10 and 2 <= age <= 480:
-                sid = 'BREAKOUT_STRICT_V1'
+        sid = None
+        if score >= 95 and liq >= 20000 and 3 <= m5 <= 25 and bs >= .9 and lmc >= .10 and 2 <= age <= 480:
+            sid = 'PRECISION_V2'
         if sid != setup['strategy_id']:
             continue
         if abs(score - setup['score']) > 10 or abs(m5 - setup['change_m5']) > 12:
@@ -248,12 +245,10 @@ def adaptive_profile(setup: dict[str, Any]) -> dict[str, Any]:
     gw = sum(max(0.0, num(t.get('pnl_usd'))) for t in similar)
     gl = -sum(min(0.0, num(t.get('pnl_usd'))) for t in similar)
     wr = wins / n * 100 if n else 0.0
-    pf = gw / gl if gl > 0 else (99.0 if gw > 0 else 0.0)
+    pf = gw / gl if gl > 0 else (99.0 if n >= 5 and gw > 0 else (1.0 if gw > 0 else 0.0))
     recent_losses = sum(1 for t in similar[:3] if num(t.get('pnl_usd')) <= 0)
-    blocked = (n >= 4 and wr < 45 and pf < 1.0 and pnl < 0) or (n >= 3 and recent_losses == 3)
-    bonus = 0.0
-    if n >= 3 and wr >= 60 and pf >= 1.5:
-        bonus = min(12.0, (wr - 50) * .25 + 4)
+    blocked = (n >= 5 and wr < 55 and pf < 1.2 and pnl < 0) or (n >= 3 and recent_losses == 3)
+    bonus = 0.0  # learning may veto entries, never relax PRECISION_V2
     return {'sample': n, 'wins': wins, 'win_rate': round(wr, 1),
             'pnl_usd': round(pnl, 2), 'profit_factor': round(pf, 2),
             'recent_losses': recent_losses, 'blocked': blocked, 'bonus': round(bonus, 2)}
@@ -566,18 +561,13 @@ class Monitor:
             liquidity_mc_ratio = liquidity / max(market_cap, 1.0)
 
             precision_core = (
-                score >= 80 and liquidity >= 20000 and -20 <= change_m5 <= 30
+                score >= 95 and liquidity >= 20000 and 3 <= change_m5 <= 25
                 and buy_sell_ratio >= 0.9 and liquidity_mc_ratio >= 0.10
                 and 2 <= age <= 480
             )
-            breakout_strict = (
-                score >= 80 and liquidity >= 30000 and 30 < change_m5 <= 50
-                and buy_sell_ratio >= 3.0 and liquidity_mc_ratio >= 0.10
-                and 2 <= age <= 480
-            )
-            if not (precision_core or breakout_strict):
+            if not precision_core:
                 continue
-            strategy_id = 'PRECISION_V1' if precision_core else 'BREAKOUT_STRICT_V1'
+            strategy_id = 'PRECISION_V2'
             learning = adaptive_profile({'strategy_id': strategy_id, 'score': score, 'liquidity': liquidity, 'age': age, 'change_m5': change_m5})
             if learning['blocked']:
                 continue
