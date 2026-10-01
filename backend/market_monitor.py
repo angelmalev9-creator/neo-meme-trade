@@ -484,7 +484,7 @@ class Monitor:
         STATE.positions = next_positions
 
     def maybe_open(self, feed: list[dict[str, Any]]) -> None:
-        if len(STATE.positions) >= MAX_POSITIONS or STATE.realized_today() <= -MAX_DAILY_LOSS_USD:
+        if len(STATE.positions) >= MAX_POSITIONS:
             return
         if STATE.available_balance_usd() < min(TRADE_NOTIONAL_USD, 10.0):
             return
