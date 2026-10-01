@@ -18,7 +18,11 @@ MAX_POSITIONS = 2
 STOP_LOSS_PCT = 8.0
 TAKE_PROFIT_PCT = 16.0
 TRAILING_PCT = 6.0
-MAX_HOLD_MINUTES = 45
+MAX_HOLD_MINUTES = 10
+WEAK_CHECK_MINUTES = 5
+STALE_EXIT_MINUTES = 7
+STALE_MIN_PROFIT_PCT = 3.0
+LEARNING_WINDOW = 120
 STARTING_BALANCE_USD = 1000.0
 TRADE_NOTIONAL_USD = 100.0
 MAX_DAILY_LOSS_USD = 30.0
@@ -209,6 +213,50 @@ def append_audit(event: str, payload: dict[str, Any]) -> None:
     except Exception:
         pass
 
+
+def adaptive_profile(setup: dict[str, Any]) -> dict[str, Any]:
+    def age_band(v: float) -> int:
+        return 0 if v < 10 else 1 if v < 60 else 2 if v < 240 else 3
+    similar = []
+    for t in STATE.history[:LEARNING_WINDOW]:
+        snap = t.get('coin_snapshot') or {}
+        score = num(t.get('score') or snap.get('score'))
+        liq = num(t.get('entry_liquidity_usd') or snap.get('liquidityUsd'))
+        m5 = num(t.get('entry_change_m5') if t.get('entry_change_m5') is not None else (snap.get('priceChange') or {}).get('m5'))
+        age = num(snap.get('ageMinutes'), 999999)
+        tx = (snap.get('txns') or {}).get('m5') or {}
+        bs = num(t.get('entry_buy_sell_ratio'), num(tx.get('buys')) / max(num(tx.get('sells')), 1.0))
+        mc = num(t.get('entry_market_cap') or snap.get('marketCap') or snap.get('fdv'))
+        lmc = num(t.get('entry_liquidity_mc_ratio'), liq / max(mc, 1.0))
+        sid = t.get('strategy_id')
+        if not sid:
+            if score >= 80 and liq >= 20000 and -20 <= m5 <= 30 and bs >= .9 and lmc >= .10 and 2 <= age <= 480:
+                sid = 'PRECISION_V1'
+            elif score >= 80 and liq >= 30000 and 30 < m5 <= 50 and bs >= 3 and lmc >= .10 and 2 <= age <= 480:
+                sid = 'BREAKOUT_STRICT_V1'
+        if sid != setup['strategy_id']:
+            continue
+        if abs(score - setup['score']) > 10 or abs(m5 - setup['change_m5']) > 12:
+            continue
+        ratio = liq / max(setup['liquidity'], 1.0)
+        if not .45 <= ratio <= 2.2 or age_band(age) != age_band(setup['age']):
+            continue
+        similar.append(t)
+    n = len(similar)
+    wins = sum(1 for t in similar if num(t.get('pnl_usd')) > 0)
+    pnl = sum(num(t.get('pnl_usd')) for t in similar)
+    gw = sum(max(0.0, num(t.get('pnl_usd'))) for t in similar)
+    gl = -sum(min(0.0, num(t.get('pnl_usd'))) for t in similar)
+    wr = wins / n * 100 if n else 0.0
+    pf = gw / gl if gl > 0 else (99.0 if gw > 0 else 0.0)
+    recent_losses = sum(1 for t in similar[:3] if num(t.get('pnl_usd')) <= 0)
+    blocked = (n >= 4 and wr < 45 and pf < 1.0 and pnl < 0) or (n >= 3 and recent_losses == 3)
+    bonus = 0.0
+    if n >= 3 and wr >= 60 and pf >= 1.5:
+        bonus = min(12.0, (wr - 50) * .25 + 4)
+    return {'sample': n, 'wins': wins, 'win_rate': round(wr, 1),
+            'pnl_usd': round(pnl, 2), 'profit_factor': round(pf, 2),
+            'recent_losses': recent_losses, 'blocked': blocked, 'bonus': round(bonus, 2)}
 
 STATE = State()
 
@@ -456,7 +504,11 @@ class Monitor:
             elif trailing_armed and price <= trailing_floor:
                 exit_reason = 'TRAILING_STOP'
             elif hold_min >= MAX_HOLD_MINUTES:
-                exit_reason = 'MAX_HOLD'
+                exit_reason = 'MAX_HOLD_10M'
+            elif hold_min >= STALE_EXIT_MINUTES and pnl_pct < STALE_MIN_PROFIT_PCT:
+                exit_reason = 'STALE_AFTER_7M'
+            elif hold_min >= WEAK_CHECK_MINUTES and pnl_pct <= 0:
+                exit_reason = 'WEAK_AFTER_5M'
             updated = {
                 **position, 'current_price': price, 'peak_price': peak,
                 'pnl_pct': round(pnl_pct, 3), 'pnl_usd': round(pnl_usd, 3),
@@ -489,13 +541,16 @@ class Monitor:
         if STATE.available_balance_usd() < min(TRADE_NOTIONAL_USD, 10.0):
             return
         open_addresses = {p.get('address') for p in STATE.positions}
-        cutoff = now_ms() - 2 * 60 * 60 * 1000
+        now = now_ms()
+        cutoff = now - 2 * 60 * 60 * 1000
         recent = {t.get('address') for t in STATE.history if int(t.get('closed_at', 0)) >= cutoff}
+        loss_cutoff = now - 24 * 60 * 60 * 1000
+        loss_blacklist = {t.get('address') for t in STATE.history if int(t.get('closed_at', 0)) >= loss_cutoff and num(t.get('pnl_usd')) < 0}
         for coin in feed:
             if len(STATE.positions) >= MAX_POSITIONS:
                 break
             address = coin.get('address')
-            if not address or address in open_addresses or address in recent:
+            if not address or address in open_addresses or address in recent or address in loss_blacklist:
                 continue
             if coin.get('posture') != 'SETUP' or num(coin.get('score')) < ENTRY_SCORE:
                 continue
@@ -523,6 +578,9 @@ class Monitor:
             if not (precision_core or breakout_strict):
                 continue
             strategy_id = 'PRECISION_V1' if precision_core else 'BREAKOUT_STRICT_V1'
+            learning = adaptive_profile({'strategy_id': strategy_id, 'score': score, 'liquidity': liquidity, 'age': age, 'change_m5': change_m5})
+            if learning['blocked']:
+                continue
             price = num(coin.get('priceUsd'))
             if price <= 0:
                 continue
@@ -540,6 +598,9 @@ class Monitor:
                 'symbol': coin.get('symbol'), 'imageUrl': coin.get('imageUrl'),
                 'entry_price': price, 'current_price': price, 'peak_price': price,
                 'trade_no': STATE.trade_seq, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
+                'learning_mode': 'ADAPTIVE_V1', 'learning_sample': learning['sample'],
+                'learning_win_rate': learning['win_rate'], 'learning_profit_factor': learning['profit_factor'],
+                'learning_recent_losses': learning['recent_losses'], 'learning_bonus': learning['bonus'],
                 'notional_usd': round(notional, 8), 'quantity': quantity, 'score': coin.get('score'),
                 'current_score': coin.get('score'), 'opened_at': now_ms(),
                 'updated_at': now_ms(), 'pnl_pct': 0, 'pnl_usd': 0,
@@ -559,7 +620,7 @@ class Monitor:
             STATE.positions.append(position)
             append_audit('ENTRY', position)
             open_addresses.add(address)
-            STATE.event(f"PAPER ENTRY #{position['trade_no']} ${coin.get('symbol')} @ ${price:.10g} · ${notional:.2f} · {strategy_id} · NEO {coin.get('score'):.0f}/100")
+            STATE.event(f"PAPER ENTRY #{position['trade_no']} ${coin.get('symbol')} @ ${price:.10g} · ${notional:.2f} · {strategy_id} · learn {learning['sample']} / WR {learning['win_rate']:.0f}% · NEO {coin.get('score'):.0f}/100")
 
     def scan_once(self) -> None:
         if not STATE.running or not self.scan_lock.acquire(blocking=False):
