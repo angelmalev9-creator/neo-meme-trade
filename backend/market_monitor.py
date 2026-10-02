@@ -9,6 +9,7 @@ import requests
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
 SCAN_SECONDS = int(os.getenv('NEO_SCAN_SECONDS', '15'))
+POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
 STATE_PATH = Path(os.getenv('NEO_MARKET_STATE_PATH', '/var/lib/neo-market/state.json'))
 AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.jsonl'))
 DEX_API = 'https://api.dexscreener.com'
@@ -23,6 +24,7 @@ WEAK_CHECK_MINUTES = 5
 STALE_EXIT_MINUTES = 7
 STALE_MIN_PROFIT_PCT = 3.0
 LEARNING_WINDOW = 60
+HEALTH_WINDOW = 12
 STARTING_BALANCE_USD = 1000.0
 TRADE_NOTIONAL_USD = 100.0
 MAX_DAILY_LOSS_USD = 30.0
@@ -455,6 +457,7 @@ class Monitor:
     def __init__(self) -> None:
         self.stop_event = threading.Event()
         self.scan_lock = threading.Lock()
+        self.position_poll_lock = threading.Lock()
 
     def update_price_history(self, feed: list[dict[str, Any]]) -> None:
         stamp = now_ms()
@@ -560,14 +563,24 @@ class Monitor:
             market_cap = num(coin.get('marketCap') or coin.get('fdv'))
             liquidity_mc_ratio = liquidity / max(market_cap, 1.0)
 
+            recent_health = [t for t in STATE.history if str(t.get('strategy_id','')).startswith('PRECISION_V')][:12]
+            recent_wins = sum(1 for t in recent_health if num(t.get('pnl_usd')) > 0)
+            recent_wr = (recent_wins / len(recent_health) * 100) if recent_health else 0
+            recent_gp = sum(max(0.0, num(t.get('pnl_usd'))) for t in recent_health)
+            recent_gl = -sum(min(0.0, num(t.get('pnl_usd'))) for t in recent_health)
+            recent_pf = recent_gp / recent_gl if recent_gl > 0 else (99.0 if recent_gp > 0 else 0.0)
+            recovery = len(recent_health) >= 8 and (recent_wr < 50 or recent_pf < 1.0)
             precision_core = (
-                score >= 95 and liquidity >= 20000 and 3 <= change_m5 <= 25
-                and buy_sell_ratio >= 0.9 and liquidity_mc_ratio >= 0.10
-                and 2 <= age <= 480
+                score >= (99 if recovery else 97)
+                and liquidity >= (30000 if recovery else 25000)
+                and 3 <= change_m5 <= 18
+                and 1.05 <= buy_sell_ratio <= 2.8
+                and liquidity_mc_ratio >= 0.15
+                and 10 <= age <= 180
             )
             if not precision_core:
                 continue
-            strategy_id = 'PRECISION_V2'
+            strategy_id = 'PRECISION_V3_ROBUST'
             learning = adaptive_profile({'strategy_id': strategy_id, 'score': score, 'liquidity': liquidity, 'age': age, 'change_m5': change_m5})
             if learning['blocked']:
                 continue
@@ -576,7 +589,8 @@ class Monitor:
                 continue
             positive = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'positive'][:4]
             risks = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'risk'][:4]
-            notional = min(TRADE_NOTIONAL_USD, STATE.available_balance_usd())
+            size_mult = 0.5 if recovery else 0.75
+            notional = min(TRADE_NOTIONAL_USD * size_mult, STATE.available_balance_usd())
             if notional < 10:
                 continue
             quantity = notional / price
