@@ -36,15 +36,19 @@ type Position = {
   exit_liquidity_usd?: number; exit_volume_h1?: number; exit_market_cap?: number; exit_change_m5?: number;
 };
 type PricePoint = { ts: number; price: number; liquidity: number; volumeH1: number; score: number };
+type LiveTrade = { ts: number; direction: 'BUY' | 'SELL'; token_amount: number; usd_amount: number; wallet: string; note: string; address: string; pairAddress: string; symbol: string; signature: string; slot: number };
+type FlowStats = { seconds: number; trades: number; buys: number; sells: number; buy_usd: number; sell_usd: number; buy_sell_usd_ratio: number; unique_wallets: number; max_buy_usd: number; max_sell_usd: number };
+type TapeStatus = { status?: string; tracked_pairs?: number; updated_at?: number; source?: string; error?: string | null };
 type MonitorState = {
   running: boolean; status: string; message: string; last_scan_at: number; scan_count: number;
   feed: Coin[]; positions: Position[]; history: Position[];
   events: { ts: number; text: string }[];
   source_status: Record<string, string>;
+  live_tape: LiveTrade[]; live_tape_status: TapeStatus;
   stats: { feed_count: number; open_positions: number; closed_trades: number; wins: number; win_rate: number; realized_today_usd: number; demo_starting_balance_usd: number; demo_balance_usd: number; demo_equity_usd: number; demo_available_usd: number; demo_reserved_usd: number; unrealized_pnl_usd: number; realized_total_usd: number; return_pct: number; demo_started_at: number; demo_session_id: string };
-  config: { scan_seconds: number; entry_score: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trailing_pct: number; max_hold_minutes: number; min_liquidity_usd: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number }; 
+  config: { scan_seconds: number; position_scan_seconds?: number; entry_score: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trailing_pct: number; max_hold_minutes: number; min_liquidity_usd: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number }; 
 };
-type TokenDetail = { coin: Coin; history: PricePoint[]; position: Position | null; trades: Position[] };
+type TokenDetail = { coin: Coin; history: PricePoint[]; position: Position | null; trades: Position[]; live_tape?: LiveTrade[]; flow?: FlowStats };
 type Filter = 'ALL' | 'SETUP' | 'WATCH' | 'NEW' | 'BOOSTED';
 
 const fmtMoney = (value = 0) => value >= 1_000_000 ? `$${(value / 1_000_000).toFixed(2)}M` : value >= 1_000 ? `$${(value / 1_000).toFixed(1)}K` : `$${value.toFixed(0)}`;
@@ -52,6 +56,7 @@ const fmtPrice = (value = 0) => value >= 1 ? `$${value.toFixed(4)}` : value >= 0
 const ageLabel = (minutes: number | null) => minutes == null ? '—' : minutes < 60 ? `${Math.round(minutes)}m` : minutes < 1440 ? `${(minutes / 60).toFixed(1)}h` : `${(minutes / 1440).toFixed(1)}d`;
 const shortAddress = (value: string) => `${value.slice(0, 4)}…${value.slice(-4)}`;
 const timeLabel = (stamp: number) => stamp ? new Date(stamp).toLocaleTimeString('bg-BG', { hour: '2-digit', minute: '2-digit' }) : '—';
+const tapeTimeLabel = (stamp: number) => stamp ? new Date(stamp).toLocaleTimeString('bg-BG', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
 const fullTimeLabel = (stamp: number) => stamp ? new Date(stamp).toLocaleString('bg-BG', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
 const durationLabel = (start?: number, end?: number) => !start || !end ? '—' : `${Math.max(0, Math.round((end - start) / 60000))}m`;
 function ScoreBadge({ coin }: { coin: Coin }) {
@@ -119,7 +124,7 @@ export default function App() {
       } catch { /* feed still works without token history */ }
     };
     void loadToken();
-    const timer = window.setInterval(loadToken, 5000);
+    const timer = window.setInterval(loadToken, 2000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [selectedAddress]);
   const selectedCoin = useMemo(() => state?.feed.find(c => c.address === selectedAddress) || detail?.coin || state?.feed[0] || null, [state, selectedAddress, detail]);
@@ -218,6 +223,31 @@ export default function App() {
                 <div className="flex items-end gap-4 sm:text-right"><div><div className="text-2xl font-black text-white">{fmtPrice(selectedCoin.priceUsd)}</div><div className="mt-1 flex items-center gap-2 sm:justify-end"><Change value={selectedCoin.priceChange.m5} /><span className="text-[9px] text-slate-600">5m</span></div></div>{selectedCoin.dexUrl && <a href={selectedCoin.dexUrl} target="_blank" rel="noreferrer" className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-slate-400 hover:text-white"><ExternalLink className="h-4 w-4" /></a>}</div>
               </div>
               <div className="grid grid-cols-2 gap-px bg-white/[0.05] sm:grid-cols-4"><div className="bg-[#0b0e11] p-4"><div className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-700">Market Cap</div><div className="mt-1 text-base font-black text-white">{fmtMoney(selectedCoin.marketCap || selectedCoin.fdv)}</div></div><div className="bg-[#0b0e11] p-4"><div className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-700">Liquidity</div><div className="mt-1 text-base font-black text-white">{fmtMoney(selectedCoin.liquidityUsd)}</div></div><div className="bg-[#0b0e11] p-4"><div className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-700">Volume 1h</div><div className="mt-1 text-base font-black text-white">{fmtMoney(selectedCoin.volume.h1)}</div></div><div className="bg-[#0b0e11] p-4"><div className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-700">5m Trades</div><div className="mt-1 text-base font-black text-white">{selectedCoin.txns.m5.buys + selectedCoin.txns.m5.sells}<span className="ml-2 text-[9px] text-emerald-300">{selectedCoin.txns.m5.buys}B</span><span className="ml-1 text-[9px] text-red-300">{selectedCoin.txns.m5.sells}S</span></div></div></div>
+            </div>
+
+            <div className="overflow-hidden rounded-3xl border border-white/10 bg-[#0b0e11]">
+              <div className="flex flex-col gap-3 border-b border-white/[0.07] p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-[0.18em] text-emerald-300"><span className="h-2 w-2 animate-pulse rounded-full bg-emerald-300" /> LIVE ORDER FLOW</div>
+                  <div className="mt-1 text-sm font-black text-white">${selectedCoin.symbol} · реални Solana сделки</div>
+                </div>
+                <div className="text-[9px] text-slate-500">{state?.live_tape_status?.status === 'online' ? `ON-CHAIN LIVE · ${state.live_tape_status.tracked_pairs ?? 0} pairs` : 'CONNECTING…'} · guard {state?.config.position_scan_seconds ?? 2}s</div>
+              </div>
+              <div className="grid grid-cols-2 gap-px bg-white/[0.05] sm:grid-cols-4">
+                <div className="bg-[#0b0e11] p-3"><div className="text-[8px] font-black uppercase text-slate-700">BUY 60s</div><div className="mt-1 text-sm font-black text-emerald-300">{fmtMoney(detail?.flow?.buy_usd ?? 0)}</div></div>
+                <div className="bg-[#0b0e11] p-3"><div className="text-[8px] font-black uppercase text-slate-700">SELL 60s</div><div className="mt-1 text-sm font-black text-red-300">{fmtMoney(detail?.flow?.sell_usd ?? 0)}</div></div>
+                <div className="bg-[#0b0e11] p-3"><div className="text-[8px] font-black uppercase text-slate-700">BUY/SELL</div><div className="mt-1 text-sm font-black text-white">{(detail?.flow?.buy_sell_usd_ratio ?? 0).toFixed(2)}x</div></div>
+                <div className="bg-[#0b0e11] p-3"><div className="text-[8px] font-black uppercase text-slate-700">WALLETS 60s</div><div className="mt-1 text-sm font-black text-white">{detail?.flow?.unique_wallets ?? 0}</div></div>
+              </div>
+              <div className="max-h-[280px] overflow-y-auto">
+                {(detail?.live_tape || []).length ? (detail?.live_tape || []).slice(0, 40).map(tx => <a key={tx.signature} href={`https://solscan.io/tx/${tx.signature}`} target="_blank" rel="noreferrer" className="grid grid-cols-[62px_48px_minmax(70px,1fr)_92px_86px] items-center gap-2 border-b border-white/[0.05] px-4 py-2.5 text-[9px] hover:bg-white/[0.025]">
+                  <span className="font-mono text-slate-600">{tapeTimeLabel(tx.ts)}</span>
+                  <span className={`font-black ${tx.direction === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>{tx.direction}</span>
+                  <span className="truncate font-black text-white">{fmtMoney(tx.usd_amount)}</span>
+                  <span className="truncate font-mono text-slate-500">{shortAddress(tx.wallet)}</span>
+                  <span className={`truncate text-right font-black ${tx.note.includes('WHALE') ? 'text-amber-300' : tx.direction === 'BUY' ? 'text-emerald-300/70' : 'text-red-300/70'}`}>{tx.note}</span>
+                </a>) : <div className="p-8 text-center text-[10px] leading-5 text-slate-600">NEO слуша Solana Mainnet в реално време.<br/>Чака следващата on-chain покупка или продажба за този pair.</div>}
+              </div>
             </div>
 
             <div className="overflow-hidden rounded-3xl border border-white/10 bg-[#0b0e11]">

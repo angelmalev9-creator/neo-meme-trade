@@ -12,6 +12,8 @@ SCAN_SECONDS = int(os.getenv('NEO_SCAN_SECONDS', '15'))
 POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
 STATE_PATH = Path(os.getenv('NEO_MARKET_STATE_PATH', '/var/lib/neo-market/state.json'))
 AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.jsonl'))
+LIVE_TAPE_PATH = Path(os.getenv('NEO_LIVE_TAPE_PATH', '/var/lib/neo-market/live_tape.json'))
+POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
 ENTRY_SCORE = 80.0
@@ -46,6 +48,13 @@ def num(value: Any, default: float = 0.0) -> float:
 
 def clamp(value: float) -> float:
     return max(0.0, min(100.0, value))
+
+def read_live_tape() -> dict[str, Any]:
+    try:
+        data = json.loads(LIVE_TAPE_PATH.read_text())
+        return data if isinstance(data, dict) else {'status': 'offline', 'events': []}
+    except Exception:
+        return {'status': 'offline', 'events': []}
 
 
 def api(path: str) -> Any:
@@ -142,10 +151,26 @@ class State:
                 total += num(trade.get('pnl_usd'))
         return total
 
+    def live_flow(self, address: str, seconds: int = 30) -> dict[str, Any]:
+        tape = read_live_tape()
+        cutoff = now_ms() - seconds * 1000
+        rows = [e for e in tape.get('events', []) if e.get('address') == address and int(e.get('ts', 0)) >= cutoff]
+        buys = [e for e in rows if e.get('direction') == 'BUY']
+        sells = [e for e in rows if e.get('direction') == 'SELL']
+        buy_usd = sum(num(e.get('usd_amount')) for e in buys)
+        sell_usd = sum(num(e.get('usd_amount')) for e in sells)
+        return {'seconds': seconds, 'trades': len(rows), 'buys': len(buys), 'sells': len(sells),
+                'buy_usd': round(buy_usd, 2), 'sell_usd': round(sell_usd, 2),
+                'buy_sell_usd_ratio': round(buy_usd / max(sell_usd, 1.0), 2),
+                'unique_wallets': len({e.get('wallet') for e in rows if e.get('wallet')}),
+                'max_buy_usd': round(max([num(e.get('usd_amount')) for e in buys] or [0]), 2),
+                'max_sell_usd': round(max([num(e.get('usd_amount')) for e in sells] or [0]), 2)}
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             wins = sum(1 for t in self.history if num(t.get('pnl_pct')) > 0)
             closed = len(self.history)
+            tape = read_live_tape()
             return {
                 'running': self.running,
                 'status': self.status,
@@ -157,6 +182,8 @@ class State:
                 'history': self.history[:100],
                 'events': self.events[:30],
                 'source_status': self.source_status,
+                'live_tape': tape.get('events', [])[:100],
+                'live_tape_status': {k: tape.get(k) for k in ('status','tracked_pairs','updated_at','source','error')},
                 'stats': {
                     'feed_count': len(self.feed),
                     'open_positions': len(self.positions),
@@ -177,6 +204,7 @@ class State:
                 },
                 'config': {
                     'scan_seconds': SCAN_SECONDS,
+                    'position_scan_seconds': POSITION_SCAN_SECONDS,
                     'entry_score': ENTRY_SCORE,
                     'max_positions': MAX_POSITIONS,
                     'stop_loss_pct': STOP_LOSS_PCT,
@@ -203,6 +231,8 @@ class State:
                 'history': self.price_history.get(address, [])[-480:],
                 'position': next((p for p in self.positions if p.get('address') == address), None),
                 'trades': [t for t in self.history if t.get('address') == address][:20],
+                'live_tape': [e for e in read_live_tape().get('events', []) if e.get('address') == address][:80],
+                'flow': self.live_flow(address, 60),
             }
 
 
@@ -457,6 +487,7 @@ class Monitor:
     def __init__(self) -> None:
         self.stop_event = threading.Event()
         self.scan_lock = threading.Lock()
+        self.position_lock = threading.Lock()
         self.position_poll_lock = threading.Lock()
 
     def update_price_history(self, feed: list[dict[str, Any]]) -> None:
@@ -492,13 +523,18 @@ class Monitor:
             quantity = num(position.get('quantity')) or (num(position.get('notional_usd'), TRADE_NOTIONAL_USD) / entry)
             pnl_usd = quantity * (price - entry)
             hold_min = (now_ms() - int(position.get('opened_at', now_ms()))) / 60000
+            flow = STATE.live_flow(position.get('address'), 20)
             trailing_armed = peak >= entry * 1.06
             trailing_floor = peak * (1 - TRAILING_PCT / 100)
             exit_reason = None
-            if pnl_pct <= -STOP_LOSS_PCT:
+            if flow['trades'] >= 4 and flow['sells'] >= 3 and flow['sell_usd'] >= max(250.0, flow['buy_usd'] * 2.5) and pnl_pct < 3.0:
+                exit_reason = 'ORDERFLOW_EXIT'
+            elif pnl_pct <= -STOP_LOSS_PCT:
                 exit_reason = 'STOP_LOSS'
             elif pnl_pct >= TAKE_PROFIT_PCT:
                 exit_reason = 'TAKE_PROFIT'
+            elif peak >= entry * 1.08 and pnl_pct > 0 and flow['trades'] >= 3 and flow['sell_usd'] > max(150.0, flow['buy_usd'] * 1.6):
+                exit_reason = 'FLOW_PROFIT_PROTECT'
             elif peak >= entry * 1.10 and pnl_pct < 4.0:
                 exit_reason = 'PROFIT_PROTECT'
             elif trailing_armed and price <= trailing_floor:
@@ -534,6 +570,43 @@ class Monitor:
             else:
                 next_positions.append(updated)
         STATE.positions = next_positions
+
+    def fast_position_check(self) -> None:
+        if not STATE.running or not self.position_lock.acquire(blocking=False):
+            return
+        try:
+            with STATE.lock:
+                positions = list(STATE.positions)
+            addresses = [p.get('address') for p in positions if p.get('address')]
+            if not addresses:
+                return
+            pairs = fetch_pairs(addresses)
+            chosen = best_pairs(pairs)
+            by_address = {}
+            for position in positions:
+                address = position.get('address')
+                pair = chosen.get(address)
+                if not pair:
+                    continue
+                snap = position.get('coin_snapshot') or {}
+                meta = {'sources': ['position-guard'], 'icon': snap.get('imageUrl') or '',
+                        'header': '', 'description': '', 'links': [], 'boost_amount': 0}
+                by_address[address] = make_coin(address, pair, meta)
+            if by_address:
+                with STATE.lock:
+                    self.update_positions(by_address)
+                    STATE.save()
+        except Exception as exc:
+            with STATE.lock:
+                STATE.event(f'Fast position guard warning: {exc}')
+        finally:
+            self.position_lock.release()
+
+    def run_position_guard(self) -> None:
+        while not self.stop_event.is_set():
+            if STATE.positions:
+                self.fast_position_check()
+            self.stop_event.wait(POSITION_SCAN_SECONDS)
 
     def maybe_open(self, feed: list[dict[str, Any]]) -> None:
         if len(STATE.positions) >= MAX_POSITIONS:
@@ -586,6 +659,9 @@ class Monitor:
             learning = adaptive_profile({'strategy_id': strategy_id, 'score': score, 'liquidity': liquidity, 'age': age, 'change_m5': change_m5})
             if learning['blocked']:
                 continue
+            flow = STATE.live_flow(address, 30)
+            if flow['trades'] >= 5 and (flow['buy_sell_usd_ratio'] < 1.15 or flow['max_sell_usd'] >= max(750.0, flow['buy_usd'] * 0.75)):
+                continue
             price = num(coin.get('priceUsd'))
             if price <= 0:
                 continue
@@ -604,7 +680,7 @@ class Monitor:
                 'symbol': coin.get('symbol'), 'imageUrl': coin.get('imageUrl'),
                 'entry_price': price, 'current_price': price, 'peak_price': price,
                 'trade_no': STATE.trade_seq, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
-                'learning_mode': 'ADAPTIVE_V1', 'learning_sample': learning['sample'],
+                'learning_mode': 'ADAPTIVE_V2_FLOW', 'entry_flow': flow, 'learning_sample': learning['sample'],
                 'learning_win_rate': learning['win_rate'], 'learning_profit_factor': learning['profit_factor'],
                 'learning_recent_losses': learning['recent_losses'], 'learning_bonus': learning['bonus'],
                 'notional_usd': round(notional, 8), 'quantity': quantity, 'score': coin.get('score'),
@@ -774,6 +850,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 def main() -> None:
     thread = threading.Thread(target=MONITOR.run, name='neo-market-monitor', daemon=True)
     thread.start()
+    guard = threading.Thread(target=MONITOR.run_position_guard, name='neo-position-guard', daemon=True)
+    guard.start()
     server = ThreadingHTTPServer((HOST, PORT), ApiHandler)
     print(f'NEO market monitor API listening on http://{HOST}:{PORT}', flush=True)
     try:
