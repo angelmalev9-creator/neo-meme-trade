@@ -13,6 +13,7 @@ POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
 STATE_PATH = Path(os.getenv('NEO_MARKET_STATE_PATH', '/var/lib/neo-market/state.json'))
 AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.jsonl'))
 LIVE_TAPE_PATH = Path(os.getenv('NEO_LIVE_TAPE_PATH', '/var/lib/neo-market/live_tape.json'))
+STRATEGY_LAB_PATH = Path(os.getenv('NEO_STRATEGY_LAB_PATH', '/var/lib/neo-market/strategy_lab.json'))
 POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
@@ -48,6 +49,13 @@ def num(value: Any, default: float = 0.0) -> float:
 
 def clamp(value: float) -> float:
     return max(0.0, min(100.0, value))
+
+def read_strategy_lab() -> dict[str, Any]:
+    try:
+        data = json.loads(STRATEGY_LAB_PATH.read_text())
+        return data if isinstance(data, dict) else {'status': 'offline', 'books': {}, 'stats': {}}
+    except Exception:
+        return {'status': 'offline', 'books': {}, 'stats': {}}
 
 def read_live_tape() -> dict[str, Any]:
     try:
@@ -184,6 +192,7 @@ class State:
                 'source_status': self.source_status,
                 'live_tape': tape.get('events', [])[:100],
                 'live_tape_status': {k: tape.get(k) for k in ('status','tracked_pairs','updated_at','source','error')},
+                'strategy_lab': read_strategy_lab(),
                 'stats': {
                     'feed_count': len(self.feed),
                     'open_positions': len(self.positions),

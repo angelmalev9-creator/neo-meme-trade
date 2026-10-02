@@ -36,6 +36,10 @@ type Position = {
   exit_liquidity_usd?: number; exit_volume_h1?: number; exit_market_cap?: number; exit_change_m5?: number;
 };
 type PricePoint = { ts: number; price: number; liquidity: number; volumeH1: number; score: number };
+type LabPosition = { symbol: string; address: string; strategy_id: string; opened_at: number; pnl_pct: number; notional_usd: number };
+type LabBook = { id: string; name: string; starting_balance: number; balance: number; position: LabPosition | null; history: Position[] };
+type LabStats = { trades: number; wins: number; losses: number; win_rate: number; profit_factor: number; realized_pnl: number; equity: number; return_pct: number; open: boolean };
+type StrategyLab = { status: string; updated_at: number; started_at: number; books: Record<string, LabBook>; stats: Record<string, LabStats>; error?: string };
 type LiveTrade = { ts: number; direction: 'BUY' | 'SELL'; token_amount: number; usd_amount: number; wallet: string; note: string; address: string; pairAddress: string; symbol: string; signature: string; slot: number };
 type FlowStats = { seconds: number; trades: number; buys: number; sells: number; buy_usd: number; sell_usd: number; buy_sell_usd_ratio: number; unique_wallets: number; max_buy_usd: number; max_sell_usd: number };
 type TapeStatus = { status?: string; tracked_pairs?: number; updated_at?: number; source?: string; error?: string | null };
@@ -45,6 +49,7 @@ type MonitorState = {
   events: { ts: number; text: string }[];
   source_status: Record<string, string>;
   live_tape: LiveTrade[]; live_tape_status: TapeStatus;
+  strategy_lab: StrategyLab;
   stats: { feed_count: number; open_positions: number; closed_trades: number; wins: number; win_rate: number; realized_today_usd: number; demo_starting_balance_usd: number; demo_balance_usd: number; demo_equity_usd: number; demo_available_usd: number; demo_reserved_usd: number; unrealized_pnl_usd: number; realized_total_usd: number; return_pct: number; demo_started_at: number; demo_session_id: string };
   config: { scan_seconds: number; position_scan_seconds?: number; entry_score: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trailing_pct: number; max_hold_minutes: number; min_liquidity_usd: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number }; 
 };
@@ -293,6 +298,34 @@ export default function App() {
             <div className="mt-4 border-t border-white/[0.06] pt-3"><button onClick={() => { if (window.confirm('Да започна ли чисто нова demo сесия с $1,000? Това ще изчисти текущите paper позиции и видимата history.')) void control('reset'); }} className="h-8 w-full rounded-lg border border-white/[0.07] bg-transparent text-[9px] font-black text-slate-600 hover:bg-white/[0.03] hover:text-white">RESET DEMO → $1,000</button></div>
           </div>
         </aside>
+      </section>
+
+      <section className="mt-4 overflow-hidden rounded-3xl border border-cyan-400/15 bg-[#0b0e11]">
+        <div className="flex flex-col gap-3 border-b border-white/[0.07] p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div><div className="text-[9px] font-black uppercase tracking-[0.18em] text-cyan-300">MULTI-STRATEGY LAB</div><h2 className="mt-1 text-lg font-black text-white">8 независими стратегии · $500 demo капитал за всяка</h2><div className="mt-1 text-[9px] text-slate-600">Еднакъв risk engine: SL 4% · TP 18% · trailing 4% · 1 позиция на стратегия. Така сравняваме entry логиката честно.</div></div>
+          <div className={`rounded-lg border px-2.5 py-1.5 text-[9px] font-black ${state?.strategy_lab?.status === 'online' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>{(state?.strategy_lab?.status || 'CONNECTING').toUpperCase()}</div>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1050px] text-left">
+            <thead><tr className="border-b border-white/[0.06] text-[8px] font-black uppercase tracking-[0.14em] text-slate-700"><th className="px-4 py-3">Стратегия</th><th className="px-4 py-3">Balance</th><th className="px-4 py-3">Equity</th><th className="px-4 py-3">PnL</th><th className="px-4 py-3">Сделки</th><th className="px-4 py-3">Win rate</th><th className="px-4 py-3">PF</th><th className="px-4 py-3">Отворена позиция</th></tr></thead>
+            <tbody>
+              {Object.values(state?.strategy_lab?.books || {}).sort((a,b) => (state?.strategy_lab?.stats?.[b.id]?.equity ?? b.balance) - (state?.strategy_lab?.stats?.[a.id]?.equity ?? a.balance)).map(book => {
+                const st = state?.strategy_lab?.stats?.[book.id];
+                const pnl = st?.realized_pnl ?? (book.balance - 500);
+                return <tr key={book.id} className="border-b border-white/[0.04] text-xs hover:bg-white/[0.02]">
+                  <td className="px-4 py-3"><div className="font-black text-white">{book.name}</div><div className="mt-1 text-[8px] font-mono text-slate-700">{book.id}</div></td>
+                  <td className="px-4 py-3 font-black text-white">${book.balance.toFixed(2)}</td>
+                  <td className="px-4 py-3 text-slate-300">${(st?.equity ?? book.balance).toFixed(2)}</td>
+                  <td className={`px-4 py-3 font-black ${pnl >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}<div className="mt-1 text-[9px]">{(st?.return_pct ?? 0) >= 0 ? '+' : ''}{(st?.return_pct ?? 0).toFixed(2)}%</div></td>
+                  <td className="px-4 py-3 text-slate-400">{st?.trades ?? 0}<div className="mt-1 text-[9px] text-slate-700">{st?.wins ?? 0}W / {st?.losses ?? 0}L</div></td>
+                  <td className="px-4 py-3 font-black text-white">{st?.trades ? `${st.win_rate.toFixed(1)}%` : '—'}</td>
+                  <td className="px-4 py-3 text-slate-300">{st?.trades ? (st.profit_factor >= 99 ? '∞' : st.profit_factor.toFixed(2)) : '—'}</td>
+                  <td className="px-4 py-3">{book.position ? <button onClick={() => setSelectedAddress(book.position!.address)} className="rounded-xl border border-cyan-400/15 bg-cyan-400/[0.05] px-3 py-2 text-left"><div className="font-black text-cyan-200">${book.position.symbol}</div><div className={`mt-1 text-[9px] font-black ${(book.position.pnl_pct || 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{(book.position.pnl_pct || 0) >= 0 ? '+' : ''}{(book.position.pnl_pct || 0).toFixed(2)}% · ${book.position.notional_usd.toFixed(0)}</div></button> : <span className="text-[9px] text-slate-700">чака setup</span>}</td>
+                </tr>
+              })}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section className="mt-4 overflow-hidden rounded-3xl border border-white/10 bg-[#0b0e11]">
