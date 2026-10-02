@@ -302,7 +302,7 @@ export default function App() {
 
       <section className="mt-4 overflow-hidden rounded-3xl border border-cyan-400/15 bg-[#0b0e11]">
         <div className="flex flex-col gap-3 border-b border-white/[0.07] p-4 sm:flex-row sm:items-center sm:justify-between">
-          <div><div className="text-[9px] font-black uppercase tracking-[0.18em] text-cyan-300">MULTI-STRATEGY LAB</div><h2 className="mt-1 text-lg font-black text-white">8 независими стратегии · $500 demo капитал за всяка</h2><div className="mt-1 text-[9px] text-slate-600">Еднакъв risk engine: SL 4% · TP 18% · trailing 4% · 1 позиция на стратегия. Така сравняваме entry логиката честно.</div></div>
+          <div><div className="text-[9px] font-black uppercase tracking-[0.18em] text-cyan-300">MULTI-STRATEGY LAB</div><h2 className="mt-1 text-lg font-black text-white">12 агресивни стратегии · $500 demo капитал за всяка</h2><div className="mt-1 text-[9px] text-slate-600">AGGRESSIVE LAB: $150 на сделка · вход на 2s · re-entry 20m · max hold 7m · SL 4% · TP 18% · trailing 4%.</div></div>
           <div className={`rounded-lg border px-2.5 py-1.5 text-[9px] font-black ${state?.strategy_lab?.status === 'online' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>{(state?.strategy_lab?.status || 'CONNECTING').toUpperCase()}</div>
         </div>
         <div className="overflow-x-auto">

@@ -8,13 +8,14 @@ API_URL=os.getenv('NEO_LOCAL_API','http://127.0.0.1:8788/state')
 DEX='https://api.dexscreener.com'
 STATE_PATH=Path(os.getenv('NEO_STRATEGY_LAB_PATH','/var/lib/neo-market/strategy_lab.json'))
 START_BALANCE=float(os.getenv('NEO_LAB_START_BALANCE','500'))
-TRADE_NOTIONAL=float(os.getenv('NEO_LAB_TRADE_NOTIONAL','50'))
+TRADE_NOTIONAL=float(os.getenv('NEO_LAB_TRADE_NOTIONAL','150'))
 POLL_SECONDS=float(os.getenv('NEO_LAB_POLL_SECONDS','2'))
-ENTRY_REFRESH_SECONDS=float(os.getenv('NEO_LAB_ENTRY_REFRESH_SECONDS','5'))
+ENTRY_REFRESH_SECONDS=float(os.getenv('NEO_LAB_ENTRY_REFRESH_SECONDS','2'))
 STOP_LOSS=4.0
 TAKE_PROFIT=18.0
 TRAILING=4.0
-MAX_HOLD_MIN=10.0
+MAX_HOLD_MIN=7.0
+REENTRY_COOLDOWN_MIN=20.0
 SESSION=requests.Session()
 SESSION.headers.update({'user-agent':'NEO-Strategy-Lab/1.0','accept':'application/json'})
 
@@ -56,21 +57,27 @@ def enrich(c,flows):
     b=num(tx.get('buys')); s=num(tx.get('sells'))
     liq=num(c.get('liquidityUsd')); mc=num(c.get('marketCap') or c.get('fdv'))
     pc=c.get('priceChange') or {}
+    vol1h=num((c.get('volume') or {}).get('h1'))
     return {
       'score':num(c.get('score')),'liq':liq,'m5':num(pc.get('m5')),'h1':num(pc.get('h1')),
       'bs':b/max(s,1),'lmc':liq/max(mc,1),'age':num(c.get('ageMinutes'),999999),
+      'vol1h':vol1h,'vol_liq':vol1h/max(liq,1),
       'flow':flows.get(c.get('address'),{'trades':0,'buys':0,'sells':0,'buy_usd':0,'sell_usd':0,'unique_wallets':0,'ratio':0,'max_sell':0})
     }
 
 STRATEGIES=[
- {'id':'ULTRA_PRECISION','name':'Ultra Precision','rule':lambda f: f['score']>=100 and f['liq']>=30000 and 4<=f['m5']<=15 and 1.2<=f['bs']<=2.5 and f['lmc']>=.18 and 15<=f['age']<=120},
- {'id':'PRECISION','name':'Precision','rule':lambda f: f['score']>=97 and f['liq']>=25000 and 3<=f['m5']<=18 and 1.05<=f['bs']<=2.8 and f['lmc']>=.15 and 10<=f['age']<=180},
- {'id':'MOMENTUM','name':'Momentum','rule':lambda f: f['score']>=95 and f['liq']>=20000 and 8<=f['m5']<=25 and f['bs']>=1.3 and f['lmc']>=.10 and 5<=f['age']<=240},
- {'id':'BREAKOUT','name':'Breakout','rule':lambda f: f['score']>=95 and f['liq']>=30000 and 18<f['m5']<=45 and f['bs']>=1.8 and f['lmc']>=.10 and 5<=f['age']<=240},
- {'id':'LIQUIDITY','name':'Liquidity First','rule':lambda f: f['score']>=90 and f['liq']>=50000 and 1<=f['m5']<=15 and f['bs']>=1.0 and f['lmc']>=.18 and 10<=f['age']<=480},
- {'id':'ORDER_FLOW','name':'Order Flow','rule':lambda f: f['score']>=90 and f['liq']>=20000 and -2<=f['m5']<=20 and f['flow']['trades']>=4 and f['flow']['ratio']>=1.8 and f['flow']['unique_wallets']>=2 and f['flow']['max_sell']<max(500,f['flow']['buy_usd']*.6)},
- {'id':'EARLY','name':'Early Runner','rule':lambda f: f['score']>=95 and f['liq']>=20000 and 2<=f['m5']<=15 and f['bs']>=1.2 and f['lmc']>=.15 and 2<=f['age']<=30},
- {'id':'TREND','name':'Balanced Trend','rule':lambda f: f['score']>=92 and f['liq']>=25000 and 1<=f['m5']<=12 and 5<=f['h1']<=120 and 1.0<=f['bs']<=2.5 and f['lmc']>=.12 and 30<=f['age']<=360},
+ {'id':'ULTRA_PRECISION','name':'Ultra Precision','rule':lambda f: f['score']>=98 and f['liq']>=25000 and 3<=f['m5']<=18 and 1.1<=f['bs']<=3.0 and f['lmc']>=.15 and 8<=f['age']<=180},
+ {'id':'PRECISION','name':'Precision','rule':lambda f: f['score']>=95 and f['liq']>=20000 and 2<=f['m5']<=22 and 1.0<=f['bs']<=3.2 and f['lmc']>=.12 and 5<=f['age']<=240},
+ {'id':'MOMENTUM','name':'Momentum','rule':lambda f: f['score']>=90 and f['liq']>=15000 and 5<=f['m5']<=30 and f['bs']>=1.15 and f['lmc']>=.08 and 3<=f['age']<=300},
+ {'id':'BREAKOUT','name':'Breakout','rule':lambda f: f['score']>=90 and f['liq']>=20000 and 15<f['m5']<=55 and f['bs']>=1.4 and f['lmc']>=.08 and 3<=f['age']<=300},
+ {'id':'LIQUIDITY','name':'Liquidity First','rule':lambda f: f['score']>=85 and f['liq']>=40000 and -2<=f['m5']<=20 and f['bs']>=.9 and f['lmc']>=.12 and 5<=f['age']<=720},
+ {'id':'ORDER_FLOW','name':'Order Flow','rule':lambda f: f['score']>=85 and f['liq']>=15000 and -5<=f['m5']<=25 and f['flow']['trades']>=3 and f['flow']['ratio']>=1.3 and f['flow']['unique_wallets']>=1 and f['flow']['max_sell']<max(750,f['flow']['buy_usd']*.8)},
+ {'id':'EARLY','name':'Early Runner','rule':lambda f: f['score']>=90 and f['liq']>=15000 and 1<=f['m5']<=20 and f['bs']>=1.05 and f['lmc']>=.10 and 2<=f['age']<=60},
+ {'id':'TREND','name':'Balanced Trend','rule':lambda f: f['score']>=88 and f['liq']>=20000 and 0<=f['m5']<=15 and 0<=f['h1']<=150 and .9<=f['bs']<=3.0 and f['lmc']>=.10 and 15<=f['age']<=480},
+ {'id':'SCALPER','name':'Fast Scalper','rule':lambda f: f['score']>=85 and f['liq']>=15000 and -3<=f['m5']<=12 and f['bs']>=1.05 and f['lmc']>=.08 and 2<=f['age']<=180},
+ {'id':'VOLUME_SURGE','name':'Volume Surge','rule':lambda f: f['score']>=88 and f['liq']>=15000 and 2<=f['m5']<=28 and f['vol_liq']>=.35 and f['bs']>=1.1 and f['lmc']>=.08 and 3<=f['age']<=360},
+ {'id':'REVERSAL','name':'Reversal Catch','rule':lambda f: f['score']>=85 and f['liq']>=20000 and -10<=f['m5']<=3 and f['h1']>-25 and f['bs']>=1.15 and f['lmc']>=.10 and 10<=f['age']<=480},
+ {'id':'FLOW_MOMENTUM','name':'Flow Momentum','rule':lambda f: f['score']>=85 and f['liq']>=15000 and 0<=f['m5']<=30 and f['flow']['trades']>=3 and f['flow']['ratio']>=1.8 and f['flow']['buy_usd']>=150},
 ]
 def empty_book(s):
     return {'id':s['id'],'name':s['name'],'starting_balance':START_BALANCE,'balance':START_BALANCE,
@@ -139,7 +146,7 @@ def maybe_open(feed,flows):
             a=c.get('address')
             if not a: continue
             last=int((book.get('last_entry_by_address') or {}).get(a,0))
-            if now-last<2*60*60*1000: continue
+            if now-last<REENTRY_COOLDOWN_MIN*60*1000: continue
             f=enrich(c,flows)
             try: ok=bool(s['rule'](f))
             except Exception: ok=False
