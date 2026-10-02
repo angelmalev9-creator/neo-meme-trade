@@ -15,10 +15,10 @@ AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
 ENTRY_SCORE = 80.0
-MAX_POSITIONS = 2
-STOP_LOSS_PCT = 8.0
-TAKE_PROFIT_PCT = 16.0
-TRAILING_PCT = 6.0
+MAX_POSITIONS = 1
+STOP_LOSS_PCT = 4.0
+TAKE_PROFIT_PCT = 18.0
+TRAILING_PCT = 4.0
 MAX_HOLD_MINUTES = 10
 WEAK_CHECK_MINUTES = 5
 STALE_EXIT_MINUTES = 7
@@ -492,13 +492,15 @@ class Monitor:
             quantity = num(position.get('quantity')) or (num(position.get('notional_usd'), TRADE_NOTIONAL_USD) / entry)
             pnl_usd = quantity * (price - entry)
             hold_min = (now_ms() - int(position.get('opened_at', now_ms()))) / 60000
-            trailing_armed = peak >= entry * (1 + TRAILING_PCT / 100)
+            trailing_armed = peak >= entry * 1.06
             trailing_floor = peak * (1 - TRAILING_PCT / 100)
             exit_reason = None
             if pnl_pct <= -STOP_LOSS_PCT:
                 exit_reason = 'STOP_LOSS'
             elif pnl_pct >= TAKE_PROFIT_PCT:
                 exit_reason = 'TAKE_PROFIT'
+            elif peak >= entry * 1.10 and pnl_pct < 4.0:
+                exit_reason = 'PROFIT_PROTECT'
             elif trailing_armed and price <= trailing_floor:
                 exit_reason = 'TRAILING_STOP'
             elif hold_min >= MAX_HOLD_MINUTES:
@@ -589,7 +591,7 @@ class Monitor:
                 continue
             positive = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'positive'][:4]
             risks = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'risk'][:4]
-            size_mult = 0.5 if recovery else 0.75
+            size_mult = 0.25 if recovery else 0.5
             notional = min(TRADE_NOTIONAL_USD * size_mult, STATE.available_balance_usd())
             if notional < 10:
                 continue
