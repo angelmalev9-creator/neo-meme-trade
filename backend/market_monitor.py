@@ -18,11 +18,11 @@ POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
 ENTRY_SCORE = 80.0
-MAX_POSITIONS = 1
+MAX_POSITIONS = 4
 STOP_LOSS_PCT = 4.0
 TAKE_PROFIT_PCT = 18.0
 TRAILING_PCT = 4.0
-MAX_HOLD_MINUTES = 10
+MAX_HOLD_MINUTES = 7
 WEAK_CHECK_MINUTES = 5
 STALE_EXIT_MINUTES = 7
 STALE_MIN_PROFIT_PCT = 3.0
@@ -624,7 +624,7 @@ class Monitor:
             return
         open_addresses = {p.get('address') for p in STATE.positions}
         now = now_ms()
-        cutoff = now - 2 * 60 * 60 * 1000
+        cutoff = now - 20 * 60 * 1000
         recent = {t.get('address') for t in STATE.history if int(t.get('closed_at', 0)) >= cutoff}
         loss_cutoff = now - 24 * 60 * 60 * 1000
         loss_blacklist = {t.get('address') for t in STATE.history if int(t.get('closed_at', 0)) >= loss_cutoff and num(t.get('pnl_usd')) < 0}
@@ -647,28 +647,16 @@ class Monitor:
             market_cap = num(coin.get('marketCap') or coin.get('fdv'))
             liquidity_mc_ratio = liquidity / max(market_cap, 1.0)
 
-            recent_health = [t for t in STATE.history if str(t.get('strategy_id','')).startswith('PRECISION_V')][:12]
-            recent_wins = sum(1 for t in recent_health if num(t.get('pnl_usd')) > 0)
-            recent_wr = (recent_wins / len(recent_health) * 100) if recent_health else 0
-            recent_gp = sum(max(0.0, num(t.get('pnl_usd'))) for t in recent_health)
-            recent_gl = -sum(min(0.0, num(t.get('pnl_usd'))) for t in recent_health)
-            recent_pf = recent_gp / recent_gl if recent_gl > 0 else (99.0 if recent_gp > 0 else 0.0)
-            recovery = len(recent_health) >= 8 and (recent_wr < 50 or recent_pf < 1.0)
-            precision_core = (
-                score >= (99 if recovery else 97)
-                and liquidity >= (30000 if recovery else 25000)
-                and 3 <= change_m5 <= 18
-                and 1.05 <= buy_sell_ratio <= 2.8
-                and liquidity_mc_ratio >= 0.15
-                and 10 <= age <= 180
-            )
-            if not precision_core:
+            flow = STATE.live_flow(address, 60)
+            order_flow_core = (score >= 85 and liquidity >= 15000 and -5 <= change_m5 <= 25 and flow['trades'] >= 3 and flow['buy_sell_usd_ratio'] >= 1.3 and flow['unique_wallets'] >= 1 and flow['max_sell_usd'] < max(750.0, flow['buy_usd'] * 0.8))
+            scalper_core = (score >= 85 and liquidity >= 15000 and -3 <= change_m5 <= 12 and buy_sell_ratio >= 1.05 and liquidity_mc_ratio >= 0.08 and 2 <= age <= 180)
+            liquidity_core = (score >= 85 and liquidity >= 40000 and -2 <= change_m5 <= 20 and buy_sell_ratio >= 0.9 and liquidity_mc_ratio >= 0.12 and 5 <= age <= 720)
+            precision_core = (score >= 95 and liquidity >= 20000 and 2 <= change_m5 <= 22 and 1.0 <= buy_sell_ratio <= 3.2 and liquidity_mc_ratio >= 0.12 and 5 <= age <= 240)
+            if not (order_flow_core or scalper_core or liquidity_core or precision_core):
                 continue
-            strategy_id = 'PRECISION_V3_ROBUST'
-            learning = adaptive_profile({'strategy_id': strategy_id, 'score': score, 'liquidity': liquidity, 'age': age, 'change_m5': change_m5})
-            if learning['blocked']:
-                continue
-            flow = STATE.live_flow(address, 30)
+            strategy_id = 'TOP4_ORDER_FLOW' if order_flow_core else 'TOP4_SCALPER' if scalper_core else 'TOP4_LIQUIDITY' if liquidity_core else 'TOP4_PRECISION'
+            learning = {'sample': 0, 'win_rate': 0, 'profit_factor': 0, 'recent_losses': 0, 'bonus': 0, 'blocked': False}
+            recovery = False
             if flow['trades'] >= 5 and (flow['buy_sell_usd_ratio'] < 1.15 or flow['max_sell_usd'] >= max(750.0, flow['buy_usd'] * 0.75)):
                 continue
             price = num(coin.get('priceUsd'))
