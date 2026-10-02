@@ -655,6 +655,8 @@ class Monitor:
             if not (order_flow_core or scalper_core or liquidity_core or precision_core):
                 continue
             strategy_id = 'TOP4_ORDER_FLOW' if order_flow_core else 'TOP4_SCALPER' if scalper_core else 'TOP4_LIQUIDITY' if liquidity_core else 'TOP4_PRECISION'
+            if strategy_id in {p.get('strategy_id') for p in STATE.positions}:
+                continue
             learning = {'sample': 0, 'win_rate': 0, 'profit_factor': 0, 'recent_losses': 0, 'bonus': 0, 'blocked': False}
             recovery = False
             if flow['trades'] >= 5 and (flow['buy_sell_usd_ratio'] < 1.15 or flow['max_sell_usd'] >= max(750.0, flow['buy_usd'] * 0.75)):
