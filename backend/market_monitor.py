@@ -167,12 +167,34 @@ class State:
         sells = [e for e in rows if e.get('direction') == 'SELL']
         buy_usd = sum(num(e.get('usd_amount')) for e in buys)
         sell_usd = sum(num(e.get('usd_amount')) for e in sells)
-        return {'seconds': seconds, 'trades': len(rows), 'buys': len(buys), 'sells': len(sells),
-                'buy_usd': round(buy_usd, 2), 'sell_usd': round(sell_usd, 2),
-                'buy_sell_usd_ratio': round(buy_usd / max(sell_usd, 1.0), 2),
-                'unique_wallets': len({e.get('wallet') for e in rows if e.get('wallet')}),
-                'max_buy_usd': round(max([num(e.get('usd_amount')) for e in buys] or [0]), 2),
-                'max_sell_usd': round(max([num(e.get('usd_amount')) for e in sells] or [0]), 2)}
+        buy_counts: dict[str, int] = {}
+        sell_counts: dict[str, int] = {}
+        for e in buys:
+            wallet = e.get('wallet')
+            if wallet:
+                buy_counts[wallet] = buy_counts.get(wallet, 0) + 1
+        for e in sells:
+            wallet = e.get('wallet')
+            if wallet:
+                sell_counts[wallet] = sell_counts.get(wallet, 0) + 1
+        buyer_wallets = set(buy_counts)
+        seller_wallets = set(sell_counts)
+        repeat_buy_wallets = sum(1 for count in buy_counts.values() if count >= 2)
+        whale_buy_usd = sum(num(e.get('usd_amount')) for e in buys if num(e.get('usd_amount')) >= 750)
+        whale_sell_usd = sum(num(e.get('usd_amount')) for e in sells if num(e.get('usd_amount')) >= 750)
+        return {
+            'seconds': seconds, 'trades': len(rows), 'buys': len(buys), 'sells': len(sells),
+            'buy_usd': round(buy_usd, 2), 'sell_usd': round(sell_usd, 2),
+            'net_buy_usd': round(buy_usd - sell_usd, 2),
+            'buy_sell_usd_ratio': round(buy_usd / max(sell_usd, 1.0), 2),
+            'unique_wallets': len(buyer_wallets | seller_wallets),
+            'buyer_wallets': len(buyer_wallets), 'seller_wallets': len(seller_wallets),
+            'wallet_buy_sell_ratio': round(len(buyer_wallets) / max(len(seller_wallets), 1), 2),
+            'repeat_buy_wallets': repeat_buy_wallets,
+            'whale_buy_usd': round(whale_buy_usd, 2), 'whale_sell_usd': round(whale_sell_usd, 2),
+            'max_buy_usd': round(max([num(e.get('usd_amount')) for e in buys] or [0]), 2),
+            'max_sell_usd': round(max([num(e.get('usd_amount')) for e in sells] or [0]), 2),
+        }
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -516,6 +538,124 @@ class Monitor:
             })
             STATE.price_history[address] = points[-480:]
 
+    def market_context(self, coin: dict[str, Any], position: dict[str, Any] | None = None) -> dict[str, Any]:
+        address = coin.get('address') or (position or {}).get('address')
+        fast = STATE.live_flow(address, 30)
+        slow = STATE.live_flow(address, 300)
+        changes = coin.get('priceChange') or {}
+        tx_m5 = (coin.get('txns') or {}).get('m5') or {}
+        m5 = num(changes.get('m5'))
+        h1 = num(changes.get('h1'))
+        market_ratio = num(tx_m5.get('buys')) / max(num(tx_m5.get('sells')), 1.0)
+        liquidity = num(coin.get('liquidityUsd'))
+        entry_liquidity = num((position or {}).get('entry_liquidity_usd'), liquidity)
+        liquidity_ratio = liquidity / max(entry_liquidity, 1.0)
+        score = 50.0
+
+        fast_ratio = num(fast.get('buy_sell_usd_ratio'))
+        slow_ratio = num(slow.get('buy_sell_usd_ratio'))
+        if fast_ratio >= 3.0:
+            score += 18
+        elif fast_ratio >= 2.0:
+            score += 12
+        elif fast_ratio >= 1.4:
+            score += 6
+        elif fast_ratio < 0.8:
+            score -= 20
+        elif fast_ratio < 1.0:
+            score -= 10
+
+        if slow_ratio >= 2.0:
+            score += 12
+        elif slow_ratio >= 1.4:
+            score += 7
+        elif slow_ratio < 0.8:
+            score -= 15
+        elif slow_ratio < 1.0:
+            score -= 7
+
+        if num(slow.get('unique_wallets')) >= 10:
+            score += 6
+        elif num(slow.get('unique_wallets')) >= 5:
+            score += 3
+        elif num(slow.get('unique_wallets')) <= 2:
+            score -= 5
+
+        if num(slow.get('repeat_buy_wallets')) >= 3:
+            score += 6
+        elif num(slow.get('repeat_buy_wallets')) >= 1:
+            score += 3
+
+        whale_buy = num(slow.get('whale_buy_usd'))
+        whale_sell = num(slow.get('whale_sell_usd'))
+        if whale_buy > 0 and whale_buy >= whale_sell * 1.3:
+            score += 6
+        elif whale_sell > 0 and whale_sell >= max(whale_buy * 1.3, 750.0):
+            score -= 8
+
+        if 0 <= m5 <= 10:
+            score += 8
+        elif -2 <= m5 < 0:
+            score += 2
+        elif m5 > 20:
+            score -= 8
+        elif m5 < -5:
+            score -= 15
+
+        if 0 <= h1 <= 120:
+            score += 4
+        elif h1 < -15:
+            score -= 8
+        elif h1 > 250:
+            score -= 5
+
+        if market_ratio >= 1.4:
+            score += 8
+        elif market_ratio >= 1.1:
+            score += 4
+        elif market_ratio < 0.8:
+            score -= 8
+
+        if liquidity_ratio >= 0.95:
+            score += 3
+        elif liquidity_ratio < 0.80:
+            score -= 15
+        elif liquidity_ratio < 0.90:
+            score -= 7
+
+        neo_score = num(coin.get('score'))
+        if neo_score >= 95:
+            score += 4
+        elif neo_score < 85:
+            score -= 4
+
+        conviction = round(clamp(score), 1)
+        if conviction >= 85:
+            mode, max_hold, target, trail_arm, trail = 'RUNNER', 60.0, None, 15.0, 7.0
+        elif conviction >= 72:
+            mode, max_hold, target, trail_arm, trail = 'STRONG', 30.0, None, 12.0, 6.0
+        elif conviction >= 58:
+            mode, max_hold, target, trail_arm, trail = 'NORMAL', 15.0, 20.0, 9.0, 5.0
+        elif conviction >= 45:
+            mode, max_hold, target, trail_arm, trail = 'CAUTIOUS', 8.0, 14.0, 7.0, 4.0
+        else:
+            mode, max_hold, target, trail_arm, trail = 'WEAK', 4.0, 8.0, 5.0, 3.0
+
+        return {
+            'conviction': conviction, 'mode': mode, 'max_hold_minutes': max_hold,
+            'target_pct': target, 'trail_arm_pct': trail_arm, 'trail_pct': trail,
+            'm5': round(m5, 3), 'h1': round(h1, 3), 'market_buy_sell_ratio': round(market_ratio, 3),
+            'liquidity_ratio_vs_entry': round(liquidity_ratio, 3),
+            'fast_flow': fast, 'slow_flow': slow,
+            'holder_proxy': {
+                'unique_wallets_5m': slow.get('unique_wallets', 0),
+                'repeat_buy_wallets_5m': slow.get('repeat_buy_wallets', 0),
+                'wallet_buy_sell_ratio_5m': slow.get('wallet_buy_sell_ratio', 0),
+                'whale_buy_usd_5m': slow.get('whale_buy_usd', 0),
+                'whale_sell_usd_5m': slow.get('whale_sell_usd', 0),
+            },
+        }
+
     def update_positions(self, by_address: dict[str, dict[str, Any]]) -> None:
         next_positions = []
         for position in STATE.positions:
@@ -532,25 +672,48 @@ class Monitor:
             quantity = num(position.get('quantity')) or (num(position.get('notional_usd'), TRADE_NOTIONAL_USD) / entry)
             pnl_usd = quantity * (price - entry)
             hold_min = (now_ms() - int(position.get('opened_at', now_ms()))) / 60000
-            flow = STATE.live_flow(position.get('address'), 20)
-            trailing_armed = peak >= entry * 1.06
-            trailing_floor = peak * (1 - TRAILING_PCT / 100)
+            context = self.market_context(coin, position)
+            conviction = num(context.get('conviction'))
+            target_pct = context.get('target_pct')
+            max_hold = num(context.get('max_hold_minutes'), MAX_HOLD_MINUTES)
+            trail_arm_pct = num(context.get('trail_arm_pct'), 8.0)
+            trail_pct = num(context.get('trail_pct'), TRAILING_PCT)
+            fast_flow = context.get('fast_flow') or {}
+            slow_flow = context.get('slow_flow') or {}
+            trailing_armed = peak >= entry * (1 + trail_arm_pct / 100)
+            trailing_floor = peak * (1 - trail_pct / 100)
             exit_reason = None
-            if flow['trades'] >= 4 and flow['sells'] >= 3 and flow['sell_usd'] >= max(250.0, flow['buy_usd'] * 2.5) and pnl_pct < 3.0:
-                exit_reason = 'ORDERFLOW_EXIT'
-            elif pnl_pct <= -STOP_LOSS_PCT:
+
+            # The hard stop is always respected. Everything else can only exit earlier
+            # or let a strong winner run longer while conviction remains high.
+            if pnl_pct <= -STOP_LOSS_PCT:
                 exit_reason = 'STOP_LOSS'
-            elif pnl_pct >= TAKE_PROFIT_PCT:
-                exit_reason = 'TAKE_PROFIT'
-            elif peak >= entry * 1.10 and pnl_pct < 4.0:
-                exit_reason = 'PROFIT_PROTECT'
+            elif conviction < 35 and pnl_pct < 0:
+                exit_reason = 'CONVICTION_EXIT'
+            elif (
+                num(fast_flow.get('trades')) >= 4
+                and num(fast_flow.get('sells')) >= 3
+                and num(fast_flow.get('sell_usd')) >= max(200.0, num(fast_flow.get('buy_usd')) * 2.0)
+                and pnl_pct < 3.0
+            ):
+                exit_reason = 'ORDERFLOW_EXIT'
+            elif target_pct is not None and pnl_pct >= num(target_pct):
+                exit_reason = f'ADAPTIVE_TP_{num(target_pct):.0f}'
+            elif peak >= entry * 1.10 and conviction < 50 and pnl_pct > 2.0:
+                exit_reason = 'CONVICTION_PROFIT_LOCK'
             elif trailing_armed and price <= trailing_floor:
-                exit_reason = 'TRAILING_STOP'
-            elif hold_min >= MAX_HOLD_MINUTES:
-                exit_reason = 'MAX_HOLD'
+                exit_reason = 'ADAPTIVE_TRAILING'
+            elif hold_min >= max_hold and conviction < 72:
+                exit_reason = 'ADAPTIVE_MAX_HOLD'
+            elif hold_min >= 120:
+                exit_reason = 'ABSOLUTE_MAX_HOLD'
             updated = {
                 **position, 'current_price': price, 'peak_price': peak,
                 'pnl_pct': round(pnl_pct, 3), 'pnl_usd': round(pnl_usd, 3),
+                'conviction': conviction, 'hold_mode': context.get('mode'),
+                'adaptive_target_pct': target_pct, 'adaptive_max_hold_minutes': max_hold,
+                'adaptive_trail_arm_pct': trail_arm_pct, 'adaptive_trail_pct': trail_pct,
+                'market_context': context,
                 'updated_at': now_ms(), 'current_score': coin.get('score'),
             }
             if exit_reason:
@@ -646,7 +809,10 @@ class Monitor:
             )
             if not order_flow_core:
                 continue
-            strategy_id = 'ORDER_FLOW_BEST'
+            context = self.market_context(coin)
+            if num(context.get('conviction')) < 75:
+                continue
+            strategy_id = 'ORDER_FLOW_ADAPTIVE'
             learning = {'sample': 0, 'win_rate': 0, 'profit_factor': 0, 'recent_losses': 0, 'bonus': 0, 'blocked': False}
             recovery = False
             price = num(coin.get('priceUsd'))
@@ -666,7 +832,9 @@ class Monitor:
                 'symbol': coin.get('symbol'), 'imageUrl': coin.get('imageUrl'),
                 'entry_price': price, 'current_price': price, 'peak_price': price,
                 'trade_no': STATE.trade_seq, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
-                'learning_mode': 'ADAPTIVE_V2_FLOW', 'entry_flow': flow, 'learning_sample': learning['sample'],
+                'learning_mode': 'ADAPTIVE_CONTEXT_HOLD', 'entry_flow': flow,
+                'entry_context': context, 'entry_conviction': context.get('conviction'),
+                'entry_hold_mode': context.get('mode'), 'learning_sample': learning['sample'],
                 'learning_win_rate': learning['win_rate'], 'learning_profit_factor': learning['profit_factor'],
                 'learning_recent_losses': learning['recent_losses'], 'learning_bonus': learning['bonus'],
                 'notional_usd': round(notional, 8), 'quantity': quantity, 'score': coin.get('score'),
