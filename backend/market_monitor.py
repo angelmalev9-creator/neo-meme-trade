@@ -18,7 +18,7 @@ POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
 ENTRY_SCORE = 80.0
-MAX_POSITIONS = 4
+MAX_POSITIONS = 1
 STOP_LOSS_PCT = 4.0
 TAKE_PROFIT_PCT = 18.0
 TRAILING_PCT = 4.0
@@ -29,7 +29,7 @@ STALE_MIN_PROFIT_PCT = 3.0
 LEARNING_WINDOW = 60
 HEALTH_WINDOW = 12
 STARTING_BALANCE_USD = 1000.0
-TRADE_NOTIONAL_USD = 100.0
+TRADE_NOTIONAL_USD = 150.0
 MAX_DAILY_LOSS_USD = 30.0
 MIN_LIQUIDITY_USD = 10000.0
 SESSION = requests.Session()
@@ -542,18 +542,12 @@ class Monitor:
                 exit_reason = 'STOP_LOSS'
             elif pnl_pct >= TAKE_PROFIT_PCT:
                 exit_reason = 'TAKE_PROFIT'
-            elif peak >= entry * 1.08 and pnl_pct > 0 and flow['trades'] >= 3 and flow['sell_usd'] > max(150.0, flow['buy_usd'] * 1.6):
-                exit_reason = 'FLOW_PROFIT_PROTECT'
             elif peak >= entry * 1.10 and pnl_pct < 4.0:
                 exit_reason = 'PROFIT_PROTECT'
             elif trailing_armed and price <= trailing_floor:
                 exit_reason = 'TRAILING_STOP'
             elif hold_min >= MAX_HOLD_MINUTES:
-                exit_reason = 'MAX_HOLD_10M'
-            elif hold_min >= STALE_EXIT_MINUTES and pnl_pct < STALE_MIN_PROFIT_PCT:
-                exit_reason = 'STALE_AFTER_7M'
-            elif hold_min >= WEAK_CHECK_MINUTES and pnl_pct <= 0:
-                exit_reason = 'WEAK_AFTER_5M'
+                exit_reason = 'MAX_HOLD'
             updated = {
                 **position, 'current_price': price, 'peak_price': peak,
                 'pnl_pct': round(pnl_pct, 3), 'pnl_usd': round(pnl_usd, 3),
@@ -626,15 +620,11 @@ class Monitor:
         now = now_ms()
         cutoff = now - 20 * 60 * 1000
         recent = {t.get('address') for t in STATE.history if int(t.get('closed_at', 0)) >= cutoff}
-        loss_cutoff = now - 24 * 60 * 60 * 1000
-        loss_blacklist = {t.get('address') for t in STATE.history if int(t.get('closed_at', 0)) >= loss_cutoff and num(t.get('pnl_usd')) < 0}
         for coin in feed:
             if len(STATE.positions) >= MAX_POSITIONS:
                 break
             address = coin.get('address')
-            if not address or address in open_addresses or address in recent or address in loss_blacklist:
-                continue
-            if coin.get('posture') != 'SETUP' or num(coin.get('score')) < ENTRY_SCORE:
+            if not address or address in open_addresses or address in recent:
                 continue
             score = num(coin.get('score'))
             liquidity = num(coin.get('liquidityUsd'))
@@ -648,15 +638,15 @@ class Monitor:
             liquidity_mc_ratio = liquidity / max(market_cap, 1.0)
 
             flow = STATE.live_flow(address, 60)
-            order_flow_core = (score >= 85 and liquidity >= 15000 and -5 <= change_m5 <= 25 and flow['trades'] >= 3 and flow['buy_sell_usd_ratio'] >= 1.3 and flow['unique_wallets'] >= 1 and flow['max_sell_usd'] < max(750.0, flow['buy_usd'] * 0.8))
-            scalper_core = (score >= 85 and liquidity >= 15000 and -3 <= change_m5 <= 12 and buy_sell_ratio >= 1.05 and liquidity_mc_ratio >= 0.08 and 2 <= age <= 180)
-            liquidity_core = (score >= 85 and liquidity >= 40000 and -2 <= change_m5 <= 20 and buy_sell_ratio >= 0.9 and liquidity_mc_ratio >= 0.12 and 5 <= age <= 720)
-            precision_core = (score >= 95 and liquidity >= 20000 and 2 <= change_m5 <= 22 and 1.0 <= buy_sell_ratio <= 3.2 and liquidity_mc_ratio >= 0.12 and 5 <= age <= 240)
-            if not (order_flow_core or scalper_core or liquidity_core or precision_core):
+            order_flow_core = (
+                score >= 85 and liquidity >= 15000 and -5 <= change_m5 <= 25
+                and flow['trades'] >= 3 and flow['buy_sell_usd_ratio'] >= 1.3
+                and flow['unique_wallets'] >= 1
+                and flow['max_sell_usd'] < max(750.0, flow['buy_usd'] * 0.8)
+            )
+            if not order_flow_core:
                 continue
-            strategy_id = 'TOP4_ORDER_FLOW' if order_flow_core else 'TOP4_SCALPER' if scalper_core else 'TOP4_LIQUIDITY' if liquidity_core else 'TOP4_PRECISION'
-            if strategy_id in {p.get('strategy_id') for p in STATE.positions}:
-                continue
+            strategy_id = 'ORDER_FLOW_BEST'
             learning = {'sample': 0, 'win_rate': 0, 'profit_factor': 0, 'recent_losses': 0, 'bonus': 0, 'blocked': False}
             recovery = False
             if flow['trades'] >= 5 and (flow['buy_sell_usd_ratio'] < 1.15 or flow['max_sell_usd'] >= max(750.0, flow['buy_usd'] * 0.75)):
@@ -666,8 +656,7 @@ class Monitor:
                 continue
             positive = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'positive'][:4]
             risks = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'risk'][:4]
-            size_mult = 0.25 if recovery else 0.5
-            notional = min(TRADE_NOTIONAL_USD * size_mult, STATE.available_balance_usd())
+            notional = min(TRADE_NOTIONAL_USD, STATE.available_balance_usd())
             if notional < 10:
                 continue
             quantity = notional / price
