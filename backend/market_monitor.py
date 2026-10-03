@@ -557,8 +557,8 @@ class Monitor:
                 dynamic_tp_pct = 8.0
                 dynamic_trailing_pct = 2.0
 
-            trailing_armed = peak >= entry * 1.04
-            trailing_floor = peak * (1 - dynamic_trailing_pct / 100)
+            trailing_armed = peak >= entry * 1.08
+            trailing_floor = max(entry * 1.03, peak * (1 - dynamic_trailing_pct / 100))
             exit_reason = None
 
             # Very fast soft-cut when the tape turns against the position.
@@ -570,7 +570,7 @@ class Monitor:
                 exit_reason = 'STOP_LOSS_5'
             elif pnl_pct >= dynamic_tp_pct:
                 exit_reason = f'DYNAMIC_TP_{dynamic_tp_pct:.0f}'
-            elif peak >= entry * 1.08 and pnl_pct > 1.0 and live_ratio < 1.0:
+            elif peak >= entry * 1.10 and pnl_pct > 3.0 and live_ratio < 1.0:
                 exit_reason = 'FLOW_PROFIT_PROTECT'
             elif trailing_armed and price <= trailing_floor:
                 exit_reason = 'DYNAMIC_TRAILING'
@@ -669,7 +669,7 @@ class Monitor:
 
             flow = STATE.live_flow(address, 60)
             order_flow_core = (
-                score >= 85 and liquidity >= 15000 and -5 <= change_m5 <= 25
+                score >= 85 and liquidity >= 30000 and -5 <= change_m5 <= 20
                 and flow['trades'] >= 3 and flow['buy_sell_usd_ratio'] >= 1.3
                 and flow['unique_wallets'] >= 1
                 and flow['max_sell_usd'] < max(750.0, flow['buy_usd'] * 0.8)
