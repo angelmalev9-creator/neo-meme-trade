@@ -649,8 +649,6 @@ class Monitor:
             strategy_id = 'ORDER_FLOW_BEST'
             learning = {'sample': 0, 'win_rate': 0, 'profit_factor': 0, 'recent_losses': 0, 'bonus': 0, 'blocked': False}
             recovery = False
-            if flow['trades'] >= 5 and (flow['buy_sell_usd_ratio'] < 1.15 or flow['max_sell_usd'] >= max(750.0, flow['buy_usd'] * 0.75)):
-                continue
             price = num(coin.get('priceUsd'))
             if price <= 0:
                 continue
