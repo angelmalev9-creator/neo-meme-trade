@@ -9,18 +9,18 @@ import requests
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
 SCAN_SECONDS = int(os.getenv('NEO_SCAN_SECONDS', '15'))
-POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '1'))
+POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '0.5'))
 STATE_PATH = Path(os.getenv('NEO_MARKET_STATE_PATH', '/var/lib/neo-market/state.json'))
 AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.jsonl'))
 LIVE_TAPE_PATH = Path(os.getenv('NEO_LIVE_TAPE_PATH', '/var/lib/neo-market/live_tape.json'))
 STRATEGY_LAB_PATH = Path(os.getenv('NEO_STRATEGY_LAB_PATH', '/var/lib/neo-market/strategy_lab.json'))
-POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '1'))
+POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '0.5'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
 ENTRY_SCORE = 80.0
 MAX_POSITIONS = 1
-STOP_LOSS_PCT = 1.5
-TAKE_PROFIT_PCT = 18.0
+STOP_LOSS_PCT = 5.0
+TAKE_PROFIT_PCT = 20.0
 TRAILING_PCT = 4.0
 MAX_HOLD_MINUTES = 7
 WEAK_CHECK_MINUTES = 5
@@ -532,25 +532,55 @@ class Monitor:
             quantity = num(position.get('quantity')) or (num(position.get('notional_usd'), TRADE_NOTIONAL_USD) / entry)
             pnl_usd = quantity * (price - entry)
             hold_min = (now_ms() - int(position.get('opened_at', now_ms()))) / 60000
-            flow = STATE.live_flow(position.get('address'), 20)
+            flow = STATE.live_flow(position.get('address'), 12)
+            change_m5 = num((coin.get('priceChange') or {}).get('m5'))
+            tx_m5 = (coin.get('txns') or {}).get('m5') or {}
+            buys_m5 = num(tx_m5.get('buys'))
+            sells_m5 = num(tx_m5.get('sells'))
+            market_buy_sell = buys_m5 / max(sells_m5, 1.0)
+            live_ratio = num(flow.get('buy_sell_usd_ratio'))
+
+            # Hard SL is always 5%. Feed/trend logic may cut earlier, never loosen it.
+            hard_stop_pct = STOP_LOSS_PCT
+
+            # Base TP is 20%, but if momentum/flow fades NEO accepts a smaller win.
+            if flow['trades'] >= 4 and live_ratio >= 2.2 and market_buy_sell >= 1.4 and change_m5 >= 3:
+                dynamic_tp_pct = TAKE_PROFIT_PCT
+                dynamic_trailing_pct = 4.0
+            elif (flow['trades'] >= 3 and live_ratio >= 1.5) or (market_buy_sell >= 1.25 and change_m5 >= 1):
+                dynamic_tp_pct = 16.0
+                dynamic_trailing_pct = 3.0
+            elif live_ratio >= 1.05 and change_m5 >= -1:
+                dynamic_tp_pct = 12.0
+                dynamic_trailing_pct = 2.5
+            else:
+                dynamic_tp_pct = 8.0
+                dynamic_trailing_pct = 2.0
+
             trailing_armed = peak >= entry * 1.04
-            trailing_floor = peak * (1 - TRAILING_PCT / 100)
+            trailing_floor = peak * (1 - dynamic_trailing_pct / 100)
             exit_reason = None
-            if flow['trades'] >= 4 and flow['sells'] >= 3 and flow['sell_usd'] >= max(250.0, flow['buy_usd'] * 2.5) and pnl_pct < 3.0:
-                exit_reason = 'ORDERFLOW_EXIT'
-            elif pnl_pct <= -STOP_LOSS_PCT:
-                exit_reason = 'STOP_LOSS'
-            elif pnl_pct >= TAKE_PROFIT_PCT:
-                exit_reason = 'TAKE_PROFIT'
-            elif peak >= entry * 1.10 and pnl_pct < 4.0:
-                exit_reason = 'PROFIT_PROTECT'
+
+            # Very fast soft-cut when the tape turns against the position.
+            if pnl_pct < 0 and flow['trades'] >= 4 and flow['sells'] >= 3 and live_ratio < 0.75:
+                exit_reason = 'FAST_FLOW_CUT'
+            elif pnl_pct < -1.5 and market_buy_sell < 0.85 and change_m5 < -2:
+                exit_reason = 'TREND_CUT'
+            elif pnl_pct <= -hard_stop_pct:
+                exit_reason = 'STOP_LOSS_5'
+            elif pnl_pct >= dynamic_tp_pct:
+                exit_reason = f'DYNAMIC_TP_{dynamic_tp_pct:.0f}'
+            elif peak >= entry * 1.08 and pnl_pct > 1.0 and live_ratio < 1.0:
+                exit_reason = 'FLOW_PROFIT_PROTECT'
             elif trailing_armed and price <= trailing_floor:
-                exit_reason = 'TRAILING_STOP'
+                exit_reason = 'DYNAMIC_TRAILING'
             elif hold_min >= MAX_HOLD_MINUTES:
                 exit_reason = 'MAX_HOLD'
             updated = {
                 **position, 'current_price': price, 'peak_price': peak,
                 'pnl_pct': round(pnl_pct, 3), 'pnl_usd': round(pnl_usd, 3),
+                'dynamic_tp_pct': dynamic_tp_pct, 'dynamic_trailing_pct': dynamic_trailing_pct,
+                'live_flow_ratio': round(live_ratio, 3), 'market_buy_sell_ratio': round(market_buy_sell, 3),
                 'updated_at': now_ms(), 'current_score': coin.get('score'),
             }
             if exit_reason:
