@@ -200,6 +200,7 @@ class State:
         with self.lock:
             wins = sum(1 for t in self.history if num(t.get('pnl_pct')) > 0)
             closed = len(self.history)
+            closed_total = max(self.trade_seq - len(self.positions), closed)
             tape = read_live_tape()
             return {
                 'running': self.running,
@@ -218,7 +219,7 @@ class State:
                 'stats': {
                     'feed_count': len(self.feed),
                     'open_positions': len(self.positions),
-                    'closed_trades': closed,
+                    'closed_trades': closed_total,
                     'wins': wins,
                     'win_rate': round((wins / closed) * 100, 1) if closed else 0,
                     'realized_today_usd': round(self.realized_today(), 2),
