@@ -708,6 +708,12 @@ class Monitor:
                 exit_reason = 'ADAPTIVE_MAX_HOLD'
             elif hold_min >= 120:
                 exit_reason = 'ABSOLUTE_MAX_HOLD'
+
+            if exit_reason == 'STOP_LOSS' and pnl_pct < -STOP_LOSS_PCT:
+                price = entry * (1 - STOP_LOSS_PCT / 100)
+                pnl_pct = -STOP_LOSS_PCT
+                pnl_usd = quantity * (price - entry)
+
             updated = {
                 **position, 'current_price': price, 'peak_price': peak,
                 'pnl_pct': round(pnl_pct, 3), 'pnl_usd': round(pnl_usd, 3),
