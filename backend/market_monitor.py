@@ -9,17 +9,17 @@ import requests
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
 SCAN_SECONDS = int(os.getenv('NEO_SCAN_SECONDS', '15'))
-POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
+POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '1'))
 STATE_PATH = Path(os.getenv('NEO_MARKET_STATE_PATH', '/var/lib/neo-market/state.json'))
 AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.jsonl'))
 LIVE_TAPE_PATH = Path(os.getenv('NEO_LIVE_TAPE_PATH', '/var/lib/neo-market/live_tape.json'))
 STRATEGY_LAB_PATH = Path(os.getenv('NEO_STRATEGY_LAB_PATH', '/var/lib/neo-market/strategy_lab.json'))
-POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
+POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '1'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
 ENTRY_SCORE = 80.0
 MAX_POSITIONS = 1
-STOP_LOSS_PCT = 4.0
+STOP_LOSS_PCT = 1.5
 TAKE_PROFIT_PCT = 18.0
 TRAILING_PCT = 4.0
 MAX_HOLD_MINUTES = 7
@@ -533,7 +533,7 @@ class Monitor:
             pnl_usd = quantity * (price - entry)
             hold_min = (now_ms() - int(position.get('opened_at', now_ms()))) / 60000
             flow = STATE.live_flow(position.get('address'), 20)
-            trailing_armed = peak >= entry * 1.06
+            trailing_armed = peak >= entry * 1.04
             trailing_floor = peak * (1 - TRAILING_PCT / 100)
             exit_reason = None
             if flow['trades'] >= 4 and flow['sells'] >= 3 and flow['sell_usd'] >= max(250.0, flow['buy_usd'] * 2.5) and pnl_pct < 3.0:
