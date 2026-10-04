@@ -1,3 +1,4 @@
+import AstraBrainPanel, { type AstraSnapshot } from './components/AstraBrainPanel';
 import { useEffect, useMemo, useState } from 'react';
 import {
   Activity, Bot, ChevronRight, CircleDollarSign, Clock3, ExternalLink,
@@ -40,7 +41,7 @@ type PricePoint = { ts: number; price: number; liquidity: number; volumeH1: numb
 type LabPosition = { symbol: string; address: string; strategy_id: string; opened_at: number; pnl_pct: number; notional_usd: number };
 type LabBook = { id: string; name: string; starting_balance: number; balance: number; position: LabPosition | null; history: Position[] };
 type LabStats = { trades: number; wins: number; losses: number; win_rate: number; profit_factor: number; realized_pnl: number; equity: number; return_pct: number; open: boolean };
-type StrategyLab = { status: string; updated_at: number; started_at: number; books: Record<string, LabBook>; stats: Record<string, LabStats>; error?: string };
+type StrategyLab = { astra?: AstraSnapshot; status: string; updated_at: number; started_at: number; books: Record<string, LabBook>; stats: Record<string, LabStats>; error?: string };
 type LiveTrade = { ts: number; direction: 'BUY' | 'SELL'; token_amount: number; usd_amount: number; wallet: string; note: string; address: string; pairAddress: string; symbol: string; signature: string; slot: number };
 type FlowStats = { seconds: number; trades: number; buys: number; sells: number; buy_usd: number; sell_usd: number; buy_sell_usd_ratio: number; unique_wallets: number; max_buy_usd: number; max_sell_usd: number };
 type TapeStatus = { status?: string; tracked_pairs?: number; updated_at?: number; source?: string; error?: string | null };
@@ -330,18 +331,19 @@ export default function App() {
 
       <section className="mt-4 overflow-hidden rounded-3xl border border-cyan-400/15 bg-[#0b0e11]">
         <div className="flex flex-col gap-3 border-b border-white/[0.07] p-4 sm:flex-row sm:items-center sm:justify-between">
-          <div><div className="text-[9px] font-black uppercase tracking-[0.18em] text-cyan-300">MULTI-STRATEGY LAB</div><h2 className="mt-1 text-lg font-black text-white">33 стратегии · Fast Scalper $100 · останалите $500</h2><div className="mt-1 text-[9px] text-slate-600">LAB: всички 33 стратегии · SL -3% NET · TP +10% NET · fee + price impact + slippage + network cost · entry логиките са различни.</div></div>
+          <div><div className="text-[9px] font-black uppercase tracking-[0.18em] text-cyan-300">MULTI-STRATEGY LAB</div><h2 className="mt-1 text-lg font-black text-white">33 стратегии + Astra 6 Brain · Fast Scalper $100 · останалите $500</h2><div className="mt-1 text-[9px] text-slate-600">Старите 33 теста: −3% / +10% с разходен модел. Astra 6 Brain: −2% / +10–20% с Jupiter котировки и отделен капитал.</div></div>
           <div className={`rounded-lg border px-2.5 py-1.5 text-[9px] font-black ${state?.strategy_lab?.status === 'online' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>{(state?.strategy_lab?.status || 'CONNECTING').toUpperCase()}</div>
         </div>
+        <AstraBrainPanel data={state?.strategy_lab?.astra} />
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1050px] text-left">
             <thead><tr className="border-b border-white/[0.06] text-[8px] font-black uppercase tracking-[0.14em] text-slate-700"><th className="px-4 py-3">Стратегия</th><th className="px-4 py-3">Balance</th><th className="px-4 py-3">Equity</th><th className="px-4 py-3">PnL</th><th className="px-4 py-3">Сделки</th><th className="px-4 py-3">Win rate</th><th className="px-4 py-3">PF</th><th className="px-4 py-3">Отворена позиция</th></tr></thead>
             <tbody>
-              {Object.values(state?.strategy_lab?.books || {}).sort((a,b) => (state?.strategy_lab?.stats?.[b.id]?.equity ?? b.balance) - (state?.strategy_lab?.stats?.[a.id]?.equity ?? a.balance)).map(book => {
+              {Object.values(state?.strategy_lab?.books || {}).filter(book => book.id !== 'ASTRA_6_BRAIN').sort((a,b) => (state?.strategy_lab?.stats?.[b.id]?.equity ?? b.balance) - (state?.strategy_lab?.stats?.[a.id]?.equity ?? a.balance)).map(book => {
                 const st = state?.strategy_lab?.stats?.[book.id];
                 const pnl = st?.realized_pnl ?? (book.balance - book.starting_balance);
                 return <tr key={book.id} className="border-b border-white/[0.04] text-xs hover:bg-white/[0.02]">
-                  <td className="px-4 py-3"><div className="font-black text-white">{book.name}</div><div className="mt-1 text-[8px] font-mono text-slate-700">{book.id}</div></td>
+                  <td className="px-4 py-3"><div className="font-black text-white">{book.name}</div>{book.id === 'FLOW_MOMENTUM_SCALE_OUT' && <div className="mt-1 text-[9px] text-amber-200/80">Общ изход −3/+10; близките входове могат да дадат еднакви сделки.</div>}<div className="mt-1 text-[8px] font-mono text-slate-700">{book.id}</div></td>
                   <td className="px-4 py-3 font-black text-white">${book.balance.toFixed(2)}</td>
                   <td className="px-4 py-3 text-slate-300">${(st?.equity ?? book.balance).toFixed(2)}</td>
                   <td className={`px-4 py-3 font-black ${pnl >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}<div className="mt-1 text-[9px]">{(st?.return_pct ?? 0) >= 0 ? '+' : ''}{(st?.return_pct ?? 0).toFixed(2)}%</div></td>

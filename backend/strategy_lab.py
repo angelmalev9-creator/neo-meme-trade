@@ -3,6 +3,7 @@ import json, math, os, time
 from pathlib import Path
 from typing import Any, Callable
 import requests
+from astra_lab_bridge import merge_astra_snapshot
 import lab_activity as activity
 
 API_URL=os.getenv('NEO_LOCAL_API','http://127.0.0.1:8788/state')
@@ -392,7 +393,7 @@ def persist(status='online',error=None):
                               'take_profit_net_pct':TAKE_PROFIT,'trade_limit_usd':TRADE_NOTIONAL}
     if error: STATE['error']=str(error)[:200]
     else: STATE.pop('error',None)
-    atomic_write(STATE)
+    atomic_write(merge_astra_snapshot(STATE))
 
 def main():
     last_entry=0
