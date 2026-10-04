@@ -7,6 +7,7 @@ import {
 import {
   Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
+import { supabase } from './lib/supabase';
 
 const API = 'https://neo-meme-api.169-58-211-177.sslip.io';
 
@@ -55,6 +56,80 @@ type MonitorState = {
 };
 type TokenDetail = { coin: Coin; history: PricePoint[]; position: Position | null; trades: Position[]; live_tape?: LiveTrade[]; flow?: FlowStats };
 type Filter = 'ALL' | 'SETUP' | 'WATCH' | 'NEW' | 'BOOSTED';
+type UserDemoContext = { userId: string; startedAt: number };
+
+function scopeStateToUser(raw: MonitorState, context: UserDemoContext): MonitorState {
+  const startBalance = raw.config.starting_balance_usd || 1000;
+  const sessionId = `USER-${context.userId.slice(0, 8)}`;
+
+  const chronological = raw.history
+    .filter(trade => Number(trade.opened_at || 0) >= context.startedAt)
+    .slice()
+    .sort((a, b) => Number(a.opened_at || 0) - Number(b.opened_at || 0));
+
+  let balance = startBalance;
+  const numberedHistory = chronological.map((trade, index) => {
+    const before = balance;
+    balance += Number(trade.pnl_usd || 0);
+    return {
+      ...trade,
+      trade_no: index + 1,
+      session_id: sessionId,
+      balance_before: before,
+      balance_after: balance,
+    };
+  });
+
+  const positions = raw.positions
+    .filter(position => Number(position.opened_at || 0) >= context.startedAt)
+    .map((position, index) => ({
+      ...position,
+      trade_no: numberedHistory.length + index + 1,
+      session_id: sessionId,
+      balance_at_entry: balance,
+    }));
+
+  const reserved = positions.reduce((sum, position) => sum + Number(position.notional_usd || 0), 0);
+  const unrealized = positions.reduce((sum, position) => sum + Number(position.pnl_usd || 0), 0);
+  const equity = balance + unrealized;
+  const wins = numberedHistory.filter(trade => Number(trade.pnl_usd || 0) > 0).length;
+  const now = new Date();
+  const realizedToday = numberedHistory.reduce((sum, trade) => {
+    const stamp = Number(trade.closed_at || trade.updated_at || 0);
+    if (!stamp) return sum;
+    const day = new Date(stamp);
+    const sameDay =
+      day.getFullYear() === now.getFullYear() &&
+      day.getMonth() === now.getMonth() &&
+      day.getDate() === now.getDate();
+    return sameDay ? sum + Number(trade.pnl_usd || 0) : sum;
+  }, 0);
+
+  return {
+    ...raw,
+    positions,
+    history: numberedHistory.slice().reverse(),
+    events: raw.events.filter(event => Number(event.ts || 0) >= context.startedAt),
+    stats: {
+      ...raw.stats,
+      open_positions: positions.length,
+      closed_trades: numberedHistory.length,
+      wins,
+      win_rate: numberedHistory.length ? (wins / numberedHistory.length) * 100 : 0,
+      realized_today_usd: realizedToday,
+      demo_starting_balance_usd: startBalance,
+      demo_balance_usd: balance,
+      demo_equity_usd: equity,
+      demo_available_usd: Math.max(0, balance - reserved),
+      demo_reserved_usd: reserved,
+      unrealized_pnl_usd: unrealized,
+      realized_total_usd: balance - startBalance,
+      return_pct: ((equity - startBalance) / Math.max(startBalance, 1)) * 100,
+      demo_started_at: context.startedAt,
+      demo_session_id: sessionId,
+    },
+  };
+}
 
 const fmtMoney = (value = 0) => value >= 1_000_000 ? `$${(value / 1_000_000).toFixed(2)}M` : value >= 1_000 ? `$${(value / 1_000).toFixed(1)}K` : `$${value.toFixed(0)}`;
 const fmtPrice = (value = 0) => value >= 1 ? `$${value.toFixed(4)}` : value >= 0.01 ? `$${value.toFixed(6)}` : value >= 0.0001 ? `$${value.toFixed(8)}` : `$${value.toPrecision(5)}`;
@@ -96,8 +171,31 @@ export default function App() {
   const [filter, setFilter] = useState<Filter>('ALL');
   const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [userDemo, setUserDemo] = useState<UserDemoContext | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+    const loadUserDemo = async () => {
+      if (!supabase) return;
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user || cancelled) return;
+
+      const registeredAt = new Date(user.created_at).getTime();
+      const storageKey = `neo_demo_started_at:${user.id}`;
+      const storedAt = Number(window.localStorage.getItem(storageKey) || 0);
+      const safeStoredAt = Number.isFinite(storedAt) ? storedAt : 0;
+      const startedAt = Math.max(Number.isFinite(registeredAt) ? registeredAt : Date.now(), safeStoredAt);
+
+      setUserDemo({ userId: user.id, startedAt });
+    };
+
+    void loadUserDemo();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!userDemo) return;
     let cancelled = false;
     const load = async () => {
       try {
@@ -105,9 +203,10 @@ export default function App() {
         if (!response.ok) throw new Error(`Backend HTTP ${response.status}`);
         const next = await response.json() as MonitorState;
         if (cancelled) return;
-        setState(next);
+        const scoped = scopeStateToUser(next, userDemo);
+        setState(scoped);
         setError('');
-        if (!selectedAddress && next.feed[0]) setSelectedAddress(next.feed[0].address);
+        if (!selectedAddress && scoped.feed[0]) setSelectedAddress(scoped.feed[0].address);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Backend unavailable');
       }
@@ -115,7 +214,7 @@ export default function App() {
     void load();
     const timer = window.setInterval(load, 5000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [selectedAddress]);
+  }, [selectedAddress, userDemo, refreshTick]);
 
   useEffect(() => {
     if (!selectedAddress) return;
@@ -146,21 +245,18 @@ export default function App() {
   const setupCount = state?.feed.filter(c => c.posture === 'SETUP').length || 0;
   const watchCount = state?.feed.filter(c => c.posture === 'WATCH').length || 0;
 
-  const control = async (action: 'start' | 'stop' | 'rescan' | 'reset') => {
+  const refreshDashboard = () => {
     setBusy(true);
-    try {
-      const response = await fetch(`${API}/control/${action}`, { method: 'POST' });
-      if (!response.ok) throw new Error(`Control HTTP ${response.status}`);
-      if (action !== 'rescan') setState(await response.json() as MonitorState);
-      else window.setTimeout(async () => {
-        const next = await fetch(`${API}/state`, { cache: 'no-store' }).then(r => r.json()) as MonitorState;
-        setState(next);
-      }, 1400);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Control failed');
-    } finally {
-      window.setTimeout(() => setBusy(false), 500);
-    }
+    setRefreshTick(value => value + 1);
+    window.setTimeout(() => setBusy(false), 500);
+  };
+
+  const resetMyDemo = () => {
+    if (!userDemo) return;
+    const startedAt = Date.now();
+    window.localStorage.setItem(`neo_demo_started_at:${userDemo.userId}`, String(startedAt));
+    setState(null);
+    setUserDemo({ ...userDemo, startedAt });
   };
 
   const dexEmbed = selectedCoin?.pairAddress ? `https://dexscreener.com/solana/${selectedCoin.pairAddress}?embed=1&theme=dark&trades=0&info=0` : '';
@@ -176,7 +272,7 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2">
           <div className={`hidden items-center gap-2 rounded-xl border px-3 py-2 text-[10px] font-black sm:flex ${state?.status === 'monitoring' ? 'border-emerald-400/20 bg-emerald-400/[0.06] text-emerald-300' : 'border-amber-400/20 bg-amber-400/[0.06] text-amber-200'}`}><span className={`h-2 w-2 rounded-full ${state?.status === 'monitoring' ? 'animate-pulse bg-emerald-300' : 'bg-amber-300'}`} />{state?.status === 'monitoring' ? 'BACKEND ONLINE' : (state?.status || 'CONNECTING').toUpperCase()}</div>
-          <button onClick={() => control('rescan')} disabled={busy} className="flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 text-[10px] font-black text-white hover:bg-white/[0.06] disabled:opacity-40"><RefreshCw className={`h-3.5 w-3.5 ${busy ? 'animate-spin' : ''}`} /> СКАНИРАЙ</button>
+          <button onClick={refreshDashboard} disabled={busy} className="flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 text-[10px] font-black text-white hover:bg-white/[0.06] disabled:opacity-40"><RefreshCw className={`h-3.5 w-3.5 ${busy ? 'animate-spin' : ''}`} /> ОБНОВИ</button>
         </div>
       </div>
     </header>
@@ -284,7 +380,7 @@ export default function App() {
             </div>
             <div className="mt-2 grid grid-cols-2 gap-2"><div className="rounded-xl border border-white/[0.07] bg-black/20 p-3"><div className="text-[8px] font-black uppercase tracking-[0.12em] text-slate-700">Entry score</div><div className="mt-1 text-lg font-black text-white">{state?.config.entry_score ?? 75}+</div></div><div className="rounded-xl border border-white/[0.07] bg-black/20 p-3"><div className="text-[8px] font-black uppercase tracking-[0.12em] text-slate-700">Trade size</div><div className="mt-1 text-lg font-black text-white">${state?.config.trade_notional_usd ?? 100}</div></div></div>
             <div className="mt-2 rounded-xl border border-white/[0.07] bg-white/[0.02] p-3 text-[9px] leading-4 text-slate-500">Hard SL {state?.config.stop_loss_pct ?? 8}% · TP {state?.config.take_profit_pct ?? 16}% · trailing {state?.config.trailing_pct ?? 6}% · max hold {state?.config.max_hold_minutes ?? 45}m · дневен лимит -${state?.config.max_daily_loss_usd ?? 30}</div>
-            <button onClick={() => control(state?.running ? 'stop' : 'start')} disabled={busy} className={`mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-xl text-xs font-black ${state?.running ? 'border border-red-400/20 bg-red-400/10 text-red-200' : 'bg-emerald-400 text-[#06100c]'}`}>{state?.running ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}{state?.running ? 'СПРИ MONITOR-А' : 'ПУСНИ MONITOR-А'}</button>
+            <div className="mt-3 flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-emerald-400/15 bg-emerald-400/[0.05] px-3 text-center text-[10px] font-black text-emerald-200"><ShieldCheck className="h-4 w-4" /> GOLD ENGINE СЕ УПРАВЛЯВА ЦЕНТРАЛНО</div>
             <div className="mt-3 text-[9px] leading-4 text-slate-600">{state?.message || 'Свързване с backend…'}</div>
           </div>
 
@@ -295,7 +391,7 @@ export default function App() {
           <div className="rounded-3xl border border-white/10 bg-[#0b0e11] p-4">
             <div className="flex items-center justify-between"><div><div className="text-[9px] font-black uppercase tracking-[0.16em] text-slate-600">Activity</div><h3 className="mt-1 text-base font-black text-white">Какво прави NEO</h3></div><Bot className="h-4 w-4 text-emerald-300" /></div>
             <div className="mt-4 space-y-3">{(state?.events || []).slice(0, 8).map(event => <div key={`${event.ts}-${event.text}`} className="flex gap-2.5"><div className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-300" /><div><div className="text-[10px] leading-4 text-slate-400">{event.text}</div><div className="mt-0.5 text-[8px] text-slate-700">{timeLabel(event.ts)}</div></div></div>)}</div>
-            <div className="mt-4 border-t border-white/[0.06] pt-3"><button onClick={() => { if (window.confirm('Да започна ли чисто нова demo сесия с $1,000? Това ще изчисти текущите paper позиции и видимата history.')) void control('reset'); }} className="h-8 w-full rounded-lg border border-white/[0.07] bg-transparent text-[9px] font-black text-slate-600 hover:bg-white/[0.03] hover:text-white">RESET DEMO → $1,000</button></div>
+            <div className="mt-4 border-t border-white/[0.06] pt-3"><button onClick={() => { if (window.confirm('Да започна ли НОВА ЛИЧНА demo сесия с $1,000? Това засяга само твоя dashboard и не пипа GOLD engine-а.')) resetMyDemo(); }} className="h-8 w-full rounded-lg border border-white/[0.07] bg-transparent text-[9px] font-black text-slate-600 hover:bg-white/[0.03] hover:text-white">RESET МОЯТА DEMO → $1,000</button></div>
           </div>
         </aside>
       </section>
