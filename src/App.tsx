@@ -56,81 +56,6 @@ type MonitorState = {
 };
 type TokenDetail = { coin: Coin; history: PricePoint[]; position: Position | null; trades: Position[]; live_tape?: LiveTrade[]; flow?: FlowStats };
 type Filter = 'ALL' | 'SETUP' | 'WATCH' | 'NEW' | 'BOOSTED';
-type UserDemoContext = { userId: string; startedAt: number };
-
-function scopeStateToUser(raw: MonitorState, context: UserDemoContext): MonitorState {
-  const startBalance = raw.config.starting_balance_usd || 1000;
-  const sessionId = `USER-${context.userId.slice(0, 8)}`;
-
-  const chronological = raw.history
-    .filter(trade => Number(trade.opened_at || 0) >= context.startedAt)
-    .slice()
-    .sort((a, b) => Number(a.opened_at || 0) - Number(b.opened_at || 0));
-
-  let balance = startBalance;
-  const numberedHistory = chronological.map((trade, index) => {
-    const before = balance;
-    balance += Number(trade.pnl_usd || 0);
-    return {
-      ...trade,
-      trade_no: index + 1,
-      session_id: sessionId,
-      balance_before: before,
-      balance_after: balance,
-    };
-  });
-
-  const positions = raw.positions
-    .filter(position => Number(position.opened_at || 0) >= context.startedAt)
-    .map((position, index) => ({
-      ...position,
-      trade_no: numberedHistory.length + index + 1,
-      session_id: sessionId,
-      balance_at_entry: balance,
-    }));
-
-  const reserved = positions.reduce((sum, position) => sum + Number(position.notional_usd || 0), 0);
-  const unrealized = positions.reduce((sum, position) => sum + Number(position.pnl_usd || 0), 0);
-  const equity = balance + unrealized;
-  const wins = numberedHistory.filter(trade => Number(trade.pnl_usd || 0) > 0).length;
-  const now = new Date();
-  const realizedToday = numberedHistory.reduce((sum, trade) => {
-    const stamp = Number(trade.closed_at || trade.updated_at || 0);
-    if (!stamp) return sum;
-    const day = new Date(stamp);
-    const sameDay =
-      day.getFullYear() === now.getFullYear() &&
-      day.getMonth() === now.getMonth() &&
-      day.getDate() === now.getDate();
-    return sameDay ? sum + Number(trade.pnl_usd || 0) : sum;
-  }, 0);
-
-  return {
-    ...raw,
-    positions,
-    history: numberedHistory.slice().reverse(),
-    events: raw.events.filter(event => Number(event.ts || 0) >= context.startedAt),
-    stats: {
-      ...raw.stats,
-      open_positions: positions.length,
-      closed_trades: numberedHistory.length,
-      wins,
-      win_rate: numberedHistory.length ? (wins / numberedHistory.length) * 100 : 0,
-      realized_today_usd: realizedToday,
-      demo_starting_balance_usd: startBalance,
-      demo_balance_usd: balance,
-      demo_equity_usd: equity,
-      demo_available_usd: Math.max(0, balance - reserved),
-      demo_reserved_usd: reserved,
-      unrealized_pnl_usd: unrealized,
-      realized_total_usd: balance - startBalance,
-      return_pct: ((equity - startBalance) / Math.max(startBalance, 1)) * 100,
-      demo_started_at: context.startedAt,
-      demo_session_id: sessionId,
-    },
-  };
-}
-
 const fmtMoney = (value = 0) => value >= 1_000_000 ? `$${(value / 1_000_000).toFixed(2)}M` : value >= 1_000 ? `$${(value / 1_000).toFixed(1)}K` : `$${value.toFixed(0)}`;
 const fmtPrice = (value = 0) => value >= 1 ? `$${value.toFixed(4)}` : value >= 0.01 ? `$${value.toFixed(6)}` : value >= 0.0001 ? `$${value.toFixed(8)}` : `$${value.toPrecision(5)}`;
 const ageLabel = (minutes: number | null) => minutes == null ? '—' : minutes < 60 ? `${Math.round(minutes)}m` : minutes < 1440 ? `${(minutes / 60).toFixed(1)}h` : `${(minutes / 1440).toFixed(1)}d`;
@@ -172,41 +97,27 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
-  const [userDemo, setUserDemo] = useState<UserDemoContext | null>(null);
+
 
   useEffect(() => {
-    let cancelled = false;
-    const loadUserDemo = async () => {
-      if (!supabase) return;
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user || cancelled) return;
-
-      const registeredAt = new Date(user.created_at).getTime();
-      const storageKey = `neo_demo_started_at:${user.id}`;
-      const storedAt = Number(window.localStorage.getItem(storageKey) || 0);
-      const safeStoredAt = Number.isFinite(storedAt) ? storedAt : 0;
-      const startedAt = Math.max(Number.isFinite(registeredAt) ? registeredAt : Date.now(), safeStoredAt);
-
-      setUserDemo({ userId: user.id, startedAt });
-    };
-
-    void loadUserDemo();
-    return () => { cancelled = true; };
-  }, []);
-
-  useEffect(() => {
-    if (!userDemo) return;
     let cancelled = false;
     const load = async () => {
       try {
-        const response = await fetch(`${API}/state`, { cache: 'no-store' });
+        if (!supabase) throw new Error('Supabase unavailable');
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token;
+        if (!token) throw new Error('Session expired');
+
+        const response = await fetch(`${API}/user/state`, {
+          cache: 'no-store',
+          headers: { Authorization: `Bearer ${token}` },
+        });
         if (!response.ok) throw new Error(`Backend HTTP ${response.status}`);
         const next = await response.json() as MonitorState;
         if (cancelled) return;
-        const scoped = scopeStateToUser(next, userDemo);
-        setState(scoped);
+        setState(next);
         setError('');
-        if (!selectedAddress && scoped.feed[0]) setSelectedAddress(scoped.feed[0].address);
+        if (!selectedAddress && next.feed[0]) setSelectedAddress(next.feed[0].address);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Backend unavailable');
       }
@@ -214,7 +125,7 @@ export default function App() {
     void load();
     const timer = window.setInterval(load, 5000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [selectedAddress, userDemo, refreshTick]);
+  }, [selectedAddress, refreshTick]);
 
   useEffect(() => {
     if (!selectedAddress) return;
@@ -251,12 +162,26 @@ export default function App() {
     window.setTimeout(() => setBusy(false), 500);
   };
 
-  const resetMyDemo = () => {
-    if (!userDemo) return;
-    const startedAt = Date.now();
-    window.localStorage.setItem(`neo_demo_started_at:${userDemo.userId}`, String(startedAt));
-    setState(null);
-    setUserDemo({ ...userDemo, startedAt });
+  const resetMyDemo = async () => {
+    if (!supabase) return;
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) throw new Error('Session expired');
+
+      const response = await fetch(`${API}/user/reset`, {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error(`Backend HTTP ${response.status}`);
+      const next = await response.json() as MonitorState;
+      setState(next);
+      setError('');
+      setRefreshTick(value => value + 1);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Reset failed');
+    }
   };
 
   const dexEmbed = selectedCoin?.pairAddress ? `https://dexscreener.com/solana/${selectedCoin.pairAddress}?embed=1&theme=dark&trades=0&info=0` : '';
