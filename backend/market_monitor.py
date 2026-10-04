@@ -848,7 +848,7 @@ class Monitor:
 
             # The hard stop is always respected. Everything else can only exit earlier
             # or let a strong winner run longer while conviction remains high.
-            if signal_pnl_pct <= -STOP_LOSS_PCT:
+            if pnl_pct <= -STOP_LOSS_PCT:
                 exit_reason = 'STOP_LOSS'
             elif conviction < 35 and signal_pnl_pct < 0:
                 exit_reason = 'CONVICTION_EXIT'
@@ -880,6 +880,8 @@ class Monitor:
                 exit_quote = fresh_exit_quote
                 pnl_usd = exit_quote['net_proceeds_usd'] - notional - entry_network_fee
                 pnl_pct = (pnl_usd / max(notional, 1e-18)) * 100.0
+                if exit_reason == 'STOP_LOSS' and pnl_pct > -STOP_LOSS_PCT:
+                    exit_reason = None
 
             updated = {
                 **position, 'current_price': price, 'peak_price': peak,
