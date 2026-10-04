@@ -17,6 +17,15 @@ TAKE_PROFIT=18.0
 TRAILING=4.0
 MAX_HOLD_MIN=7.0
 REENTRY_COOLDOWN_MIN=20.0
+
+# Realistic paper execution costs for Strategy Lab. These are applied equally to
+# every strategy so comparisons stay fair. The main engine remains untouched.
+GENERIC_DEX_FEE_BPS=float(os.getenv('NEO_LAB_GENERIC_DEX_FEE_BPS','30'))
+BASE_SLIPPAGE_BPS=float(os.getenv('NEO_LAB_BASE_SLIPPAGE_BPS','10'))
+LATENCY_BUFFER_BPS=float(os.getenv('NEO_LAB_LATENCY_BUFFER_BPS','10'))
+NETWORK_FEE_SOL=float(os.getenv('NEO_LAB_NETWORK_FEE_SOL','0.0001'))
+MAX_PRICE_IMPACT_PCT=float(os.getenv('NEO_LAB_MAX_PRICE_IMPACT_PCT','20'))
+
 SESSION=requests.Session()
 SESSION.headers.update({'user-agent':'NEO-Strategy-Lab/1.0','accept':'application/json'})
 
@@ -26,6 +35,61 @@ def num(v,d=0.0):
         x=float(v)
         return x if math.isfinite(x) else d
     except Exception: return d
+
+def pair_liquidity_usd(c):
+    return num(c.get('liquidityUsd') or (c.get('liquidity') or {}).get('usd'))
+
+def sol_usd_from_coin(c):
+    p=num(c.get('priceUsd')); n=num(c.get('priceNative'))
+    return p/n if p>0 and n>0 else 0.0
+
+def pumpswap_fee_bps(c):
+    if str(c.get('dexId') or '').lower()!='pumpswap':
+        return GENERIC_DEX_FEE_BPS
+    sol_usd=sol_usd_from_coin(c); mc=num(c.get('marketCap') or c.get('fdv'))
+    if sol_usd<=0 or mc<=0: return 125.0
+    mc_sol=mc/sol_usd
+    tiers=(
+      (420,125.0),(1470,120.0),(2460,115.0),(3440,110.0),(4420,105.0),
+      (9820,100.0),(14740,95.0),(19650,90.0),(24560,85.0),(29470,80.0),
+      (34380,75.0),(39300,70.0),(44210,65.0),(49120,60.0),(54030,55.0),
+      (58940,52.5),(63860,50.0),(68770,47.5),(73681,45.0),(78590,42.5),
+      (83500,40.0),(88400,37.5),(93330,35.0),(98240,32.5),
+    )
+    for max_mc,fee in tiers:
+        if mc_sol<max_mc: return fee
+    return 30.0
+
+def execution_friction(c,trade_value):
+    liq=max(pair_liquidity_usd(c),1.0)
+    impact=min(MAX_PRICE_IMPACT_PCT,(2.0*max(0.0,trade_value)/liq)*100.0)
+    return {
+      'impact_pct':impact,
+      'slippage_pct':BASE_SLIPPAGE_BPS/100.0,
+      'latency_pct':LATENCY_BUFFER_BPS/100.0,
+      'dex_fee_bps':pumpswap_fee_bps(c),
+      'network_fee_usd':NETWORK_FEE_SOL*sol_usd_from_coin(c),
+    }
+
+def entry_execution(c,notional):
+    market=num(c.get('priceUsd')); f=execution_friction(c,notional)
+    penalty=(f['impact_pct']+f['slippage_pct']+f['latency_pct'])/100.0
+    fill=market*(1+penalty)
+    dex_fee=notional*f['dex_fee_bps']/10000.0
+    qty=max(0.0,notional-dex_fee)/max(fill,1e-18)
+    return {**f,'market_price':market,'fill_price':fill,'dex_fee_usd':dex_fee,
+            'quantity':qty,'capital_committed_usd':notional+f['network_fee_usd']}
+
+def exit_execution(c,qty):
+    market=num(c.get('priceUsd')); market_value=max(0.0,qty*market)
+    f=execution_friction(c,market_value)
+    penalty=(f['impact_pct']+f['slippage_pct']+f['latency_pct'])/100.0
+    fill=max(0.0,market*(1-penalty))
+    gross=max(0.0,qty*fill)
+    dex_fee=gross*f['dex_fee_bps']/10000.0
+    net=max(0.0,gross-dex_fee-f['network_fee_usd'])
+    return {**f,'market_price':market,'fill_price':fill,'market_value_usd':market_value,
+            'gross_proceeds_usd':gross,'dex_fee_usd':dex_fee,'net_proceeds_usd':net}
 
 def load_json(path,default):
     try: return json.loads(path.read_text())
@@ -80,6 +144,29 @@ STRATEGIES=[
  {'id':'REVERSAL','name':'Reversal Catch','rule':lambda f: f['score']>=85 and f['liq']>=20000 and -10<=f['m5']<=3 and f['h1']>-25 and f['bs']>=1.15 and f['lmc']>=.10 and 10<=f['age']<=480},
  {'id':'FLOW_MOMENTUM','name':'Flow Momentum','rule':lambda f: f['score']>=85 and f['liq']>=15000 and 0<=f['m5']<=30 and f['flow']['trades']>=3 and f['flow']['ratio']>=1.8 and f['flow']['buy_usd']>=150},
  {'id':'FLOW_MOMENTUM_SCALE_OUT','name':'Flow Momentum Scale-Out','rule':lambda f: f['score']>=85 and f['liq']>=15000 and 0<=f['m5']<=30 and f['flow']['trades']>=3 and f['flow']['ratio']>=1.8 and f['flow']['buy_usd']>=150},
+
+ # 20 selective candidates designed for higher hit-rate testing. They are
+ # hypotheses, not guaranteed winners; the lab exists to prove or reject them.
+ {'id':'FLOW_ELITE','name':'Flow Elite','rule':lambda f: f['score']>=92 and f['liq']>=30000 and 0<=f['m5']<=18 and f['flow']['trades']>=5 and f['flow']['ratio']>=2.2 and f['flow']['buy_usd']>=250 and f['flow']['unique_wallets']>=4 and f['flow']['max_sell']<max(250,f['flow']['buy_usd']*.45)},
+ {'id':'FLOW_SNIPER','name':'Flow Sniper','rule':lambda f: f['score']>=95 and f['liq']>=25000 and 1<=f['m5']<=12 and f['flow']['trades']>=5 and f['flow']['ratio']>=2.5 and f['flow']['buy_usd']>=300 and f['flow']['unique_wallets']>=5 and f['flow']['max_sell']<max(200,f['flow']['buy_usd']*.40)},
+ {'id':'LIQ_FLOW_CONFLUENCE','name':'Liquidity + Flow','rule':lambda f: f['score']>=90 and f['liq']>=50000 and -1<=f['m5']<=15 and f['lmc']>=.12 and f['flow']['trades']>=4 and f['flow']['ratio']>=1.8 and f['flow']['buy_usd']>=200},
+ {'id':'BREAKOUT_CONFIRM','name':'Confirmed Breakout','rule':lambda f: f['score']>=92 and f['liq']>=30000 and 10<=f['m5']<=30 and f['bs']>=1.35 and f['flow']['trades']>=4 and f['flow']['ratio']>=1.6 and f['flow']['buy_usd']>=200 and .15<=f['vol_liq']<=6},
+ {'id':'EARLY_FLOW','name':'Early Flow','rule':lambda f: f['score']>=92 and f['liq']>=22000 and 1<=f['m5']<=15 and 3<=f['age']<=75 and f['lmc']>=.12 and f['flow']['trades']>=4 and f['flow']['ratio']>=1.8 and f['flow']['unique_wallets']>=3},
+ {'id':'TREND_FLOW','name':'Trend + Flow','rule':lambda f: f['score']>=90 and f['liq']>=30000 and 1<=f['m5']<=12 and 0<=f['h1']<=80 and f['bs']>=1.15 and f['flow']['ratio']>=1.7 and f['flow']['trades']>=4},
+ {'id':'DEEP_LIQ_MOMENTUM','name':'Deep Liquidity Momentum','rule':lambda f: f['score']>=90 and f['liq']>=80000 and 2<=f['m5']<=20 and f['bs']>=1.15 and f['lmc']>=.08 and .10<=f['vol_liq']<=5},
+ {'id':'LOW_VOL_FLOW','name':'Low Volatility Flow','rule':lambda f: f['score']>=90 and f['liq']>=30000 and -1<=f['m5']<=8 and f['h1']>-20 and f['flow']['ratio']>=2.0 and f['flow']['trades']>=5 and f['flow']['max_sell']<max(200,f['flow']['buy_usd']*.5)},
+ {'id':'HIGH_LMC_FLOW','name':'High L/MC Flow','rule':lambda f: f['score']>=90 and f['liq']>=25000 and f['lmc']>=.22 and 0<=f['m5']<=15 and f['flow']['ratio']>=1.6 and f['flow']['trades']>=4},
+ {'id':'VOLUME_QUALITY','name':'Quality Volume','rule':lambda f: f['score']>=92 and f['liq']>=30000 and 1<=f['m5']<=18 and .30<=f['vol_liq']<=4 and f['bs']>=1.2 and f['flow']['ratio']>=1.5},
+ {'id':'BUY_PRESSURE','name':'Buy Pressure','rule':lambda f: f['score']>=90 and f['liq']>=25000 and 0<=f['m5']<=18 and f['bs']>=1.5 and f['flow']['ratio']>=2.0 and f['flow']['trades']>=5 and f['flow']['buy_usd']>=250},
+ {'id':'SELL_WALL_SAFE','name':'Sell Wall Safe','rule':lambda f: f['score']>=90 and f['liq']>=30000 and 0<=f['m5']<=15 and f['flow']['trades']>=5 and f['flow']['ratio']>=1.8 and f['flow']['max_sell']<180 and f['flow']['buy_usd']>=220},
+ {'id':'MICRO_BREAKOUT_SAFE','name':'Micro Breakout Safe','rule':lambda f: f['score']>=94 and f['liq']>=35000 and 5<=f['m5']<=16 and f['bs']>=1.25 and f['lmc']>=.15 and f['flow']['ratio']>=1.6},
+ {'id':'MATURE_FLOW','name':'Mature Flow','rule':lambda f: f['score']>=90 and f['liq']>=40000 and 30<=f['age']<=720 and -1<=f['m5']<=14 and f['h1']>-30 and f['flow']['ratio']>=1.8 and f['flow']['trades']>=4},
+ {'id':'YOUNG_LIQ','name':'Young + Liquid','rule':lambda f: f['score']>=93 and f['liq']>=35000 and 3<=f['age']<=90 and 0<=f['m5']<=16 and f['lmc']>=.15 and f['flow']['ratio']>=1.5},
+ {'id':'HIGH_SCORE_FLOW','name':'High Score Flow','rule':lambda f: f['score']>=97 and f['liq']>=20000 and -1<=f['m5']<=16 and f['flow']['trades']>=4 and f['flow']['ratio']>=1.6 and f['flow']['buy_usd']>=180},
+ {'id':'FLOW_PULLBACK','name':'Flow Pullback','rule':lambda f: f['score']>=90 and f['liq']>=30000 and -4<=f['m5']<=4 and f['h1']>=0 and f['flow']['trades']>=5 and f['flow']['ratio']>=2.0 and f['flow']['buy_usd']>=250},
+ {'id':'SECOND_WAVE','name':'Second Wave','rule':lambda f: f['score']>=90 and f['liq']>=30000 and 2<=f['m5']<=12 and 10<=f['h1']<=120 and f['flow']['ratio']>=1.7 and f['flow']['trades']>=4 and .15<=f['vol_liq']<=5},
+ {'id':'CLEAN_MOMENTUM','name':'Clean Momentum','rule':lambda f: f['score']>=92 and f['liq']>=30000 and 3<=f['m5']<=18 and f['bs']>=1.2 and .20<=f['vol_liq']<=3.5 and f['flow']['ratio']>=1.5 and f['flow']['max_sell']<max(250,f['flow']['buy_usd']*.6)},
+ {'id':'CONFLUENCE_MAX','name':'Confluence Max','rule':lambda f: f['score']>=95 and f['liq']>=40000 and 1<=f['m5']<=12 and f['h1']>-10 and f['bs']>=1.25 and f['lmc']>=.15 and .20<=f['vol_liq']<=4 and f['flow']['trades']>=5 and f['flow']['ratio']>=2.0 and f['flow']['unique_wallets']>=4 and f['flow']['max_sell']<max(200,f['flow']['buy_usd']*.45)},
 ]
 def empty_book(s):
     start=STRATEGY_START_BALANCES.get(s['id'],START_BALANCE)
@@ -111,36 +198,48 @@ def dex_position_prices(positions):
             pair=p.get('pairAddress')
             if (a,pair) in wanted:
                 price=num(p.get('priceUsd'))
-                if price>0: out[(a,pair)]=price
+                if price>0: out[(a,pair)]=p
     return out
 
-def close_position(book,pos,price,reason):
-    entry=num(pos.get('entry_price')); qty=num(pos.get('quantity'))
-    final_pnl=qty*(price-entry)
+def close_position(book,pos,coin,reason):
+    market_price=num(coin.get('priceUsd')); qty=num(pos.get('quantity'))
+    quote=exit_execution(coin,qty)
+    cost_basis=num(pos.get('remaining_cost_basis_usd'),num(pos.get('notional_usd'))+num(pos.get('entry_network_fee_usd')))
+    final_pnl=quote['net_proceeds_usd']-cost_basis
     partial_pnl=num(pos.get('partial_realized_pnl'))
     total_pnl=partial_pnl+final_pnl
     original_notional=num(pos.get('notional_usd'))
     pct=total_pnl/max(original_notional,1e-18)*100
     book['balance']=round(num(book['balance'])+final_pnl,8)
-    trade={**pos,'exit_price':price,'closed_at':now_ms(),'exit_reason':reason,
-           'final_leg_pnl_usd':round(final_pnl,4),'pnl_usd':round(total_pnl,4),
-           'pnl_pct':round(pct,3),'balance_after':round(book['balance'],4)}
+    trade={**pos,'exit_price':market_price,'execution_exit_price':round(quote['fill_price'],12),
+           'closed_at':now_ms(),'exit_reason':reason,'final_leg_pnl_usd':round(final_pnl,4),
+           'pnl_usd':round(total_pnl,4),'pnl_pct':round(pct,3),'balance_after':round(book['balance'],4),
+           'exit_dex_fee_usd':round(quote['dex_fee_usd'],6),'exit_network_fee_usd':round(quote['network_fee_usd'],6),
+           'exit_price_impact_pct':round(quote['impact_pct'],4),
+           'exit_slippage_pct':round(quote['slippage_pct']+quote['latency_pct'],4),
+           'execution_mode':'REALISTIC_COSTS_V1'}
     book['history'].insert(0,trade); book['history']=book['history'][:300]; book['position']=None
 
-def realize_partial(book,pos,price,fraction,label):
-    entry=num(pos.get('entry_price'))
+def realize_partial(book,pos,coin,fraction,label):
+    market_price=num(coin.get('priceUsd'))
     original_qty=num(pos.get('original_quantity'),num(pos.get('quantity')))
     remaining_qty=num(pos.get('quantity'))
     sell_qty=min(remaining_qty,original_qty*fraction)
     if sell_qty<=0: return 0.0
-    pnl=sell_qty*(price-entry)
+    quote=exit_execution(coin,sell_qty)
+    remaining_basis=num(pos.get('remaining_cost_basis_usd'),num(pos.get('notional_usd'))+num(pos.get('entry_network_fee_usd')))
+    basis_sold=remaining_basis*(sell_qty/max(remaining_qty,1e-18))
+    pnl=quote['net_proceeds_usd']-basis_sold
     book['balance']=round(num(book['balance'])+pnl,8)
     pos['quantity']=max(0.0,remaining_qty-sell_qty)
+    pos['remaining_cost_basis_usd']=max(0.0,remaining_basis-basis_sold)
     pos['partial_realized_pnl']=round(num(pos.get('partial_realized_pnl'))+pnl,8)
     exits=pos.setdefault('partial_exits',[])
-    exits.append({'stage':label,'ts':now_ms(),'price':price,'quantity':sell_qty,
-                  'fraction_of_original':fraction,'pnl_usd':round(pnl,4),
-                  'move_pct':round((price-entry)/max(entry,1e-18)*100,3)})
+    exits.append({'stage':label,'ts':now_ms(),'price':market_price,'execution_price':round(quote['fill_price'],12),
+                  'quantity':sell_qty,'fraction_of_original':fraction,'pnl_usd':round(pnl,4),
+                  'dex_fee_usd':round(quote['dex_fee_usd'],6),'network_fee_usd':round(quote['network_fee_usd'],6),
+                  'price_impact_pct':round(quote['impact_pct'],4),
+                  'move_pct':round((market_price-num(pos.get('entry_price')))/max(num(pos.get('entry_price')),1e-18)*100,3)})
     return pnl
 
 def update_positions(flows):
@@ -150,8 +249,9 @@ def update_positions(flows):
         pos=book.get('position')
         if not pos: continue
         pair_key=(pos.get('address'),pos.get('pairAddress'))
-        price=prices.get(pair_key)
-        if not price: continue
+        coin=prices.get(pair_key)
+        if not coin: continue
+        price=num(coin.get('priceUsd'))
         entry=num(pos['entry_price']); peak=max(num(pos.get('peak_price'),entry),price)
         pct=(price-entry)/entry*100; hold=(now_ms()-int(pos['opened_at']))/60000
         f=flows.get(pos['address'],{})
@@ -164,7 +264,7 @@ def update_positions(flows):
             completed={x.get('stage') for x in (pos.get('partial_exits') or [])}
             for threshold,fraction,label in stages:
                 if pct>=threshold and label not in completed:
-                    realize_partial(book,pos,price,fraction,label)
+                    realize_partial(book,pos,coin,fraction,label)
                     completed.add(label)
 
             if pct<=-STOP_LOSS:
@@ -184,14 +284,19 @@ def update_positions(flows):
             elif hold>=MAX_HOLD_MIN: reason='MAX_HOLD'
 
         remaining_qty=num(pos.get('quantity'))
-        open_pnl=remaining_qty*(price-entry)
+        live_quote=exit_execution(coin,remaining_qty)
+        remaining_basis=num(pos.get('remaining_cost_basis_usd'),num(pos.get('notional_usd'))+num(pos.get('entry_network_fee_usd')))
+        open_pnl=live_quote['net_proceeds_usd']-remaining_basis
         total_live_pnl=num(pos.get('partial_realized_pnl'))+open_pnl
         total_live_pct=total_live_pnl/max(num(pos.get('notional_usd')),1e-18)*100
-        pos.update({'current_price':price,'peak_price':peak,'pnl_pct':round(total_live_pct,3),
+        pos.update({'current_price':price,'peak_price':peak,'execution_exit_price':round(live_quote['fill_price'],12),
+                    'pnl_pct':round(total_live_pct,3),'open_pnl_usd':round(open_pnl,4),
+                    'estimated_exit_fee_usd':round(live_quote['dex_fee_usd']+live_quote['network_fee_usd'],6),
+                    'estimated_exit_impact_pct':round(live_quote['impact_pct'],4),
                     'partial_realized_pnl':round(num(pos.get('partial_realized_pnl')),4),
                     'remaining_fraction':round(remaining_qty/max(num(pos.get('original_quantity'),remaining_qty),1e-18),4),
                     'updated_at':now_ms()})
-        if reason: close_position(book,pos,price,reason)
+        if reason: close_position(book,pos,coin,reason)
 def maybe_open(feed,flows):
     now=now_ms()
     for s in STRATEGIES:
@@ -209,12 +314,21 @@ def maybe_open(feed,flows):
             price=num(c.get('priceUsd'))
             if price<=0: continue
             notional=min(TRADE_NOTIONAL,num(book['balance']))
+            exec_entry=entry_execution(c,notional)
+            qty=num(exec_entry.get('quantity'))
+            if qty<=0: continue
             book['trade_seq']=int(book.get('trade_seq',0))+1
-            qty=notional/price
+            capital_basis=notional+num(exec_entry.get('network_fee_usd'))
             pos={'trade_no':book['trade_seq'],'strategy_id':s['id'],'symbol':c.get('symbol'),'name':c.get('name'),
-                 'address':a,'pairAddress':c.get('pairAddress'),'entry_price':price,'current_price':price,'peak_price':price,
+                 'address':a,'pairAddress':c.get('pairAddress'),'entry_price':price,
+                 'execution_entry_price':round(exec_entry['fill_price'],12),'current_price':price,'peak_price':price,
                  'quantity':qty,'original_quantity':qty,'notional_usd':notional,'opened_at':now,'updated_at':now,
-                 'score':c.get('score'),'entry_features':f,'partial_realized_pnl':0.0,'partial_exits':[]}
+                 'score':c.get('score'),'entry_features':f,'partial_realized_pnl':0.0,'partial_exits':[],
+                 'remaining_cost_basis_usd':capital_basis,'entry_dex_fee_bps':round(exec_entry['dex_fee_bps'],4),
+                 'entry_dex_fee_usd':round(exec_entry['dex_fee_usd'],6),'entry_network_fee_usd':round(exec_entry['network_fee_usd'],6),
+                 'entry_price_impact_pct':round(exec_entry['impact_pct'],4),
+                 'entry_slippage_pct':round(exec_entry['slippage_pct']+exec_entry['latency_pct'],4),
+                 'execution_mode':'REALISTIC_COSTS_V1'}
             book['position']=pos
             book.setdefault('last_entry_by_address',{})[a]=now
             break
@@ -225,7 +339,7 @@ def stats(book):
     gp=sum(max(0,num(t.get('pnl_usd'))) for t in h); gl=-sum(min(0,num(t.get('pnl_usd'))) for t in h)
     unreal=0.0
     p=book.get('position')
-    if p: unreal=num(p.get('quantity'))*(num(p.get('current_price'))-num(p.get('entry_price')))
+    if p: unreal=num(p.get('open_pnl_usd'))
     equity=num(book.get('balance'))+unreal
     partial_count=sum(len(t.get('partial_exits') or []) for t in h)+len((p or {}).get('partial_exits') or [])
     locked_partial=sum(num(t.get('partial_realized_pnl')) for t in h)+num((p or {}).get('partial_realized_pnl'))
