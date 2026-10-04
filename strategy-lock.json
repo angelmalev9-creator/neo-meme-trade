@@ -1,9 +1,9 @@
 {
   "name": "NEO Meme Coins GOLD strategy",
-  "locked_at_utc": "2026-10-04T18:12:00Z",
+  "locked_at_utc": "2026-10-04T18:32:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "d0c7bd9c9bd6770576f88fc69f3d37c14da103379956f2b9edea437e433b04ea",
+  "sha256": "ba58a33b46d33757c09d14cab8c275a5b8fb16bc69b1976aaa0f63b404ab96a8",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 80,
@@ -13,11 +13,11 @@
     "trailing_pct": 4,
     "max_hold_minutes": 7,
     "starting_balance_usd": 1000,
-    "trade_notional_usd": 200,
-    "max_daily_loss_usd": 30,
+    "trade_notional_usd": 100,
+    "max_daily_loss_usd": 15,
     "min_liquidity_usd": 10000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "Mandatory 5% executable-net stop with 0.5% execution buffer and pre-entry round-trip guard. No reset; other signal rules unchanged.",
-  "execution_mode": "JUPITER_QUOTE_V2"
+  "integrity_note": "STRICT_RISK_V3: no reset. Jupiter outAmount is used as expected paper fill; otherAmountThreshold is retained only as worst-case guard. New entries require score>=92, conviction>=82, liquidity>=50000, distributed buyer flow, <=0.75% quoted entry impact, <=1.5% expected round-trip cost, and <=4.5% worst-case round-trip cost. $100 sizing and $15 daily loss cap are enforced.",
+  "execution_mode": "JUPITER_QUOTE_V2_EXPECTED"
 }
