@@ -393,7 +393,7 @@ class State:
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
                     'starting_balance_usd': STARTING_BALANCE_USD,
                     'execution_mode': 'JUPITER_QUOTE_V2',
-                    'execution_note': 'STRICT_RISK_V3: Jupiter expected-output accounting, selective entries, $100 sizing, and enforced daily loss cap.',
+                    'execution_note': 'STRICT_RISK_V3: Jupiter expected-output accounting, selective entries, $200 sizing, and enforced $100 daily loss cap.',
                     'strict_entry_score': STRICT_ENTRY_SCORE,
                     'strict_min_conviction': STRICT_MIN_CONVICTION,
                     'strict_min_liquidity_usd': STRICT_MIN_LIQUIDITY_USD,
