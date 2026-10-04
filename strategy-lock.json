@@ -1,9 +1,9 @@
 {
   "name": "NEO Meme Coins GOLD strategy",
-  "locked_at_utc": "2026-10-04T18:05:00Z",
+  "locked_at_utc": "2026-10-04T18:12:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "e6bdce0e34d8ab25b5c013836801cfad3e601ebfba7f87379bee26cbf286f41a",
+  "sha256": "d0c7bd9c9bd6770576f88fc69f3d37c14da103379956f2b9edea437e433b04ea",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 80,
@@ -18,6 +18,6 @@
     "min_liquidity_usd": 10000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "Mandatory 5% hard stop now triggers on executable net PnL; no reset; other strategy rules unchanged.",
+  "integrity_note": "Mandatory 5% executable-net stop with 0.5% execution buffer and pre-entry round-trip guard. No reset; other signal rules unchanged.",
   "execution_mode": "JUPITER_QUOTE_V2"
 }
