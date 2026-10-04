@@ -96,20 +96,22 @@ def load_state():
 
 STATE=load_state()
 
-def dex_prices(addresses):
-    if not addresses: return {}
+def dex_position_prices(positions):
+    if not positions: return {}
+    addresses=list(dict.fromkeys(p.get('address') for p in positions if p.get('address')))
+    wanted={(p.get('address'),p.get('pairAddress')) for p in positions if p.get('address') and p.get('pairAddress')}
     out={}
     for i in range(0,len(addresses),30):
         batch=addresses[i:i+30]
         r=SESSION.get(DEX+'/tokens/v1/solana/'+','.join(batch),timeout=10)
         r.raise_for_status()
-        best={}
-        for p in r.json() if isinstance(r.json(),list) else []:
+        rows=r.json() if isinstance(r.json(),list) else []
+        for p in rows:
             a=(p.get('baseToken') or {}).get('address')
-            if not a: continue
-            l=num((p.get('liquidity') or {}).get('usd'))
-            if a not in best or l>num((best[a].get('liquidity') or {}).get('usd')): best[a]=p
-        for a,p in best.items(): out[a]=num(p.get('priceUsd'))
+            pair=p.get('pairAddress')
+            if (a,pair) in wanted:
+                price=num(p.get('priceUsd'))
+                if price>0: out[(a,pair)]=price
     return out
 
 def close_position(book,pos,price,reason):
@@ -142,12 +144,13 @@ def realize_partial(book,pos,price,fraction,label):
     return pnl
 
 def update_positions(flows):
-    addresses=[b['position']['address'] for b in STATE['books'].values() if b.get('position')]
-    prices=dex_prices(list(dict.fromkeys(addresses))) if addresses else {}
+    positions=[b['position'] for b in STATE['books'].values() if b.get('position')]
+    prices=dex_position_prices(positions) if positions else {}
     for book in STATE['books'].values():
         pos=book.get('position')
         if not pos: continue
-        price=prices.get(pos['address'])
+        pair_key=(pos.get('address'),pos.get('pairAddress'))
+        price=prices.get(pair_key)
         if not price: continue
         entry=num(pos['entry_price']); peak=max(num(pos.get('peak_price'),entry),price)
         pct=(price-entry)/entry*100; hold=(now_ms()-int(pos['opened_at']))/60000
