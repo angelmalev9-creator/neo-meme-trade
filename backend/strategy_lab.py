@@ -7,6 +7,7 @@ import requests
 API_URL=os.getenv('NEO_LOCAL_API','http://127.0.0.1:8788/state')
 DEX='https://api.dexscreener.com'
 STATE_PATH=Path(os.getenv('NEO_STRATEGY_LAB_PATH','/var/lib/neo-market/strategy_lab.json'))
+RESET_FLAG_PATH=Path(os.getenv('NEO_STRATEGY_LAB_RESET_FLAG','/var/lib/neo-market/strategy_lab.reset'))
 START_BALANCE=float(os.getenv('NEO_LAB_START_BALANCE','500'))
 STRATEGY_START_BALANCES={'SCALPER':float(os.getenv('NEO_LAB_SCALPER_START_BALANCE','100'))}
 TRADE_NOTIONAL=float(os.getenv('NEO_LAB_TRADE_NOTIONAL','150'))
@@ -174,12 +175,19 @@ def empty_book(s):
             'position':None,'history':[],'trade_seq':0,'last_entry_by_address':{},'created_at':now_ms()}
 
 def load_state():
-    raw=load_json(STATE_PATH,{})
+    reset_requested=RESET_FLAG_PATH.exists()
+    if reset_requested:
+        raw={}
+        try: RESET_FLAG_PATH.unlink()
+        except Exception: pass
+    else:
+        raw=load_json(STATE_PATH,{})
     books={}
     for s in STRATEGIES:
         b=(raw.get('books') or {}).get(s['id']) or empty_book(s)
         b['id']=s['id']; b['name']=s['name']; books[s['id']]=b
-    return {'started_at':raw.get('started_at') or now_ms(),'updated_at':now_ms(),'status':'starting','books':books}
+    return {'started_at':now_ms() if reset_requested else (raw.get('started_at') or now_ms()),
+            'updated_at':now_ms(),'status':'starting','books':books}
 
 STATE=load_state()
 
