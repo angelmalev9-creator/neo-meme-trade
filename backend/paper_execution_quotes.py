@@ -142,7 +142,11 @@ def position_mark(position: dict[str, Any], coin: dict[str, Any], network_fee_us
     if position.get("execution_mode") != "JUPITER_QUOTE_V2":
         return None
     token_mint = str(position.get("address") or "")
-    raw_amount = int(position.get("jupiter_token_raw_amount") or 0)
+    raw_amount = int(
+        position.get("jupiter_token_raw_expected")
+        or position.get("jupiter_token_raw_amount")
+        or 0
+    )
     if raw_amount <= 0:
         return None
 
@@ -164,14 +168,17 @@ def position_mark(position: dict[str, Any], coin: dict[str, Any], network_fee_us
     result = {
         "execution_source": "JUPITER_QUOTE_V2",
         "market_price": market_price,
-        "fill_price": max(0.0, market_price * (1.0 - impact_pct / 100.0 - slippage_pct / 100.0)),
+        "fill_price": max(0.0, market_price * (1.0 - impact_pct / 100.0)),
         "market_value_usd": expected_usdc,
-        "gross_proceeds_usd": floor_usdc,
+        "gross_proceeds_usd": expected_usdc,
+        "worst_case_proceeds_usd": floor_usdc,
         "dex_fee_usd": 0.0,
         "network_fee_usd": max(0.0, network_fee_usd),
-        "net_proceeds_usd": max(0.0, floor_usdc - max(0.0, network_fee_usd)),
+        "net_proceeds_usd": max(0.0, expected_usdc - max(0.0, network_fee_usd)),
+        "worst_case_net_proceeds_usd": max(0.0, floor_usdc - max(0.0, network_fee_usd)),
         "impact_pct": impact_pct,
-        "slippage_pct": slippage_pct,
+        "slippage_pct": 0.0,
+        "slippage_tolerance_pct": slippage_pct,
         "latency_pct": 0.0,
         "quoted_at": int(fresh.get("quoted_at") or now),
         "route": fresh.get("route") or [],
