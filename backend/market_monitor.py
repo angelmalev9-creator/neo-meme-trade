@@ -32,6 +32,16 @@ STARTING_BALANCE_USD = 1000.0
 TRADE_NOTIONAL_USD = 200.0
 MAX_DAILY_LOSS_USD = 30.0
 MIN_LIQUIDITY_USD = 10000.0
+
+# Paper execution model. Signal/exit rules stay unchanged; only simulated fills and PnL
+# include real-world friction. PumpSwap canonical fee tiers mirror pump.fun fees
+# published 2026-05-20. Non-PumpSwap pools use the conservative fallback below.
+GENERIC_DEX_FEE_BPS = float(os.getenv('NEO_EXEC_GENERIC_DEX_FEE_BPS', '30'))
+BASE_SLIPPAGE_BPS = float(os.getenv('NEO_EXEC_BASE_SLIPPAGE_BPS', '10'))
+LATENCY_BUFFER_BPS = float(os.getenv('NEO_EXEC_LATENCY_BUFFER_BPS', '10'))
+NETWORK_FEE_SOL = float(os.getenv('NEO_EXEC_NETWORK_FEE_SOL', '0.0001'))
+MAX_PRICE_IMPACT_PCT = float(os.getenv('NEO_EXEC_MAX_PRICE_IMPACT_PCT', '20'))
+
 SESSION = requests.Session()
 SESSION.headers.update({'User-Agent': 'NEO-Meme-Market-Monitor/2.0', 'Accept': 'application/json'})
 
@@ -49,6 +59,96 @@ def num(value: Any, default: float = 0.0) -> float:
 
 def clamp(value: float) -> float:
     return max(0.0, min(100.0, value))
+
+
+def sol_usd_from_coin(coin: dict[str, Any]) -> float:
+    price_usd = num(coin.get('priceUsd'))
+    price_native = num(coin.get('priceNative'))
+    if price_usd > 0 and price_native > 0:
+        return price_usd / price_native
+    return 0.0
+
+
+def pumpswap_fee_bps(coin: dict[str, Any]) -> float:
+    if str(coin.get('dexId') or '').lower() != 'pumpswap':
+        return GENERIC_DEX_FEE_BPS
+    sol_usd = sol_usd_from_coin(coin)
+    market_cap_usd = num(coin.get('marketCap') or coin.get('fdv'))
+    if sol_usd <= 0 or market_cap_usd <= 0:
+        return 125.0
+    market_cap_sol = market_cap_usd / sol_usd
+    tiers = (
+        (420, 125.0), (1470, 120.0), (2460, 115.0), (3440, 110.0),
+        (4420, 105.0), (9820, 100.0), (14740, 95.0), (19650, 90.0),
+        (24560, 85.0), (29470, 80.0), (34380, 75.0), (39300, 70.0),
+        (44210, 65.0), (49120, 60.0), (54030, 55.0), (58940, 52.5),
+        (63860, 50.0), (68770, 47.5), (73681, 45.0), (78590, 42.5),
+        (83500, 40.0), (88400, 37.5), (93330, 35.0), (98240, 32.5),
+    )
+    for max_mc_sol, fee_bps in tiers:
+        if market_cap_sol < max_mc_sol:
+            return fee_bps
+    return 30.0
+
+
+def execution_friction(coin: dict[str, Any], trade_value_usd: float) -> dict[str, float]:
+    liquidity = max(num(coin.get('liquidityUsd')), 1.0)
+    trade_value = max(0.0, trade_value_usd)
+    # DexScreener liquidity is approximately both sides of the pool in USD.
+    # For a constant-product AMM, quote-side reserve is roughly half of that,
+    # so average fill impact is approximately trade_value / (liquidity / 2).
+    impact_pct = min(MAX_PRICE_IMPACT_PCT, (2.0 * trade_value / liquidity) * 100.0)
+    slippage_pct = BASE_SLIPPAGE_BPS / 100.0
+    latency_pct = LATENCY_BUFFER_BPS / 100.0
+    fee_bps = pumpswap_fee_bps(coin)
+    network_fee_usd = NETWORK_FEE_SOL * sol_usd_from_coin(coin)
+    return {
+        'impact_pct': impact_pct,
+        'slippage_pct': slippage_pct,
+        'latency_pct': latency_pct,
+        'total_price_penalty_pct': impact_pct + slippage_pct + latency_pct,
+        'dex_fee_bps': fee_bps,
+        'network_fee_usd': network_fee_usd,
+    }
+
+
+def entry_execution(coin: dict[str, Any], notional_usd: float) -> dict[str, float]:
+    market_price = num(coin.get('priceUsd'))
+    friction = execution_friction(coin, notional_usd)
+    penalty = friction['total_price_penalty_pct'] / 100.0
+    fill_price = market_price * (1.0 + penalty)
+    dex_fee_usd = notional_usd * friction['dex_fee_bps'] / 10000.0
+    token_budget_usd = max(0.0, notional_usd - dex_fee_usd)
+    quantity = token_budget_usd / fill_price if fill_price > 0 else 0.0
+    return {
+        **friction,
+        'market_price': market_price,
+        'fill_price': fill_price,
+        'dex_fee_usd': dex_fee_usd,
+        'quantity': quantity,
+        'capital_committed_usd': notional_usd + friction['network_fee_usd'],
+    }
+
+
+def exit_execution(coin: dict[str, Any], quantity: float) -> dict[str, float]:
+    market_price = num(coin.get('priceUsd'))
+    market_value_usd = max(0.0, quantity * market_price)
+    friction = execution_friction(coin, market_value_usd)
+    penalty = friction['total_price_penalty_pct'] / 100.0
+    fill_price = max(0.0, market_price * (1.0 - penalty))
+    gross_proceeds_usd = max(0.0, quantity * fill_price)
+    dex_fee_usd = gross_proceeds_usd * friction['dex_fee_bps'] / 10000.0
+    net_proceeds_usd = max(0.0, gross_proceeds_usd - dex_fee_usd - friction['network_fee_usd'])
+    return {
+        **friction,
+        'market_price': market_price,
+        'fill_price': fill_price,
+        'market_value_usd': market_value_usd,
+        'gross_proceeds_usd': gross_proceeds_usd,
+        'dex_fee_usd': dex_fee_usd,
+        'net_proceeds_usd': net_proceeds_usd,
+    }
+
 
 def read_strategy_lab() -> dict[str, Any]:
     try:
@@ -139,7 +239,7 @@ class State:
         self.message = text[:500]
 
     def reserved_usd(self) -> float:
-        return sum(num(p.get('notional_usd')) for p in self.positions)
+        return sum(num(p.get('capital_committed_usd'), num(p.get('notional_usd'))) for p in self.positions)
 
     def unrealized_pnl_usd(self) -> float:
         return sum(num(p.get('pnl_usd')) for p in self.positions)
@@ -247,6 +347,12 @@ class State:
                     'trade_notional_usd': TRADE_NOTIONAL_USD,
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
                     'starting_balance_usd': STARTING_BALANCE_USD,
+                    'execution_mode': 'REALISTIC_V1',
+                    'generic_dex_fee_bps': GENERIC_DEX_FEE_BPS,
+                    'base_slippage_bps': BASE_SLIPPAGE_BPS,
+                    'latency_buffer_bps': LATENCY_BUFFER_BPS,
+                    'network_fee_sol_per_leg': NETWORK_FEE_SOL,
+                    'max_price_impact_pct': MAX_PRICE_IMPACT_PCT,
                 },
             }
     def token_snapshot(self, address: str) -> dict[str, Any] | None:
@@ -693,9 +799,13 @@ class Monitor:
                 next_positions.append(position)
                 continue
             peak = max(num(position.get('peak_price'), entry), price)
-            pnl_pct = round(((price - entry) / entry) * 100, 6)
+            signal_pnl_pct = round(((price - entry) / entry) * 100, 6)
             quantity = num(position.get('quantity')) or (num(position.get('notional_usd'), TRADE_NOTIONAL_USD) / entry)
-            pnl_usd = quantity * (price - entry)
+            exit_quote = exit_execution(coin, quantity)
+            entry_network_fee = num(position.get('entry_network_fee_usd'))
+            notional = num(position.get('notional_usd'), TRADE_NOTIONAL_USD)
+            pnl_usd = exit_quote['net_proceeds_usd'] - notional - entry_network_fee
+            pnl_pct = (pnl_usd / max(notional, 1e-18)) * 100.0
             hold_min = (now_ms() - int(position.get('opened_at', now_ms()))) / 60000
             context = self.market_context(coin, position)
             conviction = num(context.get('conviction'))
@@ -711,20 +821,20 @@ class Monitor:
 
             # The hard stop is always respected. Everything else can only exit earlier
             # or let a strong winner run longer while conviction remains high.
-            if pnl_pct <= -STOP_LOSS_PCT:
+            if signal_pnl_pct <= -STOP_LOSS_PCT:
                 exit_reason = 'STOP_LOSS'
-            elif conviction < 35 and pnl_pct < 0:
+            elif conviction < 35 and signal_pnl_pct < 0:
                 exit_reason = 'CONVICTION_EXIT'
             elif (
                 num(fast_flow.get('trades')) >= 4
                 and num(fast_flow.get('sells')) >= 3
                 and num(fast_flow.get('sell_usd')) >= max(200.0, num(fast_flow.get('buy_usd')) * 2.0)
-                and pnl_pct < 3.0
+                and signal_pnl_pct < 3.0
             ):
                 exit_reason = 'ORDERFLOW_EXIT'
-            elif target_pct is not None and pnl_pct >= num(target_pct):
+            elif target_pct is not None and signal_pnl_pct >= num(target_pct):
                 exit_reason = f'ADAPTIVE_TP_{num(target_pct):.0f}'
-            elif peak >= entry * 1.10 and conviction < 50 and pnl_pct > 2.0:
+            elif peak >= entry * 1.10 and conviction < 50 and signal_pnl_pct > 2.0:
                 exit_reason = 'CONVICTION_PROFIT_LOCK'
             elif trailing_armed and price <= trailing_floor:
                 exit_reason = 'ADAPTIVE_TRAILING'
@@ -733,14 +843,15 @@ class Monitor:
             elif hold_min >= 120:
                 exit_reason = 'ABSOLUTE_MAX_HOLD'
 
-            if exit_reason == 'STOP_LOSS' and pnl_pct < -STOP_LOSS_PCT:
-                price = entry * (1 - STOP_LOSS_PCT / 100)
-                pnl_pct = -STOP_LOSS_PCT
-                pnl_usd = quantity * (price - entry)
-
             updated = {
                 **position, 'current_price': price, 'peak_price': peak,
+                'signal_pnl_pct': round(signal_pnl_pct, 3),
+                'current_execution_price': round(exit_quote['fill_price'], 12),
                 'pnl_pct': round(pnl_pct, 3), 'pnl_usd': round(pnl_usd, 3),
+                'estimated_exit_dex_fee_usd': round(exit_quote['dex_fee_usd'], 6),
+                'estimated_exit_network_fee_usd': round(exit_quote['network_fee_usd'], 6),
+                'estimated_exit_price_impact_pct': round(exit_quote['impact_pct'], 4),
+                'estimated_exit_slippage_pct': round(exit_quote['slippage_pct'] + exit_quote['latency_pct'], 4),
                 'conviction': conviction, 'hold_mode': context.get('mode'),
                 'adaptive_target_pct': target_pct, 'adaptive_max_hold_minutes': max_hold,
                 'adaptive_trail_arm_pct': trail_arm_pct, 'adaptive_trail_pct': trail_pct,
@@ -751,8 +862,22 @@ class Monitor:
                 balance_before = STATE.demo_balance_usd
                 STATE.demo_balance_usd = round(STATE.demo_balance_usd + pnl_usd, 8)
                 closed = {
-                    **updated, 'closed_at': now_ms(), 'exit_price': price, 'exit_reason': exit_reason,
-                    'quantity': quantity, 'balance_before': round(balance_before, 8),
+                    **updated, 'closed_at': now_ms(), 'exit_price': price,
+                    'execution_exit_price': round(exit_quote['fill_price'], 12),
+                    'market_exit_price': price,
+                    'exit_reason': exit_reason,
+                    'quantity': quantity,
+                    'exit_gross_proceeds_usd': round(exit_quote['gross_proceeds_usd'], 8),
+                    'exit_net_proceeds_usd': round(exit_quote['net_proceeds_usd'], 8),
+                    'exit_dex_fee_usd': round(exit_quote['dex_fee_usd'], 8),
+                    'exit_network_fee_usd': round(exit_quote['network_fee_usd'], 8),
+                    'exit_price_impact_pct': round(exit_quote['impact_pct'], 6),
+                    'exit_slippage_pct': round(exit_quote['slippage_pct'] + exit_quote['latency_pct'], 6),
+                    'total_fees_usd': round(
+                        num(position.get('entry_dex_fee_usd')) + entry_network_fee +
+                        exit_quote['dex_fee_usd'] + exit_quote['network_fee_usd'], 8
+                    ),
+                    'balance_before': round(balance_before, 8),
                     'balance_after': round(STATE.demo_balance_usd, 8),
                     'exit_score': coin.get('score'), 'exit_liquidity_usd': coin.get('liquidityUsd'),
                     'exit_volume_h1': (coin.get('volume') or {}).get('h1'),
@@ -763,7 +888,10 @@ class Monitor:
                 STATE.history.insert(0, closed)
                 STATE.history = STATE.history[:300]
                 append_audit('EXIT', closed)
-                STATE.event(f"PAPER EXIT #{closed.get('trade_no')} ${closed['symbol']} {exit_reason} · {pnl_pct:+.2f}% · balance ${STATE.demo_balance_usd:.2f}")
+                STATE.event(
+                    f"PAPER EXIT #{closed.get('trade_no')} ${closed['symbol']} {exit_reason} · "
+                    f"net {pnl_pct:+.2f}% / signal {signal_pnl_pct:+.2f}% · balance ${STATE.demo_balance_usd:.2f}"
+                )
             else:
                 next_positions.append(updated)
         STATE.positions = next_positions
@@ -850,30 +978,44 @@ class Monitor:
                 continue
             positive = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'positive'][:4]
             risks = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'risk'][:4]
-            notional = min(TRADE_NOTIONAL_USD, STATE.available_balance_usd())
+            available_before = STATE.available_balance_usd()
+            pre_network_fee = NETWORK_FEE_SOL * sol_usd_from_coin(coin)
+            notional = min(TRADE_NOTIONAL_USD, max(0.0, available_before - pre_network_fee))
             if notional < 10:
                 continue
-            quantity = notional / price
-            available_before = STATE.available_balance_usd()
+            entry_quote = entry_execution(coin, notional)
+            quantity = entry_quote['quantity']
+            if quantity <= 0:
+                continue
             STATE.trade_seq += 1
             position = {
                 'id': f'{address}:{now_ms()}', 'address': address,
                 'pairAddress': coin.get('pairAddress'), 'name': coin.get('name'),
                 'symbol': coin.get('symbol'), 'imageUrl': coin.get('imageUrl'),
-                'entry_price': price, 'current_price': price, 'peak_price': price,
+                'entry_price': price, 'market_entry_price': price,
+                'execution_entry_price': round(entry_quote['fill_price'], 12),
+                'current_price': price, 'peak_price': price,
                 'trade_no': STATE.trade_seq, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
                 'learning_mode': 'ADAPTIVE_CONTEXT_HOLD', 'entry_flow': flow,
                 'entry_context': context, 'entry_conviction': context.get('conviction'),
                 'entry_hold_mode': context.get('mode'), 'learning_sample': learning['sample'],
                 'learning_win_rate': learning['win_rate'], 'learning_profit_factor': learning['profit_factor'],
                 'learning_recent_losses': learning['recent_losses'], 'learning_bonus': learning['bonus'],
-                'notional_usd': round(notional, 8), 'quantity': quantity, 'score': coin.get('score'),
+                'notional_usd': round(notional, 8),
+                'capital_committed_usd': round(entry_quote['capital_committed_usd'], 8),
+                'quantity': quantity, 'score': coin.get('score'),
                 'current_score': coin.get('score'), 'opened_at': now_ms(),
-                'updated_at': now_ms(), 'pnl_pct': 0, 'pnl_usd': 0,
+                'updated_at': now_ms(), 'signal_pnl_pct': 0, 'pnl_pct': 0, 'pnl_usd': 0,
+                'execution_mode': 'REALISTIC_V1',
+                'entry_dex_fee_bps': round(entry_quote['dex_fee_bps'], 4),
+                'entry_dex_fee_usd': round(entry_quote['dex_fee_usd'], 8),
+                'entry_network_fee_usd': round(entry_quote['network_fee_usd'], 8),
+                'entry_price_impact_pct': round(entry_quote['impact_pct'], 6),
+                'entry_slippage_pct': round(entry_quote['slippage_pct'] + entry_quote['latency_pct'], 6),
                 'why_entry': positive, 'risks_at_entry': risks,
                 'balance_at_entry': round(STATE.demo_balance_usd, 8),
                 'available_before_entry': round(available_before, 8),
-                'available_after_entry': round(max(0.0, available_before - notional), 8),
+                'available_after_entry': round(max(0.0, available_before - entry_quote['capital_committed_usd']), 8),
                 'entry_liquidity_usd': coin.get('liquidityUsd'),
                 'entry_volume_h1': (coin.get('volume') or {}).get('h1'),
                 'entry_market_cap': coin.get('marketCap') or coin.get('fdv'),
@@ -886,7 +1028,11 @@ class Monitor:
             STATE.positions.append(position)
             append_audit('ENTRY', position)
             open_addresses.add(address)
-            STATE.event(f"PAPER ENTRY #{position['trade_no']} ${coin.get('symbol')} @ ${price:.10g} · ${notional:.2f} · {strategy_id} · learn {learning['sample']} / WR {learning['win_rate']:.0f}% · NEO {coin.get('score'):.0f}/100")
+            STATE.event(
+                f"PAPER ENTRY #{position['trade_no']} ${coin.get('symbol')} market ${price:.10g} "
+                f"→ fill ${entry_quote['fill_price']:.10g} · ${notional:.2f} · fee {entry_quote['dex_fee_bps'] / 100:.3f}% "
+                f"· impact {entry_quote['impact_pct']:.2f}% · {strategy_id} · NEO {coin.get('score'):.0f}/100"
+            )
 
     def scan_once(self) -> None:
         if not STATE.running or not self.scan_lock.acquire(blocking=False):

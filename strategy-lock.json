@@ -1,9 +1,9 @@
 {
   "name": "NEO Meme Coins GOLD strategy",
-  "locked_at_utc": "2026-10-04T16:25:00Z",
+  "locked_at_utc": "2026-10-04T17:15:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "0426c059bd92f5e965e79c5b4d71d25e2e6a3d4bf06a5da6336528fe9aa5818c",
+  "sha256": "6a20ce1e99f0c1e98089bfbb98fc52b334a8750fc2dbe00bdb6dcb909ae94a28",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 80,
@@ -18,5 +18,6 @@
     "min_liquidity_usd": 10000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "Open paper positions are pinned to their exact entry pairAddress; strategy rules are unchanged."
+  "integrity_note": "Exact pair pinning plus realistic paper fills: PumpSwap fee tiers, liquidity price impact, slippage/latency buffer, Solana network cost. Entry/exit signal rules unchanged.",
+  "execution_mode": "REALISTIC_V1"
 }
