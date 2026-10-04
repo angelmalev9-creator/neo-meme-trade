@@ -31,9 +31,18 @@ STALE_MIN_PROFIT_PCT = 3.0
 LEARNING_WINDOW = 60
 HEALTH_WINDOW = 12
 STARTING_BALANCE_USD = 1000.0
-TRADE_NOTIONAL_USD = 200.0
-MAX_DAILY_LOSS_USD = 30.0
+TRADE_NOTIONAL_USD = float(os.getenv('NEO_TRADE_NOTIONAL_USD', '100'))
+MAX_DAILY_LOSS_USD = float(os.getenv('NEO_MAX_DAILY_LOSS_USD', '15'))
 MIN_LIQUIDITY_USD = 10000.0
+
+# STRICT_RISK_V3: fewer trades, materially lower account risk, and only
+# executable setups whose quoted round-trip friction leaves enough edge.
+STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '92'))
+STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '82'))
+STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '50000'))
+STRICT_MAX_ENTRY_IMPACT_PCT = float(os.getenv('NEO_STRICT_MAX_ENTRY_IMPACT_PCT', '0.75'))
+STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '1.50'))
+STRICT_MAX_WORST_CASE_COST_PCT = float(os.getenv('NEO_STRICT_MAX_WORST_CASE_COST_PCT', '4.50'))
 
 # Paper execution model. Signal/exit rules stay unchanged; only simulated fills and PnL
 # include real-world friction. PumpSwap canonical fee tiers mirror pump.fun fees
@@ -203,6 +212,8 @@ class State:
         self.demo_started_at = now_ms()
         self.demo_session_id = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
         self.trade_seq = 0
+        self.risk_day_key = time.strftime('%Y-%m-%d', time.gmtime())
+        self.risk_day_start_balance_usd = STARTING_BALANCE_USD
         self.load()
 
     def load(self) -> None:
@@ -218,6 +229,15 @@ class State:
             self.demo_started_at = int(data.get('demo_started_at') or self.demo_started_at)
             self.demo_session_id = str(data.get('demo_session_id') or self.demo_session_id)
             self.trade_seq = int(data.get('trade_seq') or 0)
+            today = time.strftime('%Y-%m-%d', time.gmtime())
+            if str(data.get('risk_day_key') or '') == today:
+                self.risk_day_key = today
+                self.risk_day_start_balance_usd = num(
+                    data.get('risk_day_start_balance_usd'), self.demo_balance_usd
+                )
+            else:
+                self.risk_day_key = today
+                self.risk_day_start_balance_usd = self.demo_balance_usd
             raw = data.get('price_history', {})
             if isinstance(raw, dict):
                 self.price_history = {k: v[-480:] for k, v in raw.items() if isinstance(v, list)}
@@ -239,6 +259,8 @@ class State:
             'demo_started_at': self.demo_started_at,
             'demo_session_id': self.demo_session_id,
             'trade_seq': self.trade_seq,
+            'risk_day_key': self.risk_day_key,
+            'risk_day_start_balance_usd': self.risk_day_start_balance_usd,
             'price_history': price_history,
         }, ensure_ascii=False))
 
@@ -258,6 +280,16 @@ class State:
 
     def equity_usd(self) -> float:
         return self.demo_balance_usd + self.unrealized_pnl_usd()
+
+    def refresh_risk_day(self) -> None:
+        today = time.strftime('%Y-%m-%d', time.gmtime())
+        if self.risk_day_key != today:
+            self.risk_day_key = today
+            self.risk_day_start_balance_usd = self.demo_balance_usd
+
+    def risk_day_pnl(self) -> float:
+        self.refresh_risk_day()
+        return self.demo_balance_usd - self.risk_day_start_balance_usd
 
     def realized_today(self) -> float:
         day = time.strftime('%Y-%m-%d', time.gmtime())
@@ -332,6 +364,8 @@ class State:
                     'wins': wins,
                     'win_rate': round((wins / closed) * 100, 1) if closed else 0,
                     'realized_today_usd': round(self.realized_today(), 2),
+                    'risk_day_pnl_usd': round(self.risk_day_pnl(), 2),
+                    'risk_day_start_balance_usd': round(self.risk_day_start_balance_usd, 2),
                     'demo_starting_balance_usd': round(self.demo_starting_balance_usd, 2),
                     'demo_balance_usd': round(self.demo_balance_usd, 2),
                     'demo_equity_usd': round(self.equity_usd(), 2),
@@ -359,7 +393,12 @@ class State:
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
                     'starting_balance_usd': STARTING_BALANCE_USD,
                     'execution_mode': 'JUPITER_QUOTE_V2',
-                    'execution_note': 'New entries use live read-only Jupiter quotes; existing V1 trades remain unchanged.',
+                    'execution_note': 'STRICT_RISK_V3: Jupiter expected-output accounting, selective entries, $100 sizing, and enforced daily loss cap.',
+                    'strict_entry_score': STRICT_ENTRY_SCORE,
+                    'strict_min_conviction': STRICT_MIN_CONVICTION,
+                    'strict_min_liquidity_usd': STRICT_MIN_LIQUIDITY_USD,
+                    'strict_max_entry_impact_pct': STRICT_MAX_ENTRY_IMPACT_PCT,
+                    'strict_max_roundtrip_cost_pct': STRICT_MAX_ROUNDTRIP_COST_PCT,
                     'jupiter_slippage_bps': paper_quotes.SLIPPAGE_BPS,
                     'generic_dex_fee_bps': GENERIC_DEX_FEE_BPS,
                     'base_slippage_bps': BASE_SLIPPAGE_BPS,
@@ -981,6 +1020,9 @@ class Monitor:
             self.stop_event.wait(POSITION_SCAN_SECONDS)
 
     def maybe_open(self, feed: list[dict[str, Any]]) -> None:
+        STATE.refresh_risk_day()
+        if STATE.risk_day_pnl() <= -MAX_DAILY_LOSS_USD:
+            return
         if len(STATE.positions) >= MAX_POSITIONS:
             return
         if STATE.available_balance_usd() < min(TRADE_NOTIONAL_USD, 10.0):
@@ -1007,16 +1049,25 @@ class Monitor:
             liquidity_mc_ratio = liquidity / max(market_cap, 1.0)
 
             flow = STATE.live_flow(address, 60)
+            change_h1 = num((coin.get('priceChange') or {}).get('h1'))
             order_flow_core = (
-                score >= 85 and liquidity >= 15000 and -5 <= change_m5 <= 25
-                and flow['trades'] >= 3 and flow['buy_sell_usd_ratio'] >= 1.3
-                and flow['unique_wallets'] >= 1
-                and flow['max_sell_usd'] < max(750.0, flow['buy_usd'] * 0.8)
+                score >= STRICT_ENTRY_SCORE
+                and liquidity >= STRICT_MIN_LIQUIDITY_USD
+                and 0.5 <= change_m5 <= 12.0
+                and -10.0 <= change_h1 <= 150.0
+                and buy_sell_ratio >= 1.20
+                and liquidity_mc_ratio >= 0.08
+                and flow['trades'] >= 6
+                and flow['buy_sell_usd_ratio'] >= 1.60
+                and flow['unique_wallets'] >= 5
+                and flow['buyer_wallets'] >= 3
+                and flow['wallet_buy_sell_ratio'] >= 1.0
+                and flow['max_sell_usd'] < max(250.0, flow['buy_usd'] * 0.50)
             )
             if not order_flow_core:
                 continue
             context = self.market_context(coin)
-            if num(context.get('conviction')) < 75:
+            if num(context.get('conviction')) < STRICT_MIN_CONVICTION:
                 continue
             strategy_id = 'ORDER_FLOW_ADAPTIVE'
             learning = {'sample': 0, 'win_rate': 0, 'profit_factor': 0, 'recent_losses': 0, 'bonus': 0, 'blocked': False}
@@ -1035,21 +1086,30 @@ class Monitor:
             if not live_quote:
                 continue
             entry_network_fee = NETWORK_FEE_SOL * sol_usd_from_coin(coin)
-            initial_exit = paper_quotes.exit_quote(address, int(live_quote.get('token_raw_floor') or 0))
+            expected_token_raw = int(live_quote.get('token_raw_expected') or 0)
+            initial_exit = paper_quotes.exit_quote(address, expected_token_raw)
             if not initial_exit:
                 continue
-            immediate_exit_net = max(0.0, num(initial_exit.get('floor_usdc')) - entry_network_fee)
+            immediate_exit_net = max(0.0, num(initial_exit.get('expected_usdc')) - entry_network_fee)
+            worst_case_exit_net = max(0.0, num(initial_exit.get('floor_usdc')) - entry_network_fee)
             immediate_roundtrip_pct = (
                 (immediate_exit_net - notional - entry_network_fee) / max(notional, 1e-18)
             ) * 100.0
-            if immediate_roundtrip_pct <= -(STOP_LOSS_PCT - STOP_EXECUTION_BUFFER_PCT):
+            worst_case_roundtrip_pct = (
+                (worst_case_exit_net - notional - entry_network_fee) / max(notional, 1e-18)
+            ) * 100.0
+            impact_pct = num(live_quote.get('price_impact_pct'))
+            if impact_pct > STRICT_MAX_ENTRY_IMPACT_PCT:
+                continue
+            if immediate_roundtrip_pct < -STRICT_MAX_ROUNDTRIP_COST_PCT:
+                continue
+            if worst_case_roundtrip_pct < -STRICT_MAX_WORST_CASE_COST_PCT:
                 continue
             stop_signal_trigger_pct = -max(
-                0.25,
+                0.50,
                 STOP_LOSS_PCT - abs(min(0.0, immediate_roundtrip_pct)) - STOP_EXECUTION_BUFFER_PCT,
             )
-            impact_pct = num(live_quote.get('price_impact_pct'))
-            quote_slippage_pct = num(live_quote.get('slippage_bps')) / 100.0
+            quote_slippage_pct = 0.0
             quote_network_fee = entry_network_fee
             quote_fill_price = price * (1.0 + impact_pct / 100.0 + quote_slippage_pct / 100.0)
             quantity = notional / max(quote_fill_price, 1e-18)
@@ -1088,12 +1148,13 @@ class Monitor:
                 'execution_mode': 'JUPITER_QUOTE_V2',
                 'jupiter_usdc_in_raw': int(live_quote.get('input_usdc_raw') or 0),
                 'jupiter_token_raw_expected': int(live_quote.get('token_raw_expected') or 0),
-                'jupiter_token_raw_amount': int(live_quote.get('token_raw_floor') or 0),
+                'jupiter_token_raw_amount': expected_token_raw,
                 'jupiter_entry_route': live_quote.get('route') or [],
                 'jupiter_entry_quote_at': int(live_quote.get('quoted_at') or now_ms()),
                 'jupiter_entry_price_impact_pct': impact_pct,
                 'jupiter_slippage_bps': int(live_quote.get('slippage_bps') or paper_quotes.SLIPPAGE_BPS),
                 'entry_roundtrip_pnl_pct': round(immediate_roundtrip_pct, 4),
+                'entry_worst_case_roundtrip_pnl_pct': round(worst_case_roundtrip_pct, 4),
                 'stop_signal_trigger_pct': round(stop_signal_trigger_pct, 4),
                 'hard_stop_net_pct': -STOP_LOSS_PCT,
                 'entry_dex_fee_bps': round(entry_quote['dex_fee_bps'], 4),
