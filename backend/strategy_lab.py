@@ -8,6 +8,7 @@ API_URL=os.getenv('NEO_LOCAL_API','http://127.0.0.1:8788/state')
 DEX='https://api.dexscreener.com'
 STATE_PATH=Path(os.getenv('NEO_STRATEGY_LAB_PATH','/var/lib/neo-market/strategy_lab.json'))
 START_BALANCE=float(os.getenv('NEO_LAB_START_BALANCE','500'))
+STRATEGY_START_BALANCES={'SCALPER':float(os.getenv('NEO_LAB_SCALPER_START_BALANCE','100'))}
 TRADE_NOTIONAL=float(os.getenv('NEO_LAB_TRADE_NOTIONAL','150'))
 POLL_SECONDS=float(os.getenv('NEO_LAB_POLL_SECONDS','2'))
 ENTRY_REFRESH_SECONDS=float(os.getenv('NEO_LAB_ENTRY_REFRESH_SECONDS','2'))
@@ -81,7 +82,8 @@ STRATEGIES=[
  {'id':'FLOW_MOMENTUM_SCALE_OUT','name':'Flow Momentum Scale-Out','rule':lambda f: f['score']>=85 and f['liq']>=15000 and 0<=f['m5']<=30 and f['flow']['trades']>=3 and f['flow']['ratio']>=1.8 and f['flow']['buy_usd']>=150},
 ]
 def empty_book(s):
-    return {'id':s['id'],'name':s['name'],'starting_balance':START_BALANCE,'balance':START_BALANCE,
+    start=STRATEGY_START_BALANCES.get(s['id'],START_BALANCE)
+    return {'id':s['id'],'name':s['name'],'starting_balance':start,'balance':start,
             'position':None,'history':[],'trade_seq':0,'last_entry_by_address':{},'created_at':now_ms()}
 
 def load_state():
@@ -215,6 +217,7 @@ def maybe_open(feed,flows):
             break
 
 def stats(book):
+    start=num(book.get('starting_balance'),START_BALANCE)
     h=book.get('history') or []; wins=[t for t in h if num(t.get('pnl_usd'))>0]
     gp=sum(max(0,num(t.get('pnl_usd'))) for t in h); gl=-sum(min(0,num(t.get('pnl_usd'))) for t in h)
     unreal=0.0
@@ -224,8 +227,8 @@ def stats(book):
     partial_count=sum(len(t.get('partial_exits') or []) for t in h)+len((p or {}).get('partial_exits') or [])
     locked_partial=sum(num(t.get('partial_realized_pnl')) for t in h)+num((p or {}).get('partial_realized_pnl'))
     return {'trades':len(h),'wins':len(wins),'losses':len(h)-len(wins),'win_rate':round(len(wins)/len(h)*100,1) if h else 0,
-            'profit_factor':round(gp/gl,2) if gl>0 else (99.0 if gp>0 else 0.0),'realized_pnl':round(num(book.get('balance'))-START_BALANCE,2),
-            'equity':round(equity,2),'return_pct':round((equity-START_BALANCE)/START_BALANCE*100,2),'open':bool(p),
+            'profit_factor':round(gp/gl,2) if gl>0 else (99.0 if gp>0 else 0.0),'realized_pnl':round(num(book.get('balance'))-start,2),
+            'equity':round(equity,2),'return_pct':round((equity-start)/max(start,1e-18)*100,2),'open':bool(p),
             'partial_exits':partial_count,'partial_locked_pnl':round(locked_partial,2)}
 
 def persist(status='online',error=None):
