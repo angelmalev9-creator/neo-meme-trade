@@ -2,6 +2,9 @@
 import copy
 import json
 import os
+import socket
+import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,16 +15,23 @@ import requests
 
 HOST = os.getenv("NEO_USER_GATEWAY_HOST", "127.0.0.1")
 PORT = int(os.getenv("NEO_USER_GATEWAY_PORT", "8789"))
-UPSTREAM = os.getenv("NEO_MARKET_UPSTREAM", "http://127.0.0.1:8788").rstrip("/")
-STATE_PATH = Path(os.getenv("NEO_USER_STATE_PATH", "/var/lib/neo-market/user_accounts.json"))
+CENTRAL_UPSTREAM = os.getenv("NEO_MARKET_UPSTREAM", "http://127.0.0.1:8788").rstrip("/")
+ROOT = Path(os.getenv("NEO_MARKET_ROOT", "/root/neo-meme-trade"))
+ENGINE_SCRIPT = ROOT / "backend" / "market_monitor.py"
+STORE_PATH = Path(os.getenv("NEO_USER_STATE_PATH", "/var/lib/neo-market/user_accounts.json"))
+USER_ENGINE_ROOT = Path(os.getenv("NEO_USER_ENGINE_ROOT", "/var/lib/neo-market/users"))
+LIVE_TAPE_PATH = os.getenv("NEO_LIVE_TAPE_PATH", "/var/lib/neo-market/live_tape.json")
+STRATEGY_LAB_PATH = os.getenv("NEO_STRATEGY_LAB_PATH", "/var/lib/neo-market/strategy_lab.json")
+BASE_USER_PORT = int(os.getenv("NEO_USER_ENGINE_PORT_START", "18800"))
+MAX_USER_PORT = int(os.getenv("NEO_USER_ENGINE_PORT_END", "19800"))
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://qziuovwcauaklgqscqys.supabase.co").rstrip("/")
 SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
 STARTING_BALANCE = 1000.0
-MAX_HISTORY = 300
-LOCK = threading.RLock()
 
+LOCK = threading.RLock()
+ENGINE_PROCESSES = {}
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "NEO-Meme-User-Gateway/1.0", "Accept": "application/json"})
+SESSION.headers.update({"User-Agent": "NEO-Meme-User-Gateway/2.0", "Accept": "application/json"})
 
 
 def now_ms():
@@ -30,16 +40,31 @@ def now_ms():
 
 def number(value, default=0.0):
     try:
-        return float(value)
+        out = float(value)
+        return out
     except Exception:
         return default
 
 
+def parse_created_at(value):
+    if not value:
+        return now_ms()
+    try:
+        from datetime import datetime
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
+    except Exception:
+        return now_ms()
+
+
+def safe_user_id(value):
+    return "".join(ch for ch in str(value) if ch.isalnum() or ch in ("-", "_"))[:128]
+
+
 def load_store():
     try:
-        if not STATE_PATH.exists():
+        if not STORE_PATH.exists():
             return {"accounts": {}}
-        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return {"accounts": {}}
         data.setdefault("accounts", {})
@@ -52,20 +77,10 @@ STORE = load_store()
 
 
 def save_store():
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_PATH.with_suffix(".tmp")
+    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STORE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(STORE, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    tmp.replace(STATE_PATH)
-
-
-def parse_created_at(value):
-    if not value:
-        return now_ms()
-    try:
-        from datetime import datetime
-        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
-    except Exception:
-        return now_ms()
+    tmp.replace(STORE_PATH)
 
 
 def verify_user(headers):
@@ -92,175 +107,237 @@ def verify_user(headers):
         return None
 
 
-def fetch_upstream(path="/state"):
-    response = SESSION.get(f"{UPSTREAM}{path}", timeout=12)
+def central_state():
+    response = SESSION.get(f"{CENTRAL_UPSTREAM}/state", timeout=12)
     response.raise_for_status()
     return response.json()
 
 
-def session_id(user_id, started_at):
-    return f"USER-{user_id[:8]}-{str(started_at)[-6:]}"
+def engine_dir(user_id):
+    return USER_ENGINE_ROOT / safe_user_id(user_id)
 
 
-def ensure_account(user, raw):
-    user_id = user["id"]
+def engine_state_path(user_id):
+    return engine_dir(user_id) / "state.json"
+
+
+def engine_audit_path(user_id):
+    return engine_dir(user_id) / "audit.jsonl"
+
+
+def port_open(port):
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def engine_health(port):
+    try:
+        response = SESSION.get(f"http://127.0.0.1:{int(port)}/health", timeout=1.5)
+        return response.status_code == 200 and bool(response.json().get("ok"))
+    except Exception:
+        return False
+
+
+def allocate_port(user_id):
+    accounts = STORE.setdefault("accounts", {})
+    reserved = {
+        int(a.get("engine_port"))
+        for uid, a in accounts.items()
+        if uid != user_id and a.get("engine_port")
+    }
+    for port in range(BASE_USER_PORT, MAX_USER_PORT + 1):
+        if port in reserved:
+            continue
+        if not port_open(port):
+            return port
+    raise RuntimeError("No free per-user engine ports available.")
+
+
+def ensure_account_record(user):
+    user_id = str(user["id"])
     accounts = STORE.setdefault("accounts", {})
     account = accounts.get(user_id)
-    if account:
-        return account
-
-    registered_at = parse_created_at(user.get("created_at"))
-    engine_started = int((raw.get("stats") or {}).get("demo_started_at") or 0)
-    started_at = max(registered_at, engine_started)
-    account = {
-        "user_id": user_id,
-        "started_at": started_at,
-        "starting_balance": STARTING_BALANCE,
-        "balance": STARTING_BALANCE,
-        "history": [],
-        "seen_trade_ids": [],
-        "trade_numbers": {},
-        "trade_seq": 0,
-        "created_at": now_ms(),
-        "updated_at": now_ms(),
-    }
-    accounts[user_id] = account
-    save_store()
-    return account
-
-
-def next_trade_no(account, trade_id):
-    key = str(trade_id)
-    existing = account["trade_numbers"].get(key)
-    if existing:
-        return int(existing)
-    account["trade_seq"] = int(account.get("trade_seq") or 0) + 1
-    account["trade_numbers"][key] = account["trade_seq"]
-    return account["trade_seq"]
-
-
-def sync_account(account, raw):
-    started_at = int(account.get("started_at") or 0)
-    seen = set(str(x) for x in account.get("seen_trade_ids", []))
-    closed = []
-    for trade in raw.get("history") or []:
-        opened_at = int(trade.get("opened_at") or 0)
-        trade_id = str(trade.get("id") or "")
-        if not trade_id or opened_at < started_at or trade_id in seen:
-            continue
-        closed.append(trade)
-
-    closed.sort(key=lambda t: int(t.get("closed_at") or t.get("updated_at") or t.get("opened_at") or 0))
-    for trade in closed:
-        trade_id = str(trade.get("id"))
-        before = number(account.get("balance"), STARTING_BALANCE)
-        pnl = number(trade.get("pnl_usd"))
-        after = before + pnl
-        item = copy.deepcopy(trade)
-        item["trade_no"] = next_trade_no(account, trade_id)
-        item["session_id"] = session_id(account["user_id"], started_at)
-        item["balance_before"] = round(before, 8)
-        item["balance_after"] = round(after, 8)
-        account["balance"] = round(after, 8)
-        account.setdefault("history", []).insert(0, item)
-        account["history"] = account["history"][:MAX_HISTORY]
-        seen.add(trade_id)
-
-    account["seen_trade_ids"] = list(seen)[-2000:]
-    account["updated_at"] = now_ms()
-    return account
-
-
-def scoped_state(user, raw):
-    with LOCK:
-        account = ensure_account(user, raw)
-        account = sync_account(account, raw)
-        save_store()
-
-        started_at = int(account["started_at"])
-        sid = session_id(user["id"], started_at)
-        history = copy.deepcopy(account.get("history", []))
-
-        positions = []
-        for position in raw.get("positions") or []:
-            if int(position.get("opened_at") or 0) < started_at:
-                continue
-            item = copy.deepcopy(position)
-            trade_id = str(item.get("id") or "")
-            item["trade_no"] = next_trade_no(account, trade_id)
-            item["session_id"] = sid
-            item["balance_at_entry"] = number(account.get("balance"), STARTING_BALANCE)
-            positions.append(item)
-
-        balance = number(account.get("balance"), STARTING_BALANCE)
-        reserved = sum(number(p.get("notional_usd")) for p in positions)
-        unrealized = sum(number(p.get("pnl_usd")) for p in positions)
-        equity = balance + unrealized
-        wins = sum(1 for t in history if number(t.get("pnl_usd")) > 0)
-
-        day = time.strftime("%Y-%m-%d", time.gmtime())
-        realized_today = 0.0
-        for trade in history:
-            stamp = int(trade.get("closed_at") or trade.get("updated_at") or 0)
-            if stamp and time.strftime("%Y-%m-%d", time.gmtime(stamp / 1000)) == day:
-                realized_today += number(trade.get("pnl_usd"))
-
-        result = copy.deepcopy(raw)
-        result["positions"] = positions
-        result["history"] = history
-        result["events"] = [
-            e for e in (raw.get("events") or [])
-            if int(e.get("ts") or 0) >= started_at
-        ]
-
-        stats = result.setdefault("stats", {})
-        stats.update({
-            "open_positions": len(positions),
-            "closed_trades": len(history),
-            "wins": wins,
-            "win_rate": round((wins / len(history)) * 100, 1) if history else 0,
-            "realized_today_usd": round(realized_today, 2),
-            "demo_starting_balance_usd": STARTING_BALANCE,
-            "demo_balance_usd": round(balance, 2),
-            "demo_equity_usd": round(equity, 2),
-            "demo_available_usd": round(max(0.0, balance - reserved), 2),
-            "demo_reserved_usd": round(reserved, 2),
-            "unrealized_pnl_usd": round(unrealized, 2),
-            "realized_total_usd": round(balance - STARTING_BALANCE, 2),
-            "return_pct": round(((equity - STARTING_BALANCE) / STARTING_BALANCE) * 100, 3),
-            "demo_started_at": started_at,
-            "demo_session_id": sid,
-        })
-        result["account_scope"] = {
-            "user_id": user["id"],
-            "isolated": True,
-            "strategy": "ORDER_FLOW_ADAPTIVE",
-        }
-        save_store()
-        return result
-
-
-def reset_account(user, raw):
-    with LOCK:
-        user_id = user["id"]
-        STORE.setdefault("accounts", {})[user_id] = {
+    if account is None:
+        account = {
             "user_id": user_id,
-            "started_at": now_ms(),
-            "starting_balance": STARTING_BALANCE,
-            "balance": STARTING_BALANCE,
-            "history": [],
-            "seen_trade_ids": [],
-            "trade_numbers": {},
-            "trade_seq": 0,
+            "registered_at": parse_created_at(user.get("created_at")),
             "created_at": now_ms(),
             "updated_at": now_ms(),
         }
+        accounts[user_id] = account
         save_store()
-        return scoped_state(user, raw)
+    return account
+
+
+def build_bootstrap_state(user, account, raw):
+    registered_at = int(account.get("registered_at") or parse_created_at(user.get("created_at")))
+    central_started = int((raw.get("stats") or {}).get("demo_started_at") or 0)
+    legacy_started = int(account.get("started_at") or 0)
+    started_at = max(registered_at, central_started, legacy_started)
+
+    legacy_history = account.get("history")
+    if isinstance(legacy_history, list) and legacy_history:
+        history = copy.deepcopy(legacy_history)
+    else:
+        history = [
+            copy.deepcopy(trade)
+            for trade in (raw.get("history") or [])
+            if int(trade.get("opened_at") or 0) >= started_at
+        ]
+
+    positions = [
+        copy.deepcopy(position)
+        for position in (raw.get("positions") or [])
+        if int(position.get("opened_at") or 0) >= started_at
+    ]
+    events = [
+        copy.deepcopy(event)
+        for event in (raw.get("events") or [])
+        if int(event.get("ts") or 0) >= started_at
+    ]
+
+    balance = account.get("balance")
+    if balance is None:
+        balance = STARTING_BALANCE + sum(number(t.get("pnl_usd")) for t in history)
+    balance = number(balance, STARTING_BALANCE)
+
+    trade_numbers = []
+    for item in history + positions:
+        try:
+            trade_numbers.append(int(item.get("trade_no") or 0))
+        except Exception:
+            pass
+    trade_seq = max(trade_numbers or [int(account.get("trade_seq") or 0), len(history) + len(positions)])
+
+    sid = f"USER-{str(user['id'])[:8]}-{str(started_at)[-6:]}"
+    return {
+        "positions": positions[-20:],
+        "history": history[:300],
+        "events": events[:100],
+        "demo_starting_balance_usd": STARTING_BALANCE,
+        "demo_balance_usd": round(balance, 8),
+        "demo_started_at": started_at,
+        "demo_session_id": sid,
+        "trade_seq": trade_seq,
+        "price_history": {},
+    }
+
+
+def bootstrap_if_needed(user, account):
+    state_path = engine_state_path(user["id"])
+    if state_path.exists():
+        return
+    raw = central_state()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    bootstrap = build_bootstrap_state(user, account, raw)
+    state_path.write_text(json.dumps(bootstrap, ensure_ascii=False), encoding="utf-8")
+    account["migrated_to_independent_engine_at"] = now_ms()
+    account["started_at"] = bootstrap["demo_started_at"]
+    account["balance"] = bootstrap["demo_balance_usd"]
+    account["updated_at"] = now_ms()
+    save_store()
+
+
+def start_engine(user, account):
+    user_id = str(user["id"])
+    existing = ENGINE_PROCESSES.get(user_id)
+    if existing is not None and existing.poll() is None:
+        port = int(account.get("engine_port") or 0)
+        if port and engine_health(port):
+            return port
+
+    port = int(account.get("engine_port") or 0)
+    if port and engine_health(port):
+        return port
+    if port <= 0 or port_open(port):
+        port = allocate_port(user_id)
+        account["engine_port"] = port
+        account["updated_at"] = now_ms()
+        save_store()
+
+    bootstrap_if_needed(user, account)
+
+    env = os.environ.copy()
+    env.update({
+        "PYTHONUNBUFFERED": "1",
+        "NEO_MONITOR_HOST": "127.0.0.1",
+        "NEO_MONITOR_PORT": str(port),
+        "NEO_MARKET_STATE_PATH": str(engine_state_path(user_id)),
+        "NEO_MARKET_AUDIT_PATH": str(engine_audit_path(user_id)),
+        "NEO_LIVE_TAPE_PATH": LIVE_TAPE_PATH,
+        "NEO_STRATEGY_LAB_PATH": STRATEGY_LAB_PATH,
+    })
+
+    engine_dir(user_id).mkdir(parents=True, exist_ok=True)
+    process = subprocess.Popen(
+        [sys.executable, str(ENGINE_SCRIPT)],
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    ENGINE_PROCESSES[user_id] = process
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"User engine exited with code {process.returncode}.")
+        if engine_health(port):
+            return port
+        time.sleep(0.2)
+    raise RuntimeError("User engine did not become ready in time.")
+
+
+def ensure_engine(user):
+    with LOCK:
+        account = ensure_account_record(user)
+        return start_engine(user, account)
+
+
+def proxy_user_engine(user, method, path):
+    port = ensure_engine(user)
+    url = f"http://127.0.0.1:{port}{path}"
+    if method == "POST":
+        response = SESSION.post(url, timeout=15)
+    else:
+        response = SESSION.get(url, timeout=15)
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, dict):
+        data["account_scope"] = {
+            "user_id": str(user["id"]),
+            "isolated": True,
+            "independent_engine": True,
+            "strategy": "ORDER_FLOW_ADAPTIVE",
+        }
+    return data
+
+
+def revive_known_engines():
+    # Engines are restarted automatically after a gateway/system restart so
+    # previously activated accounts keep paper-trading even while logged out.
+    with LOCK:
+        accounts = list((STORE.get("accounts") or {}).values())
+    for account in accounts:
+        user_id = account.get("user_id")
+        if not user_id or not engine_state_path(user_id).exists():
+            continue
+        fake_user = {
+            "id": user_id,
+            "created_at": None,
+        }
+        try:
+            with LOCK:
+                start_engine(fake_user, account)
+        except Exception:
+            pass
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "NEOUserGateway/1.0"
+    server_version = "NEOUserGateway/2.0"
 
     def log_message(self, fmt, *args):
         return
@@ -272,7 +349,10 @@ class Handler(BaseHTTPRequestHandler):
             "http://localhost:5173",
             "http://127.0.0.1:5173",
         }
-        self.send_header("Access-Control-Allow-Origin", origin if origin in allowed else "https://angelmalev9-creator.github.io")
+        self.send_header(
+            "Access-Control-Allow-Origin",
+            origin if origin in allowed else "https://angelmalev9-creator.github.io",
+        )
         self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -300,38 +380,52 @@ class Handler(BaseHTTPRequestHandler):
         return user
 
     def do_GET(self):
-        path = urlparse(self.path).path
-        if path == "/user/health":
-            self.json_response({"ok": True, "isolated_accounts": True})
+        parsed = urlparse(self.path)
+        if parsed.path == "/user/health":
+            self.json_response({
+                "ok": True,
+                "isolated_accounts": True,
+                "independent_engines": True,
+                "strategy_file_untouched": True,
+            })
             return
-        if path != "/user/state":
-            self.json_response({"error": "not_found"}, 404)
-            return
+
         user = self.authenticated()
         if not user:
             return
+
         try:
-            raw = fetch_upstream("/state")
-            self.json_response(scoped_state(user, raw))
+            if parsed.path == "/user/state":
+                self.json_response(proxy_user_engine(user, "GET", "/state"))
+                return
+            if parsed.path == "/user/token":
+                suffix = f"?{parsed.query}" if parsed.query else ""
+                self.json_response(proxy_user_engine(user, "GET", f"/token{suffix}"))
+                return
+            self.json_response({"error": "not_found"}, 404)
         except Exception as exc:
             self.json_response({"error": "gateway_error", "message": str(exc)}, 502)
 
     def do_POST(self):
-        path = urlparse(self.path).path
-        if path != "/user/reset":
-            self.json_response({"error": "not_found"}, 404)
-            return
+        parsed = urlparse(self.path)
         user = self.authenticated()
         if not user:
             return
         try:
-            raw = fetch_upstream("/state")
-            self.json_response(reset_account(user, raw))
+            if parsed.path == "/user/reset":
+                self.json_response(proxy_user_engine(user, "POST", "/control/reset"))
+                return
+            if parsed.path == "/user/rescan":
+                self.json_response(proxy_user_engine(user, "POST", "/control/rescan"))
+                return
+            self.json_response({"error": "not_found"}, 404)
         except Exception as exc:
             self.json_response({"error": "gateway_error", "message": str(exc)}, 502)
 
 
 def main():
+    USER_ENGINE_ROOT.mkdir(parents=True, exist_ok=True)
+    threading.Thread(target=revive_known_engines, name="neo-user-engine-revive", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"NEO user gateway listening on http://{HOST}:{PORT}", flush=True)
     server.serve_forever(poll_interval=0.5)
