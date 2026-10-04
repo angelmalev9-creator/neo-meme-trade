@@ -1,425 +1,417 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  Shield, Lock, User, Key, Check, AlertCircle, Sparkles, 
-  Wallet, LogIn, ArrowRight, Info, ShieldAlert, Cpu, CheckCircle
-} from 'lucide-react';
-import { motion } from 'motion/react';
-import { Connection, PublicKey } from '@solana/web3.js';
+import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react';
+import { AlertCircle, CheckCircle2, LockKeyhole, LogIn, LogOut, ShieldCheck, UserPlus } from 'lucide-react';
+import type { User } from '@supabase/supabase-js';
+import {
+  getAuthRedirectUrl,
+  isSupabaseConfigured,
+  type NeoActiveSession,
+  supabase,
+} from '../lib/supabase';
 
-interface UserProfile {
-  username: string;
-  walletAddress?: string;
-  createdAt: string;
-  plan: string;
+type Mode = 'login' | 'signup';
+
+function fallbackUsername(user: User) {
+  const metadataUsername = String(user.user_metadata?.username || '').trim();
+  if (metadataUsername) return metadataUsername;
+  const emailPrefix = (user.email || '').split('@')[0]?.trim();
+  return emailPrefix || 'NEO User';
 }
 
-interface SaaSAuthGateProps {
-  onAuthenticated: (user: UserProfile) => void;
+function authMessage(message: string) {
+  const value = message.toLowerCase();
+
+  if (value.includes('invalid login credentials')) {
+    return 'Невалиден имейл или парола.';
+  }
+
+  if (value.includes('user already registered')) {
+    return 'Вече има регистрация с този имейл.';
+  }
+
+  if (value.includes('password should be at least')) {
+    return 'Паролата трябва да е поне 6 символа.';
+  }
+
+  if (value.includes('email rate limit')) {
+    return 'Изпратени са твърде много имейли. Опитай отново след малко.';
+  }
+
+  return message;
 }
 
-export default function SaaSAuthGate({ onAuthenticated }: SaaSAuthGateProps) {
-  const [isLogin, setIsLogin] = useState(true);
-  
-  // Form fields
+export default function SaaSAuthGate({ children }: { children: ReactNode }) {
+  const [mode, setMode] = useState<Mode>('login');
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [activeSession, setActiveSession] = useState<NeoActiveSession | null>(null);
+  const [ready, setReady] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(false);
+
   const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  
-  // Alerts / States
+
+  const [busy, setBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [showPassphrase, setShowPassphrase] = useState(false);
-  const [generatedPassphrase, setGeneratedPassphrase] = useState('');
-
-  // Web3 Connection for Phantom Auth
-  const [phantomAddress, setPhantomAddress] = useState<string | null>(null);
 
   useEffect(() => {
-    // Clean alerts on toggle
-    setErrorMessage('');
-    setSuccessMessage('');
-  }, [isLogin]);
-
-  // Generate a mock security passphrase for Web3-level safety
-  const generateMockPassphrase = () => {
-    const words = [
-      'solana', 'sniper', 'fusion', 'shield', 'quantum', 'liquidity',
-      'alpha', 'phantom', 'matrix', 'orbital', 'cyber', 'velocity'
-    ];
-    // Shuffle
-    const shuffled = [...words].sort(() => 0.5 - Math.random());
-    setGeneratedPassphrase(shuffled.slice(0, 8).join(' '));
-  };
-
-  const handleClassicSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMessage('');
-    setSuccessMessage('');
-
-    if (!username.trim() || !password.trim()) {
-      setErrorMessage('❌ Моля, попълнете всички задължителни полета.');
+    if (!supabase) {
+      setReady(true);
       return;
     }
 
-    setIsLoading(true);
+    let mounted = true;
 
-    try {
-      // Simulate cryptographic response time
-      await new Promise(resolve => setTimeout(resolve, 1000));
+    void supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      setAuthUser(data.session?.user || null);
+      setReady(true);
+    });
 
-      const storedUsers = localStorage.getItem('saas_registered_users');
-      const usersList = storedUsers ? JSON.parse(storedUsers) : {};
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!mounted) return;
+      setAuthUser(session?.user || null);
+      setReady(true);
+    });
 
-      if (isLogin) {
-        // Log In
-        const matchedUser = usersList[username.toLowerCase().trim()];
-        if (!matchedUser || matchedUser.password !== password) {
-          setErrorMessage('❌ Невалидно потребителско име или парола.');
-          setIsLoading(false);
-          return;
-        }
+    return () => {
+      mounted = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
 
-        setSuccessMessage('🔓 Успешна оторизация! Стартиране на терминала...');
-        setTimeout(() => {
-          onAuthenticated({
-            username: matchedUser.username,
-            walletAddress: matchedUser.walletAddress,
-            createdAt: matchedUser.createdAt,
-            plan: 'EX-1000 PREMIER'
-          });
-        }, 800);
-
-      } else {
-        // Register
-        if (password !== confirmPassword) {
-          setErrorMessage('❌ Паролите не съвпадат.');
-          setIsLoading(false);
-          return;
-        }
-
-        if (password.length < 6) {
-          setErrorMessage('❌ Паролата трябва да бъде поне 6 символа за по-висока сигурност.');
-          setIsLoading(false);
-          return;
-        }
-
-        if (usersList[username.toLowerCase().trim()]) {
-          setErrorMessage('❌ Това потребителско име вече е заето.');
-          setIsLoading(false);
-          return;
-        }
-
-        // Generate passphrase first time
-        if (!showPassphrase) {
-          generateMockPassphrase();
-          setShowPassphrase(true);
-          setIsLoading(false);
-          return;
-        }
-
-        // Finalize registration
-        const newUser = {
-          username: username.trim(),
-          password: password,
-          walletAddress: phantomAddress || undefined,
-          createdAt: new Date().toISOString(),
-          passphrase: generatedPassphrase
-        };
-
-        usersList[username.toLowerCase().trim()] = newUser;
-        localStorage.setItem('saas_registered_users', JSON.stringify(usersList));
-
-        setSuccessMessage('✅ Успешна регистрация на акаунт!');
-        setTimeout(() => {
-          onAuthenticated({
-            username: newUser.username,
-            walletAddress: newUser.walletAddress,
-            createdAt: newUser.createdAt,
-            plan: 'EX-1000 PREMIER'
-          });
-        }, 1000);
-      }
-
-    } catch (err) {
-      setErrorMessage('❌ Възникна системна грешка при обработка.');
-    } finally {
-      setIsLoading(false);
+  useEffect(() => {
+    if (!authUser || !supabase) {
+      setActiveSession(null);
+      sessionStorage.removeItem('saas_active_session');
+      return;
     }
-  };
 
-  const handleWeb3PhantomAuth = async () => {
+    let cancelled = false;
+    setProfileLoading(true);
+
+    const loadProfile = async () => {
+      const { data } = await supabase
+        .from('profiles')
+        .select('id, username, plan, created_at')
+        .eq('id', authUser.id)
+        .maybeSingle();
+
+      if (cancelled) return;
+
+      const nextSession: NeoActiveSession = {
+        userId: authUser.id,
+        email: authUser.email || '',
+        username: data?.username || fallbackUsername(authUser),
+        plan: data?.plan || 'demo',
+        createdAt: data?.created_at || authUser.created_at,
+      };
+
+      sessionStorage.setItem('saas_active_session', JSON.stringify(nextSession));
+      setActiveSession(nextSession);
+      setProfileLoading(false);
+    };
+
+    void loadProfile();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser]);
+
+  useEffect(() => {
     setErrorMessage('');
     setSuccessMessage('');
-    setIsLoading(true);
+  }, [mode]);
 
-    try {
-      const provider = (window as any).solana;
-      if (!provider) {
-        // Handle missing provider gracefully without throwing/logging to console.error
-        setSuccessMessage("✔ Свързване в демо симулационен режим (Phantom не е засечен в iframe)...");
-        setTimeout(() => {
-          onAuthenticated({
-            username: "Phantom_Demo_User",
-            walletAddress: "DEvWaf78yy9gy6yP7V88g7v98yU67yYHgHg11",
-            createdAt: new Date().toISOString(),
-            plan: 'EX-1000 PREMIER (SIMULATED)'
-          });
-        }, 1200);
+  const canSubmit = useMemo(() => {
+    if (!email.trim() || !password) return false;
+    if (mode === 'signup' && (!username.trim() || !confirmPassword)) return false;
+    return true;
+  }, [mode, username, email, password, confirmPassword]);
+
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    setErrorMessage('');
+    setSuccessMessage('');
+
+    if (!supabase || !isSupabaseConfigured) {
+      setErrorMessage('Supabase publishable key не е конфигуриран.');
+      return;
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    if (!cleanEmail || !password) {
+      setErrorMessage('Попълни имейл и парола.');
+      return;
+    }
+
+    if (mode === 'signup') {
+      const cleanUsername = username.trim();
+
+      if (cleanUsername.length < 2) {
+        setErrorMessage('Името трябва да е поне 2 символа.');
         return;
       }
 
-      const response = await provider.connect();
-      const pubkey = response.publicKey.toString();
-      setPhantomAddress(pubkey);
-
-      // Verify sign message for real Web3 cryptographical authorization
-      const connection = new Connection("https://api.mainnet-beta.solana.com", "confirmed");
-      
-      // Request signature from Phantom
-      const message = `Оторизация в SOLANA AI SNIPER EX-1000\nВремеви печат: ${new Date().toLocaleDateString()}\nАдрес: ${pubkey}`;
-      const encodedMessage = new TextEncoder().encode(message);
-      const signedMessage = await provider.signMessage(encodedMessage, "utf8");
-
-      setSuccessMessage(`✔ Web3 подписът е валидиран в мрежата! Добре дошли.`);
-      
-      // Auto-register or login this wallet address
-      const storedUsers = localStorage.getItem('saas_registered_users') || "{}";
-      const usersList = JSON.parse(storedUsers);
-      
-      const usernameFromWallet = `Phantom_${pubkey.slice(0, 4)}...${pubkey.slice(-4)}`;
-      const userKey = pubkey.toLowerCase();
-
-      if (!usersList[userKey]) {
-        usersList[userKey] = {
-          username: usernameFromWallet,
-          walletAddress: pubkey,
-          createdAt: new Date().toISOString()
-        };
-        localStorage.setItem('saas_registered_users', JSON.stringify(usersList));
+      if (password.length < 6) {
+        setErrorMessage('Паролата трябва да е поне 6 символа.');
+        return;
       }
 
-      setTimeout(() => {
-        onAuthenticated({
-          username: usersList[userKey].username,
-          walletAddress: pubkey,
-          createdAt: usersList[userKey].createdAt,
-          plan: 'EX-1000 PREMIER (WEB3)'
-        });
-      }, 1000);
+      if (password !== confirmPassword) {
+        setErrorMessage('Паролите не съвпадат.');
+        return;
+      }
 
-    } catch (err: any) {
-      console.warn("Phantom connection details:", err);
-      // Fallback if provider fails in Sandbox iframe, simulating high-end web3 signin
-      setSuccessMessage("✔ Влизане чрез симулиран криптографски Phantom подпис...");
-      setTimeout(() => {
-        onAuthenticated({
-          username: "Phantom_Demo_User",
-          walletAddress: "DEvWaf78yy9gy6yP7V88g7v98yU67yYHgHg11",
-          createdAt: new Date().toISOString(),
-          plan: 'EX-1000 PREMIER (SIMULATED)'
-        });
-      }, 1200);
-    } finally {
-      setIsLoading(false);
+      setBusy(true);
+
+      const { data, error } = await supabase.auth.signUp({
+        email: cleanEmail,
+        password,
+        options: {
+          emailRedirectTo: getAuthRedirectUrl(),
+          data: {
+            username: cleanUsername,
+          },
+        },
+      });
+
+      setBusy(false);
+
+      if (error) {
+        setErrorMessage(authMessage(error.message));
+        return;
+      }
+
+      if (data.session) {
+        setSuccessMessage('Регистрацията е готова. Влизаме в NEO...');
+      } else {
+        setSuccessMessage('Регистрацията е създадена. Провери имейла си и потвърди акаунта.');
+      }
+
+      return;
     }
+
+    setBusy(true);
+    const { error } = await supabase.auth.signInWithPassword({
+      email: cleanEmail,
+      password,
+    });
+    setBusy(false);
+
+    if (error) {
+      setErrorMessage(authMessage(error.message));
+      return;
+    }
+
+    setSuccessMessage('Успешен вход. Зареждам NEO...');
   };
 
+  const handleLogout = async () => {
+    if (!supabase) return;
+    setBusy(true);
+    await supabase.auth.signOut();
+    sessionStorage.removeItem('saas_active_session');
+    setActiveSession(null);
+    setBusy(false);
+  };
+
+  if (!ready || (authUser && profileLoading)) {
+    return (
+      <div className="min-h-screen bg-[#08090c] text-white flex items-center justify-center">
+        <div className="flex items-center gap-3 text-sm text-white/60">
+          <span className="h-5 w-5 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin" />
+          Зареждане на NEO...
+        </div>
+      </div>
+    );
+  }
+
+  if (authUser && activeSession) {
+    return (
+      <>
+        <div className="fixed right-4 top-4 z-[100] flex items-center gap-2 rounded-xl border border-white/10 bg-[#0b0c10]/90 px-3 py-2 shadow-2xl backdrop-blur-xl">
+          <div className="min-w-0 text-right">
+            <div className="max-w-[180px] truncate text-[11px] font-bold text-white">
+              {activeSession.username}
+            </div>
+            <div className="text-[9px] uppercase tracking-[0.14em] text-emerald-300">
+              {activeSession.plan}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleLogout}
+            disabled={busy}
+            title="Изход"
+            className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-white/60 transition hover:border-red-400/30 hover:bg-red-400/10 hover:text-red-300 disabled:opacity-50"
+          >
+            <LogOut className="h-4 w-4" />
+          </button>
+        </div>
+        {children}
+      </>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-[#07080d] bg-gradient-to-br from-[#07080d] via-[#0b0c15] to-[#121422] text-white flex items-center justify-center p-4 relative font-sans overflow-hidden select-none">
-      
-      {/* Decorative glowing backdrops */}
-      <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-[120px] pointer-events-none" />
-      <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-[#00FFA3]/5 rounded-full blur-[120px] pointer-events-none" />
+    <div className="min-h-screen bg-[#08090c] text-white flex items-center justify-center px-4 py-10">
+      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(16,185,129,0.10),transparent_38%)]" />
 
-      {/* Retro sci-fi grids */}
-      <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.01)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.01)_1px,transparent_1px)] bg-[size:32px_32px] pointer-events-none" />
-
-      <motion.div 
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.6, ease: 'easeOut' }}
-        className="w-full max-w-md bg-[#0C0D15]/90 backdrop-blur-2xl border border-white/10 rounded-2xl p-6 lg:p-8 shadow-2xl relative z-10"
-      >
-        {/* Glow Header */}
-        <div className="flex flex-col items-center text-center space-y-3 mb-6">
-          <div className="w-12 h-12 bg-gradient-to-tr from-[#00FFA3] to-purple-500 rounded-2xl flex items-center justify-center shadow-[0_0_20px_rgba(0,255,163,0.3)] relative">
-            <Shield className="h-6 w-6 text-black" />
-            <div className="absolute -inset-0.5 bg-gradient-to-tr from-[#00FFA3] to-purple-500 rounded-2xl blur opacity-30 group-hover:opacity-100 transition duration-1000 group-hover:duration-200 animate-tilt"></div>
+      <div className="relative w-full max-w-md rounded-[28px] border border-white/[0.08] bg-[#0d0f13]/95 p-6 shadow-2xl backdrop-blur-xl sm:p-8">
+        <div className="mb-7 flex items-start gap-4">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-emerald-400/20 bg-emerald-400/10">
+            <ShieldCheck className="h-6 w-6 text-emerald-300" />
           </div>
           <div>
-            <span className="text-[9px] font-black tracking-[0.25em] text-[#00FFA3] uppercase font-mono bg-[#00FFA3]/10 px-2.5 py-0.5 rounded-full border border-[#00FFA3]/10">
-              EX-1000 PREMIER EDITION
-            </span>
-            <h2 className="text-lg font-black tracking-tight text-white mt-2 font-mono">
-              SOLANA AI SNIPER TERMINAL
-            </h2>
-            <p className="text-xs text-white/40 mt-1 leading-relaxed">
-              Влезте в защитения SaaS панел за управление на вашите лични средства и риск алгоритми.
+            <div className="text-[10px] font-black uppercase tracking-[0.22em] text-emerald-300">
+              NEO MEME COINS
+            </div>
+            <h1 className="mt-1 text-xl font-black tracking-tight text-white">
+              {mode === 'login' ? 'Вход в NEO' : 'Създай тестов акаунт'}
+            </h1>
+            <p className="mt-1 text-xs leading-5 text-white/45">
+              Реален Supabase акаунт. Паролата не се пази в браузъра.
             </p>
           </div>
         </div>
 
-        {/* Auth Mode Toggle Tabs */}
-        <div className="grid grid-cols-2 bg-black/40 p-1 rounded-xl border border-white/5 mb-6">
+        {!isSupabaseConfigured && (
+          <div className="mb-5 flex gap-2 rounded-xl border border-amber-400/20 bg-amber-400/10 p-3 text-xs text-amber-200">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              Липсва VITE_SUPABASE_PUBLISHABLE_KEY. Добави publishable key от Supabase Project Settings → API.
+            </span>
+          </div>
+        )}
+
+        <div className="mb-6 grid grid-cols-2 rounded-xl border border-white/[0.07] bg-black/30 p-1">
           <button
-            onClick={() => setIsLogin(true)}
-            className={`py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-              isLogin 
-                ? 'bg-white/5 text-[#00FFA3] border-b border-[#00FFA3]/30' 
-                : 'text-white/40 hover:text-white'
-            }`}
+            type="button"
+            onClick={() => setMode('login')}
+            className={
+              'rounded-lg px-3 py-2.5 text-xs font-bold transition ' +
+              (mode === 'login'
+                ? 'bg-white/[0.07] text-white'
+                : 'text-white/40 hover:text-white/70')
+            }
           >
-            Оторизация
+            Вход
           </button>
           <button
-            onClick={() => setIsLogin(false)}
-            className={`py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-              !isLogin 
-                ? 'bg-white/5 text-[#00FFA3] border-b border-[#00FFA3]/30' 
-                : 'text-white/40 hover:text-white'
-            }`}
+            type="button"
+            onClick={() => setMode('signup')}
+            className={
+              'rounded-lg px-3 py-2.5 text-xs font-bold transition ' +
+              (mode === 'signup'
+                ? 'bg-white/[0.07] text-white'
+                : 'text-white/40 hover:text-white/70')
+            }
           >
             Регистрация
           </button>
         </div>
 
-        {/* Alerts Block */}
         {errorMessage && (
-          <div className="bg-red-950/20 border border-red-500/20 p-3 rounded-xl mb-4 text-xs font-mono text-red-400 flex items-start gap-2 animate-shake">
-            <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+          <div className="mb-4 flex gap-2 rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-xs text-red-200">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>{errorMessage}</span>
           </div>
         )}
+
         {successMessage && (
-          <div className="bg-emerald-950/20 border border-emerald-500/20 p-3 rounded-xl mb-4 text-xs font-mono text-emerald-400 flex items-start gap-2">
-            <CheckCircle className="h-4 w-4 shrink-0 mt-0.5" />
+          <div className="mb-4 flex gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/10 p-3 text-xs text-emerald-200">
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
             <span>{successMessage}</span>
           </div>
         )}
 
-        {/* Regular Sign In / Up Form */}
-        <form onSubmit={handleClassicSubmit} className="space-y-4">
-          
-          <div className="space-y-1">
-            <label className="text-[10px] font-mono uppercase text-white/40 font-bold tracking-wider">Потребителско Име</label>
-            <div className="relative">
-              <span className="absolute left-3 top-3.5 text-white/30">
-                <User className="h-4 w-4" />
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {mode === 'signup' && (
+            <label className="block">
+              <span className="mb-1.5 block text-[10px] font-black uppercase tracking-[0.14em] text-white/40">
+                Име
               </span>
               <input
-                type="text"
                 value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="Въведете име..."
-                className="w-full bg-black/40 border border-white/10 rounded-xl pl-9 pr-4 py-3 text-xs text-white placeholder-white/20 focus:outline-none focus:border-purple-500/50 focus:bg-black/60 transition-all font-mono"
+                onChange={(event) => setUsername(event.target.value)}
+                autoComplete="nickname"
+                placeholder="Напр. Angel"
+                className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white outline-none transition placeholder:text-white/20 focus:border-emerald-400/40"
               />
-            </div>
-          </div>
+            </label>
+          )}
 
-          <div className="space-y-1">
-            <label className="text-[10px] font-mono uppercase text-white/40 font-bold tracking-wider">Парола за сигурност</label>
-            <div className="relative">
-              <span className="absolute left-3 top-3.5 text-white/30">
-                <Lock className="h-4 w-4" />
+          <label className="block">
+            <span className="mb-1.5 block text-[10px] font-black uppercase tracking-[0.14em] text-white/40">
+              Имейл
+            </span>
+            <input
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              autoComplete="email"
+              placeholder="you@example.com"
+              className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white outline-none transition placeholder:text-white/20 focus:border-emerald-400/40"
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1.5 block text-[10px] font-black uppercase tracking-[0.14em] text-white/40">
+              Парола
+            </span>
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              placeholder="Минимум 6 символа"
+              className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white outline-none transition placeholder:text-white/20 focus:border-emerald-400/40"
+            />
+          </label>
+
+          {mode === 'signup' && (
+            <label className="block">
+              <span className="mb-1.5 block text-[10px] font-black uppercase tracking-[0.14em] text-white/40">
+                Повтори паролата
               </span>
               <input
                 type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full bg-black/40 border border-white/10 rounded-xl pl-9 pr-4 py-3 text-xs text-white placeholder-white/20 focus:outline-none focus:border-purple-500/50 focus:bg-black/60 transition-all font-mono"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                autoComplete="new-password"
+                placeholder="Повтори паролата"
+                className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white outline-none transition placeholder:text-white/20 focus:border-emerald-400/40"
               />
-            </div>
-          </div>
-
-          {/* Confirm Password (Register Only) */}
-          {!isLogin && (
-            <div className="space-y-1 animate-fadeIn">
-              <label className="text-[10px] font-mono uppercase text-white/40 font-bold tracking-wider">Потвърдете парола</label>
-              <div className="relative">
-                <span className="absolute left-3 top-3.5 text-white/30">
-                  <Lock className="h-4 w-4" />
-                </span>
-                <input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full bg-black/40 border border-white/10 rounded-xl pl-9 pr-4 py-3 text-xs text-white placeholder-white/20 focus:outline-none focus:border-purple-500/50 focus:bg-black/60 transition-all font-mono"
-                />
-              </div>
-            </div>
+            </label>
           )}
 
-          {/* Mnemonic Generation visual for Register */}
-          {!isLogin && showPassphrase && (
-            <div className="bg-purple-950/20 border border-purple-500/20 p-4 rounded-xl space-y-3 font-mono text-[11px] animate-fadeIn">
-              <div className="flex items-center gap-1.5 text-purple-300 font-bold uppercase tracking-wider text-[10px]">
-                <Key className="h-4 w-4" />
-                Крипто Фраза за Възстановяване
-              </div>
-              <p className="text-white/40 leading-relaxed text-[10px]">
-                Моля, копирайте и запишете тази фраза от 8 думи на сигурно място. Тя служи за възстановяване на акаунта ви, ако забравите паролата:
-              </p>
-              <div className="bg-black/60 p-3 rounded-lg text-[#00FFA3] select-all font-bold text-center tracking-wide leading-relaxed">
-                {generatedPassphrase}
-              </div>
-              <div className="flex items-start gap-2 text-white/30 text-[9px] leading-relaxed">
-                <Info className="h-3 w-3 shrink-0 mt-0.5 text-purple-400" />
-                <span>Натискайки "Регистрация" отново, вие потвърждавате, че сте запазили фразата.</span>
-              </div>
-            </div>
-          )}
-
-          {/* Classic Submit Button */}
           <button
             type="submit"
-            disabled={isLoading}
-            className="w-full py-3 bg-white/5 border border-white/10 text-[#00FFA3] font-bold text-xs rounded-xl uppercase tracking-wider hover:bg-white/10 hover:border-[#00FFA3]/30 transition-all cursor-pointer flex items-center justify-center gap-2"
+            disabled={busy || !canSubmit || !isSupabaseConfigured}
+            className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-400 px-4 py-3.5 text-sm font-black text-[#06110d] transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {isLoading ? (
-              <span className="h-4 w-4 border-2 border-t-transparent border-[#00FFA3] rounded-full animate-spin"></span>
-            ) : isLogin ? (
-              <>
-                Оторизирай Вход
-                <LogIn className="h-4 w-4" />
-              </>
+            {busy ? (
+              <span className="h-4 w-4 rounded-full border-2 border-[#06110d] border-t-transparent animate-spin" />
+            ) : mode === 'login' ? (
+              <LogIn className="h-4 w-4" />
             ) : (
-              <>
-                Регистрирай Акаунт
-                <ArrowRight className="h-4 w-4" />
-              </>
+              <UserPlus className="h-4 w-4" />
             )}
+            {mode === 'login' ? 'Влез в NEO' : 'Създай акаунт'}
           </button>
         </form>
 
-        {/* Divider with "OR" */}
-        <div className="flex items-center justify-between my-6">
-          <div className="h-px bg-white/5 flex-1" />
-          <span className="text-[10px] font-mono uppercase text-white/20 px-3">Или чрез Web3</span>
-          <div className="h-px bg-white/5 flex-1" />
+        <div className="mt-6 flex items-start gap-2 border-t border-white/[0.06] pt-5 text-[10px] leading-4 text-white/30">
+          <LockKeyhole className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-300/70" />
+          <span>
+            Това е тестова среда. Регистрацията дава достъп до paper-trading версията и не активира реална търговия с пари.
+          </span>
         </div>
-
-        {/* Web3 Solana Phantom Login Button */}
-        <button
-          onClick={handleWeb3PhantomAuth}
-          disabled={isLoading}
-          className="w-full py-3.5 bg-gradient-to-r from-purple-900/40 to-purple-950/40 hover:from-purple-800/40 hover:to-purple-900/40 border border-purple-500/20 text-purple-200 font-black text-xs rounded-xl uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-2.5 shadow-[0_4px_20px_rgba(168,85,247,0.1)] hover:scale-[1.01]"
-        >
-          <Wallet className="h-4 w-4 text-purple-400" />
-          Влез с Phantom Портфейл
-        </button>
-
-        {/* Security Warning notice */}
-        <div className="mt-6 pt-5 border-t border-white/5 flex items-start gap-2.5 text-[9px] text-white/30 font-mono leading-relaxed">
-          <ShieldAlert className="h-4 w-4 text-purple-400 shrink-0 mt-0.5" />
-          <p>
-            Този криптографски терминал извършва локални транзакции на вашия браузър. Паролата ви служи и за генериране на локално солено криптиране на частния ключ за Hot Wallet. Пазете данните си сигурно.
-          </p>
-        </div>
-
-      </motion.div>
+      </div>
     </div>
   );
 }
