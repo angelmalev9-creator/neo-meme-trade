@@ -330,7 +330,7 @@ export default function App() {
 
       <section className="mt-4 overflow-hidden rounded-3xl border border-cyan-400/15 bg-[#0b0e11]">
         <div className="flex flex-col gap-3 border-b border-white/[0.07] p-4 sm:flex-row sm:items-center sm:justify-between">
-          <div><div className="text-[9px] font-black uppercase tracking-[0.18em] text-cyan-300">MULTI-STRATEGY LAB</div><h2 className="mt-1 text-lg font-black text-white">13 стратегии · $500 demo капитал за всяка</h2><div className="mt-1 text-[9px] text-slate-600">LAB: $150 на сделка · re-entry 20m · max hold 7m. Нов тест: Flow Momentum Scale-Out прибира 20% при +5%, +10%, +18% и +30%, после оставя runner.</div></div>
+          <div><div className="text-[9px] font-black uppercase tracking-[0.18em] text-cyan-300">MULTI-STRATEGY LAB</div><h2 className="mt-1 text-lg font-black text-white">13 стратегии · Fast Scalper $100 · останалите $500</h2><div className="mt-1 text-[9px] text-slate-600">LAB: до $150 на сделка · re-entry 20m · max hold 7m. Нов тест: Flow Momentum Scale-Out прибира 20% при +5%, +10%, +18% и +30%, после оставя runner.</div></div>
           <div className={`rounded-lg border px-2.5 py-1.5 text-[9px] font-black ${state?.strategy_lab?.status === 'online' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>{(state?.strategy_lab?.status || 'CONNECTING').toUpperCase()}</div>
         </div>
         <div className="overflow-x-auto">
@@ -339,7 +339,7 @@ export default function App() {
             <tbody>
               {Object.values(state?.strategy_lab?.books || {}).sort((a,b) => (state?.strategy_lab?.stats?.[b.id]?.equity ?? b.balance) - (state?.strategy_lab?.stats?.[a.id]?.equity ?? a.balance)).map(book => {
                 const st = state?.strategy_lab?.stats?.[book.id];
-                const pnl = st?.realized_pnl ?? (book.balance - 500);
+                const pnl = st?.realized_pnl ?? (book.balance - book.starting_balance);
                 return <tr key={book.id} className="border-b border-white/[0.04] text-xs hover:bg-white/[0.02]">
                   <td className="px-4 py-3"><div className="font-black text-white">{book.name}</div><div className="mt-1 text-[8px] font-mono text-slate-700">{book.id}</div></td>
                   <td className="px-4 py-3 font-black text-white">${book.balance.toFixed(2)}</td>
