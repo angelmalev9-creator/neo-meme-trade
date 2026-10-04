@@ -8,12 +8,34 @@ import math
 import re
 from typing import Any
 
-POLICY_VERSION = 'ORDER_FLOW_BALANCED_V4'
+POLICY_VERSION = 'ORDER_FLOW_FAST_3_10_V5'
 MAX_FEED_AGE_MS = 30_000
 MAX_ENTRY_QUOTE_AGE_MS = 10_000
 MAX_QUOTED_CANDIDATES = 2
 _ADDRESS = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 LABELS = {
+    'entry_error': 'проверката на входа не е завършена',
+    'token_blocklisted': 'токен в забранителния списък',
+    'blocklist_unavailable': 'забранителният списък не може да се провери',
+    'unsupported_token_program': 'неподдържана token програма',
+    'invalid_mint': 'невалиден mint',
+    'mint_decimals': 'непотвърдени token единици',
+    'token_extensions_unknown': 'непотвърдени token разширения',
+    'rug_report_invalid_or_rugged': 'невалиден отчет или отбелязан rug',
+    'rug_report_incomplete': 'непълен отчет за риска',
+    'pool_not_verified': 'непотвърден точен pool',
+    'holders_unverified': 'непотвърдени притежатели',
+    'risk_schema_unverified': 'неразпозната структура на данните за риск',
+    'risk_check_pending': 'проверка за rug риск',
+    'risk_data_unavailable': 'липсват проверими данни за rug риск',
+    'mint_authority': 'активно право за нови токени',
+    'freeze_authority': 'активно право за замразяване',
+    'unsupported_token_extension': 'неподдържано token разширение',
+    'rugcheck_critical': 'критичен риск в RugCheck',
+    'holder_concentration': 'концентрация на притежателите',
+    'lp_control_risk': 'недостатъчно потвърдено заключване на ликвидността',
+    'reported_linked_insiders': 'докладвани свързани вътрешни портфейли',
+    'network_price_unknown': 'липсва оценка на мрежовия разход',
     'invalid_pair': 'невалиден token или pool',
     'invalid_price': 'липсва цена',
     'stale_feed': 'остарели пазарни данни',
@@ -69,17 +91,17 @@ def signal_rejections(coin, flow, context, *, min_score, min_liquidity,
         'stale_feed': observed > 0 and 0 <= now - observed <= MAX_FEED_AGE_MS,
         'score': number(coin.get('score')) >= min_score,
         'liquidity': liq >= min_liquidity,
-        'momentum': -3.0 <= number(changes.get('m5'), -999) <= 25.0,
-        'hour_trend': -30.0 <= number(changes.get('h1'), -999) <= 150.0,
+        'momentum': -3.0 <= number(changes.get('m5'), -999) <= 40.0,
+        'hour_trend': -40.0 <= number(changes.get('h1'), -999) <= 250.0,
         'market_buyers': market_ratio >= 1.0,
-        'liquidity_ratio': mc > 0 and liq / mc >= 0.03,
-        'flow_count': number(flow.get('trades')) >= 4,
-        'flow_ratio': number(flow.get('buy_sell_usd_ratio')) >= 1.30,
-        'buy_volume': number(flow.get('buy_usd')) >= 150.0,
-        'wallet_count': number(flow.get('unique_wallets')) >= 4,
-        'buyer_count': number(flow.get('buyer_wallets')) >= 3,
+        'liquidity_ratio': mc > 0 and liq / mc >= 0.02,
+        'flow_count': number(flow.get('trades')) >= 3,
+        'flow_ratio': number(flow.get('buy_sell_usd_ratio')) >= 1.20,
+        'buy_volume': number(flow.get('buy_usd')) >= 75.0,
+        'wallet_count': number(flow.get('unique_wallets')) >= 3,
+        'buyer_count': number(flow.get('buyer_wallets')) >= 2,
         'wallet_ratio': number(flow.get('wallet_buy_sell_ratio')) >= 1.0,
-        'large_sells': number(flow.get('max_sell_usd')) < max(250.0, number(flow.get('buy_usd')) * 0.5),
+        'large_sells': number(flow.get('max_sell_usd')) < max(250.0, number(flow.get('buy_usd')) * 0.8),
         'conviction': number(context.get('conviction')) >= min_conviction,
     }
     return [key for key, passed in checks.items() if not passed]

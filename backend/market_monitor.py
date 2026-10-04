@@ -5,12 +5,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 import requests
-import paper_execution_quotes as paper_quotes
+import engine_execution as paper_quotes
+import engine_rug_guard as rug_guard
 import engine_entry_policy as entry_policy
 
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
-SCAN_SECONDS = int(os.getenv('NEO_SCAN_SECONDS', '15'))
+SCAN_SECONDS = max(5, int(os.getenv('NEO_SCAN_SECONDS', '5')))
 POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
 STATE_PATH = Path(os.getenv('NEO_MARKET_STATE_PATH', '/var/lib/neo-market/state.json'))
 AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.jsonl'))
@@ -21,11 +22,11 @@ DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
 ENTRY_SCORE = 80.0
 MAX_POSITIONS = 1
-STOP_LOSS_PCT = 5.0
-STOP_EXECUTION_BUFFER_PCT = 0.5
-TAKE_PROFIT_PCT = 18.0
+STOP_LOSS_PCT = 3.0
+STOP_EXECUTION_BUFFER_PCT = 0.3
+TAKE_PROFIT_PCT = 10.0
 TRAILING_PCT = 4.0
-MAX_HOLD_MINUTES = 7
+MAX_HOLD_MINUTES = 60
 WEAK_CHECK_MINUTES = 5
 STALE_EXIT_MINUTES = 7
 STALE_MIN_PROFIT_PCT = 3.0
@@ -38,12 +39,12 @@ MIN_LIQUIDITY_USD = 10000.0
 
 # BALANCED_V4: observable, bounded paper-entry checks. The prior AND-gate
 # rejected every observed candidate. Stops, position size and daily cap stay fixed.
-STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '85'))
-STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '72'))
-STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '30000'))
+STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '78'))
+STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '50'))
+STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '20000'))
 STRICT_MAX_ENTRY_IMPACT_PCT = float(os.getenv('NEO_STRICT_MAX_ENTRY_IMPACT_PCT', '2.0'))
-STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '2.75'))
-STRICT_MAX_WORST_CASE_COST_PCT = float(os.getenv('NEO_STRICT_MAX_WORST_CASE_COST_PCT', '4.50'))
+STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '2.20'))
+STRICT_MAX_WORST_CASE_COST_PCT = float(os.getenv('NEO_STRICT_MAX_WORST_CASE_COST_PCT', '2.90'))
 
 # Paper execution model. Signal/exit rules stay unchanged; only simulated fills and PnL
 # include real-world friction. PumpSwap canonical fee tiers mirror pump.fun fees
@@ -83,6 +84,8 @@ def is_valid_solana_address(value: Any) -> bool:
 def sol_usd_from_coin(coin: dict[str, Any]) -> float:
     price_usd = num(coin.get('priceUsd'))
     price_native = num(coin.get('priceNative'))
+    if coin.get('quoteTokenAddress') not in (None, 'So11111111111111111111111111111111111111112'):
+        return 0.0
     if price_usd > 0 and price_native > 0:
         return price_usd / price_native
     return 0.0
@@ -387,6 +390,11 @@ class State:
                     'max_positions': MAX_POSITIONS,
                     'stop_loss_pct': STOP_LOSS_PCT,
                     'stop_loss_basis': 'EXECUTABLE_NET_PNL',
+                    'stop_trigger_net_pct': -(STOP_LOSS_PCT-STOP_EXECUTION_BUFFER_PCT),
+                    'take_profit_basis': 'EXECUTABLE_NET_PNL',
+                    'reentry_seconds': 30, 'loss_reentry_seconds': 120,
+                    'rug_guard': rug_guard.VERSION,
+                    'paper_only': True,
                     'stop_execution_buffer_pct': STOP_EXECUTION_BUFFER_PCT,
                     'take_profit_pct': TAKE_PROFIT_PCT,
                     'trailing_pct': TRAILING_PCT,
@@ -396,7 +404,7 @@ class State:
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
                     'starting_balance_usd': STARTING_BALANCE_USD,
                     'execution_mode': 'JUPITER_QUOTE_V2',
-                    'execution_note': 'Тестова търговия по Jupiter котировки; филтри BALANCED_V4; без гаранция за реално изпълнение.',
+                    'execution_note': 'ACTIVE_V5 paper: fixed net 3/10, rug checks, explicit quote buffers, no fill guarantee',
                     'entry_policy_version': entry_policy.POLICY_VERSION,
                     'max_quoted_candidates_per_scan': entry_policy.MAX_QUOTED_CANDIDATES,
                     'strict_entry_score': STRICT_ENTRY_SCORE,
@@ -564,15 +572,15 @@ def best_pairs(pairs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def exact_position_pair(position: dict[str, Any], pairs: list[dict[str, Any]]) -> dict[str, Any] | None:
-    address = str(position.get('address') or '').lower()
-    pair_address = str(position.get('pairAddress') or '').lower()
+    address = str(position.get('address') or '')
+    pair_address = str(position.get('pairAddress') or '')
     if not address or not pair_address:
         return None
     for pair in pairs:
         if pair.get('chainId') != 'solana':
             continue
-        base_address = str((pair.get('baseToken') or {}).get('address') or '').lower()
-        current_pair = str(pair.get('pairAddress') or '').lower()
+        base_address = str((pair.get('baseToken') or {}).get('address') or '')
+        current_pair = str(pair.get('pairAddress') or '')
         if base_address == address and current_pair == pair_address:
             return pair
     return None
@@ -682,6 +690,7 @@ def make_coin(address: str, pair: dict[str, Any], meta: dict[str, Any]) -> dict[
         'description': meta.get('description') or '',
         'priceUsd': num(pair.get('priceUsd')),
         'priceNative': num(pair.get('priceNative')),
+        'quoteTokenAddress': (pair.get('quoteToken') or {}).get('address'),
         'marketCap': num(pair.get('marketCap')),
         'fdv': num(pair.get('fdv')),
         'liquidityUsd': num((pair.get('liquidity') or {}).get('usd')),
@@ -707,6 +716,7 @@ class Monitor:
         self.scan_lock = threading.Lock()
         self.position_lock = threading.Lock()
         self.position_poll_lock = threading.Lock()
+        self.entry_lock = threading.Lock()
 
     def update_price_history(self, feed: list[dict[str, Any]]) -> None:
         stamp = now_ms()
@@ -844,196 +854,129 @@ class Monitor:
         }
 
     def update_positions(self, by_address: dict[str, dict[str, Any]]) -> None:
-        next_positions = []
-        for position in STATE.positions:
-            coin = by_address.get(position.get('address'))
-            if not coin:
-                next_positions.append(position)
+        # Called under position_lock, never while holding STATE.lock across HTTP.
+        with STATE.lock:
+            positions = [dict(p) for p in STATE.positions]
+            session = STATE.demo_session_id
+        for position in positions:
+            address=position.get('address')
+            coin=by_address.get(address) or position.get('coin_snapshot') or {}
+            if coin.get('pairAddress') != position.get('pairAddress'):
+                coin=position.get('coin_snapshot') or {}
+            if not coin: continue
+            reason=position.get('pending_exit_reason')
+            fresh_market=0<=now_ms()-num(coin.get('updatedAt'))<=entry_policy.MAX_FEED_AGE_MS
+            if fresh_market and num(coin.get('liquidityUsd'))<num(position.get('entry_liquidity_usd'))*.80:
+                reason=reason or 'LIQUIDITY_EMERGENCY'
+            if now_ms()-num(coin.get('updatedAt'))>60_000:
+                reason=reason or 'STALE_MARKET_EXIT'
+            is_quote=position.get('execution_mode')=='JUPITER_QUOTE_V2'
+            network=max(.03,NETWORK_FEE_SOL*sol_usd_from_coin(coin))
+            quote=(paper_quotes.position_mark(position,coin,network,force=bool(reason)) if is_quote
+                   else exit_execution(coin,num(position.get('quantity'))))
+            if quote is None:
+                with STATE.lock:
+                    live=next((p for p in STATE.positions if p.get('id')==position.get('id')),None)
+                    if live is not None and STATE.demo_session_id==session:
+                        if live.get('quote_status')!='unavailable':
+                            STATE.event('Липсва проверима котировка за продажба; позицията остава отворена и оценката е остаряла.')
+                        live.update(quote_status='unavailable',quote_error_at=now_ms())
+                        if reason: live['pending_exit_reason']=reason
                 continue
-            expected_pair = str(position.get('pairAddress') or '').lower()
-            observed_pair = str(coin.get('pairAddress') or '').lower()
-            if expected_pair and observed_pair != expected_pair:
-                STATE.event(
-                    f"PRICE SOURCE BLOCKED #{position.get('trade_no')} {position.get('symbol')} "
-                    f"expected pair {position.get('pairAddress')} but received {coin.get('pairAddress') or 'none'}"
-                )
-                next_positions.append(position)
-                continue
-            price, entry = num(coin.get('priceUsd')), num(position.get('entry_price'))
-            if price <= 0 or entry <= 0:
-                next_positions.append(position)
-                continue
-            peak = max(num(position.get('peak_price'), entry), price)
-            signal_pnl_pct = round(((price - entry) / entry) * 100, 6)
-            quantity = num(position.get('quantity')) or (num(position.get('notional_usd'), TRADE_NOTIONAL_USD) / entry)
-            is_live_quote_trade = position.get('execution_mode') == 'JUPITER_QUOTE_V2'
-            if is_live_quote_trade:
-                exit_quote = paper_quotes.position_mark(
-                    position, coin, NETWORK_FEE_SOL * sol_usd_from_coin(coin)
-                )
-                if exit_quote is None:
-                    next_positions.append(position)
+            notional=num(position.get('notional_usd'))
+            entry_cost=num(position.get('entry_network_fee_usd'))+num(position.get('entry_account_reserve_usd'))
+            pnl=quote['net_proceeds_usd']-notional-entry_cost
+            pct=pnl/max(notional,1e-18)*100
+            hold=(now_ms()-int(position.get('opened_at',now_ms())))/60000
+            # Begin before -3% to allow some execution headroom. Never clamp PnL.
+            if pct<=-(STOP_LOSS_PCT-STOP_EXECUTION_BUFFER_PCT): reason=reason or 'STOP_LOSS_3_NET'
+            elif pct>=TAKE_PROFIT_PCT: reason=reason or 'TAKE_PROFIT_10_NET'
+            elif hold>=MAX_HOLD_MINUTES: reason=reason or 'MAX_HOLD_60'
+            if reason and is_quote and quote.get('from_cache'):
+                with STATE.lock:
+                    live=next((p for p in STATE.positions if p.get('id')==position.get('id')),None)
+                    if live is not None and reason!='TAKE_PROFIT_10_NET': live['pending_exit_reason']=reason
+                quote=paper_quotes.position_mark(position,coin,network,force=True)
+                if quote is None: continue
+                pnl=quote['net_proceeds_usd']-notional-entry_cost
+                pct=pnl/max(notional,1e-18)*100
+                if reason=='TAKE_PROFIT_10_NET' and pct<TAKE_PROFIT_PCT: reason=None
+            market=num(coin.get('priceUsd'),num(position.get('current_price')))
+            entry=num(position.get('entry_price'))
+            updated={**position,'current_price':market,'peak_price':max(market,num(position.get('peak_price'))),
+                     'pnl_usd':round(pnl,6),'pnl_pct':round(pct,6),
+                     'signal_pnl_pct':round((market-entry)/max(entry,1e-18)*100,6),
+                     'current_execution_price':quote['fill_price'],'quote_status':'fresh',
+                     'execution_quote_source':quote.get('execution_source','MODEL_V1'),
+                     'execution_quote_at':quote.get('quoted_at',now_ms()),'updated_at':now_ms(),
+                     'hard_stop_net_pct':-STOP_LOSS_PCT,'take_profit_net_pct':TAKE_PROFIT_PCT,
+                     'exit_policy_version':'NET_3_10_V5','pending_exit_reason':reason,
+                     'estimated_exit_dex_fee_usd':quote['dex_fee_usd'],
+                     'estimated_exit_network_fee_usd':quote['network_fee_usd'],
+                     'estimated_exit_price_impact_pct':quote['impact_pct'],
+                     'estimated_exit_slippage_pct':quote['slippage_pct']+quote['latency_pct']}
+            with STATE.lock:
+                live=next((p for p in STATE.positions if p.get('id')==position.get('id')),None)
+                if live is None or STATE.demo_session_id!=session: continue
+                if not reason:
+                    live.update(updated)
                     continue
-            else:
-                exit_quote = exit_execution(coin, quantity)
-            entry_network_fee = num(position.get('entry_network_fee_usd'))
-            notional = num(position.get('notional_usd'), TRADE_NOTIONAL_USD)
-            pnl_usd = exit_quote['net_proceeds_usd'] - notional - entry_network_fee
-            pnl_pct = (pnl_usd / max(notional, 1e-18)) * 100.0
-            hold_min = (now_ms() - int(position.get('opened_at', now_ms()))) / 60000
-            context = self.market_context(coin, position)
-            conviction = num(context.get('conviction'))
-            target_pct = context.get('target_pct')
-            max_hold = num(context.get('max_hold_minutes'), MAX_HOLD_MINUTES)
-            trail_arm_pct = num(context.get('trail_arm_pct'), 8.0)
-            trail_pct = num(context.get('trail_pct'), TRAILING_PCT)
-            fast_flow = context.get('fast_flow') or {}
-            slow_flow = context.get('slow_flow') or {}
-            trailing_armed = peak >= entry * (1 + trail_arm_pct / 100)
-            trailing_floor = peak * (1 - trail_pct / 100)
-            exit_reason = None
-
-            # The hard stop is always respected. Everything else can only exit earlier
-            # or let a strong winner run longer while conviction remains high.
-            stop_signal_trigger_pct = num(position.get('stop_signal_trigger_pct'), -STOP_LOSS_PCT)
-            if pnl_pct <= -STOP_LOSS_PCT or signal_pnl_pct <= stop_signal_trigger_pct:
-                exit_reason = 'STOP_LOSS'
-            elif conviction < 35 and signal_pnl_pct < 0:
-                exit_reason = 'CONVICTION_EXIT'
-            elif (
-                num(fast_flow.get('trades')) >= 4
-                and num(fast_flow.get('sells')) >= 3
-                and num(fast_flow.get('sell_usd')) >= max(200.0, num(fast_flow.get('buy_usd')) * 2.0)
-                and signal_pnl_pct < 3.0
-            ):
-                exit_reason = 'ORDERFLOW_EXIT'
-            elif target_pct is not None and signal_pnl_pct >= num(target_pct):
-                exit_reason = f'ADAPTIVE_TP_{num(target_pct):.0f}'
-            elif peak >= entry * 1.10 and conviction < 50 and signal_pnl_pct > 2.0:
-                exit_reason = 'CONVICTION_PROFIT_LOCK'
-            elif trailing_armed and price <= trailing_floor:
-                exit_reason = 'ADAPTIVE_TRAILING'
-            elif hold_min >= max_hold and conviction < 72:
-                exit_reason = 'ADAPTIVE_MAX_HOLD'
-            elif hold_min >= 120:
-                exit_reason = 'ABSOLUTE_MAX_HOLD'
-
-            if exit_reason and is_live_quote_trade:
-                fresh_exit_quote = paper_quotes.position_mark(
-                    position, coin, NETWORK_FEE_SOL * sol_usd_from_coin(coin), force=True
-                )
-                if fresh_exit_quote is None:
-                    next_positions.append(position)
-                    continue
-                exit_quote = fresh_exit_quote
-                pnl_usd = exit_quote['net_proceeds_usd'] - notional - entry_network_fee
-                pnl_pct = (pnl_usd / max(notional, 1e-18)) * 100.0
-                if exit_reason == 'STOP_LOSS' and pnl_pct > -(STOP_LOSS_PCT - STOP_EXECUTION_BUFFER_PCT):
-                    exit_reason = None
-
-            updated = {
-                **position, 'current_price': price, 'peak_price': peak,
-                'signal_pnl_pct': round(signal_pnl_pct, 3),
-                'current_execution_price': round(exit_quote['fill_price'], 12),
-                'pnl_pct': round(pnl_pct, 3), 'pnl_usd': round(pnl_usd, 3),
-                'estimated_exit_dex_fee_usd': round(exit_quote['dex_fee_usd'], 6),
-                'estimated_exit_network_fee_usd': round(exit_quote['network_fee_usd'], 6),
-                'estimated_exit_price_impact_pct': round(exit_quote['impact_pct'], 4),
-                'estimated_exit_slippage_pct': round(exit_quote['slippage_pct'] + exit_quote['latency_pct'], 4),
-                'execution_quote_source': exit_quote.get('execution_source', 'MODEL_V1'),
-                'conviction': conviction, 'hold_mode': context.get('mode'),
-                'adaptive_target_pct': target_pct, 'adaptive_max_hold_minutes': max_hold,
-                'adaptive_trail_arm_pct': trail_arm_pct, 'adaptive_trail_pct': trail_pct,
-                'market_context': context,
-                'updated_at': now_ms(), 'current_score': coin.get('score'),
-            }
-            if exit_reason:
-                balance_before = STATE.demo_balance_usd
-                STATE.demo_balance_usd = round(STATE.demo_balance_usd + pnl_usd, 8)
-                closed = {
-                    **updated, 'closed_at': now_ms(), 'exit_price': price,
-                    'execution_exit_price': round(exit_quote['fill_price'], 12),
-                    'market_exit_price': price,
-                    'exit_reason': exit_reason,
-                    'quantity': quantity,
-                    'exit_gross_proceeds_usd': round(exit_quote['gross_proceeds_usd'], 8),
-                    'exit_net_proceeds_usd': round(exit_quote['net_proceeds_usd'], 8),
-                    'exit_dex_fee_usd': round(exit_quote['dex_fee_usd'], 8),
-                    'exit_network_fee_usd': round(exit_quote['network_fee_usd'], 8),
-                    'exit_price_impact_pct': round(exit_quote['impact_pct'], 6),
-                    'exit_slippage_pct': round(exit_quote['slippage_pct'] + exit_quote['latency_pct'], 6),
-                    'execution_quote_source': exit_quote.get('execution_source', 'MODEL_V1'),
-                    'jupiter_exit_route': exit_quote.get('route') or [],
-                    'jupiter_exit_quote_at': exit_quote.get('quoted_at'),
-                    'total_fees_usd': round(
-                        num(position.get('entry_dex_fee_usd')) + entry_network_fee +
-                        exit_quote['dex_fee_usd'] + exit_quote['network_fee_usd'], 8
-                    ),
-                    'balance_before': round(balance_before, 8),
-                    'balance_after': round(STATE.demo_balance_usd, 8),
-                    'exit_score': coin.get('score'), 'exit_liquidity_usd': coin.get('liquidityUsd'),
-                    'exit_volume_h1': (coin.get('volume') or {}).get('h1'),
-                    'exit_market_cap': coin.get('marketCap') or coin.get('fdv'),
-                    'exit_change_m5': (coin.get('priceChange') or {}).get('m5'),
-                    'exit_scan_count': STATE.scan_count,
-                }
-                STATE.history.insert(0, closed)
-                STATE.history = STATE.history[:300]
-                append_audit('EXIT', closed)
-                STATE.event(
-                    f"PAPER EXIT #{closed.get('trade_no')} ${closed['symbol']} {exit_reason} · "
-                    f"net {pnl_pct:+.2f}% / signal {signal_pnl_pct:+.2f}% · balance ${STATE.demo_balance_usd:.2f}"
-                )
-            else:
-                next_positions.append(updated)
-        STATE.positions = next_positions
+                before=STATE.demo_balance_usd
+                STATE.demo_balance_usd=round(before+pnl,8)
+                closed={**updated,'closed_at':now_ms(),'exit_price':market,
+                        'execution_exit_price':quote['fill_price'],'exit_reason':reason,
+                        'exit_net_proceeds_usd':quote['net_proceeds_usd'],
+                        'exit_gross_proceeds_usd':quote['gross_proceeds_usd'],
+                        'exit_dex_fee_usd':quote['dex_fee_usd'],'exit_network_fee_usd':quote['network_fee_usd'],
+                        'exit_price_impact_pct':quote['impact_pct'],'exit_slippage_pct':quote['slippage_pct'],
+                        'jupiter_exit_route':quote.get('route',[]),'jupiter_exit_quote_at':quote.get('quoted_at'),
+                        'balance_before':before,'balance_after':STATE.demo_balance_usd,
+                        'exit_liquidity_usd':coin.get('liquidityUsd'),'fees_included_in_quote':is_quote}
+                STATE.history.insert(0,closed); STATE.history=STATE.history[:300]
+                STATE.positions.remove(live)
+                append_audit('EXIT',closed)
+                STATE.event(f"ТЕСТОВ ИЗХОД #{closed.get('trade_no')} {closed.get('symbol')} · {reason} · {pct:+.2f}% нето")
+                STATE.save()
 
     def fast_position_check(self) -> None:
-        if not STATE.running or not self.position_lock.acquire(blocking=False):
-            return
+        if not STATE.running or not self.position_lock.acquire(blocking=False): return
         try:
             with STATE.lock:
-                positions = list(STATE.positions)
-            addresses = [p.get('address') for p in positions if p.get('address')]
-            if not addresses:
-                return
-            pairs = fetch_pairs(addresses)
-            by_address = {}
-            for position in positions:
-                address = position.get('address')
-                pair = exact_position_pair(position, pairs)
-                if not pair:
-                    continue
-                snap = position.get('coin_snapshot') or {}
-                meta = {'sources': ['position-guard'], 'icon': snap.get('imageUrl') or '',
-                        'header': '', 'description': '', 'links': [], 'boost_amount': 0}
-                by_address[address] = make_coin(address, pair, meta)
-            if by_address:
-                with STATE.lock:
-                    self.update_positions(by_address)
-                    STATE.save()
+                coins={c['address']:dict(c) for c in STATE.feed}
+            # Quote the held raw token amount directly; do not block a stop on a
+            # slow DexScreener discovery request or select a different chart pool.
+            self.update_positions(coins)
+            with STATE.lock: STATE.save()
         except Exception as exc:
-            with STATE.lock:
-                STATE.event(f'Fast position guard warning: {exc}')
+            with STATE.lock: STATE.event('Проверка на позицията: '+type(exc).__name__)
         finally:
             self.position_lock.release()
 
     def run_position_guard(self) -> None:
         while not self.stop_event.is_set():
-            if STATE.positions:
-                self.fast_position_check()
+            if STATE.running:
+                if STATE.positions: self.fast_position_check()
+                else:
+                    with STATE.lock: feed=[dict(c) for c in STATE.feed]
+                    self.maybe_open(feed)
             self.stop_event.wait(POSITION_SCAN_SECONDS)
 
     def maybe_open(self, feed: list[dict[str, Any]]) -> None:
+        if not STATE.running or not self.entry_lock.acquire(blocking=False): return
         report = {'policy_version': entry_policy.POLICY_VERSION, 'checked_at': now_ms(),
                   'candidates': len(feed), 'evaluated': 0, 'signal_passed': 0,
                   'quoted': 0, 'opened': 0, 'rejections': {}, 'examples': []}
         try:
             self._maybe_open_checked(feed, report)
+        except Exception as exc:
+            entry_policy.record(report,['entry_error'],metrics={'type':type(exc).__name__})
         finally:
-            STATE.entry_diagnostics = entry_policy.finish(report)
+            with STATE.lock:
+                STATE.entry_diagnostics = entry_policy.finish(report)
+            self.entry_lock.release()
 
     def _maybe_open_checked(self, feed: list[dict[str, Any]], report: dict[str, Any]) -> None:
+        session_at_check = STATE.demo_session_id
         STATE.refresh_risk_day()
         if STATE.risk_day_pnl() <= -MAX_DAILY_LOSS_USD:
             entry_policy.record(report, ['daily_limit'])
@@ -1046,8 +989,8 @@ class Monitor:
             return
         open_addresses = {p.get('address') for p in STATE.positions}
         now = now_ms()
-        cutoff = now - 20 * 60 * 1000
-        recent = {t.get('address') for t in STATE.history if int(t.get('closed_at', 0)) >= cutoff}
+        recent = {t.get('address') for t in STATE.history if now-int(t.get('closed_at',0)) <
+                  (120_000 if num(t.get('pnl_usd'))<0 else 30_000)}
         for coin in feed:
             if len(STATE.positions) >= MAX_POSITIONS:
                 break
@@ -1078,10 +1021,14 @@ class Monitor:
                 entry_policy.record(report, rejected, coin)
                 continue
             report['signal_passed'] += 1
+            safety=rug_guard.check(coin)
+            if safety.get('status')!='pass':
+                entry_policy.record(report, safety.get('reasons') or ['risk_check_pending'], coin)
+                continue
             if report['quoted'] >= entry_policy.MAX_QUOTED_CANDIDATES:
                 entry_policy.record(report, ['quote_budget'], coin)
                 continue
-            strategy_id = 'ORDER_FLOW_ADAPTIVE'
+            strategy_id = 'ORDER_FLOW_FAST_3_10_V5'
             learning = {'sample': 0, 'win_rate': 0, 'profit_factor': 0, 'recent_losses': 0, 'bonus': 0, 'blocked': False}
             recovery = False
             price = num(coin.get('priceUsd'))
@@ -1090,28 +1037,38 @@ class Monitor:
             positive = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'positive'][:4]
             risks = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'risk'][:4]
             available_before = STATE.available_balance_usd()
-            pre_network_fee = NETWORK_FEE_SOL * sol_usd_from_coin(coin)
-            notional = min(TRADE_NOTIONAL_USD, max(0.0, available_before - pre_network_fee))
+            sol_usd=num(safety.get('metrics',{}).get('sol_usd')) or sol_usd_from_coin(coin)
+            if sol_usd<=0:
+                entry_policy.record(report,['network_price_unknown'],coin); continue
+            pre_network_fee = max(.03, NETWORK_FEE_SOL * sol_usd)
+            seen_before=any(t.get('address')==address for t in STATE.history)
+            rent_lamports=num(safety.get('metrics',{}).get('token_account_rent_lamports'))
+            if not seen_before and rent_lamports<=0:
+                entry_policy.record(report,['risk_data_unavailable'],coin); continue
+            entry_rent=0.0 if seen_before else rent_lamports/1e9*sol_usd
+            notional = min(TRADE_NOTIONAL_USD, max(0.0, available_before - pre_network_fee - entry_rent))
             if notional < 10:
                 continue
+            if STATE.risk_day_pnl()-notional*STOP_LOSS_PCT/100 < -MAX_DAILY_LOSS_USD:
+                entry_policy.record(report,['daily_limit'],coin); return
             report['quoted'] += 1
             live_quote = paper_quotes.entry_quote(address, str(coin.get('pairAddress') or ''), notional)
             if not live_quote:
                 entry_policy.record(report, ['entry_quote'], coin)
                 continue
-            entry_network_fee = NETWORK_FEE_SOL * sol_usd_from_coin(coin)
-            expected_token_raw = int(live_quote.get('token_raw_expected') or 0)
-            initial_exit = paper_quotes.exit_quote(address, expected_token_raw)
+            entry_network_fee = pre_network_fee
+            expected_token_raw = int(live_quote.get('token_raw_amount') or live_quote.get('token_raw_expected') or 0)
+            initial_exit = paper_quotes.exit_quote(address, expected_token_raw, str(coin.get('pairAddress') or ''))
             if not initial_exit:
                 entry_policy.record(report, ['exit_quote'], coin)
                 continue
             immediate_exit_net = max(0.0, num(initial_exit.get('expected_usdc')) - entry_network_fee)
             worst_case_exit_net = max(0.0, num(initial_exit.get('floor_usdc')) - entry_network_fee)
             immediate_roundtrip_pct = (
-                (immediate_exit_net - notional - entry_network_fee) / max(notional, 1e-18)
+                (immediate_exit_net - notional - entry_network_fee - entry_rent) / max(notional, 1e-18)
             ) * 100.0
             worst_case_roundtrip_pct = (
-                (worst_case_exit_net - notional - entry_network_fee) / max(notional, 1e-18)
+                (worst_case_exit_net - notional - entry_network_fee - entry_rent) / max(notional, 1e-18)
             ) * 100.0
             impact_pct = num(live_quote.get('price_impact_pct'))
             quote_rejected = entry_policy.quote_rejections(
@@ -1131,14 +1088,15 @@ class Monitor:
                 0.50,
                 STOP_LOSS_PCT - abs(min(0.0, immediate_roundtrip_pct)) - STOP_EXECUTION_BUFFER_PCT,
             )
-            quote_slippage_pct = 0.0
+            quote_slippage_pct = paper_quotes.BUFFER_BPS / 100.0
             quote_network_fee = entry_network_fee
-            quote_fill_price = price * (1.0 + impact_pct / 100.0 + quote_slippage_pct / 100.0)
-            quantity = notional / max(quote_fill_price, 1e-18)
+            decimals=int(safety['metrics']['decimals'])
+            quantity=expected_token_raw/(10**decimals)
+            quote_fill_price=notional/max(quantity,1e-18)
             entry_quote = {
                 'fill_price': quote_fill_price,
                 'quantity': quantity,
-                'capital_committed_usd': notional + quote_network_fee,
+                'capital_committed_usd': notional + quote_network_fee + entry_rent,
                 'dex_fee_bps': 0.0,
                 'dex_fee_usd': 0.0,
                 'network_fee_usd': quote_network_fee,
@@ -1148,65 +1106,74 @@ class Monitor:
             }
             if quantity <= 0:
                 continue
-            STATE.trade_seq += 1
-            position = {
-                'id': f'{address}:{now_ms()}', 'address': address,
-                'pairAddress': coin.get('pairAddress'), 'name': coin.get('name'),
-                'symbol': coin.get('symbol'), 'imageUrl': coin.get('imageUrl'),
-                'entry_price': price, 'market_entry_price': price,
-                'execution_entry_price': round(entry_quote['fill_price'], 12),
-                'current_price': price, 'peak_price': price,
-                'trade_no': STATE.trade_seq, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
-                'learning_mode': 'ADAPTIVE_CONTEXT_HOLD', 'entry_flow': flow,
-                'entry_context': context, 'entry_conviction': context.get('conviction'),
-                'entry_hold_mode': context.get('mode'), 'learning_sample': learning['sample'],
-                'learning_win_rate': learning['win_rate'], 'learning_profit_factor': learning['profit_factor'],
-                'learning_recent_losses': learning['recent_losses'], 'learning_bonus': learning['bonus'],
-                'notional_usd': round(notional, 8),
-                'capital_committed_usd': round(entry_quote['capital_committed_usd'], 8),
-                'quantity': quantity, 'score': coin.get('score'),
-                'current_score': coin.get('score'), 'opened_at': now_ms(),
-                'updated_at': now_ms(), 'signal_pnl_pct': 0, 'pnl_pct': 0, 'pnl_usd': 0,
-                'execution_mode': 'JUPITER_QUOTE_V2',
-                'jupiter_usdc_in_raw': int(live_quote.get('input_usdc_raw') or 0),
-                'jupiter_token_raw_expected': int(live_quote.get('token_raw_expected') or 0),
-                'jupiter_token_raw_amount': expected_token_raw,
-                'jupiter_entry_route': live_quote.get('route') or [],
-                'jupiter_entry_quote_at': int(live_quote.get('quoted_at') or now_ms()),
-                'jupiter_entry_price_impact_pct': impact_pct,
-                'jupiter_slippage_bps': int(live_quote.get('slippage_bps') or paper_quotes.SLIPPAGE_BPS),
-                'entry_roundtrip_pnl_pct': round(immediate_roundtrip_pct, 4),
-                'entry_policy_version': entry_policy.POLICY_VERSION,
-                'entry_worst_case_roundtrip_pnl_pct': round(worst_case_roundtrip_pct, 4),
-                'stop_signal_trigger_pct': round(stop_signal_trigger_pct, 4),
-                'hard_stop_net_pct': -STOP_LOSS_PCT,
-                'entry_dex_fee_bps': round(entry_quote['dex_fee_bps'], 4),
-                'entry_dex_fee_usd': round(entry_quote['dex_fee_usd'], 8),
-                'entry_network_fee_usd': round(entry_quote['network_fee_usd'], 8),
-                'entry_price_impact_pct': round(entry_quote['impact_pct'], 6),
-                'entry_slippage_pct': round(entry_quote['slippage_pct'] + entry_quote['latency_pct'], 6),
-                'why_entry': positive, 'risks_at_entry': risks,
-                'balance_at_entry': round(STATE.demo_balance_usd, 8),
-                'available_before_entry': round(available_before, 8),
-                'available_after_entry': round(max(0.0, available_before - entry_quote['capital_committed_usd']), 8),
-                'entry_liquidity_usd': coin.get('liquidityUsd'),
-                'entry_volume_h1': (coin.get('volume') or {}).get('h1'),
-                'entry_market_cap': coin.get('marketCap') or coin.get('fdv'),
-                'entry_change_m5': (coin.get('priceChange') or {}).get('m5'),
-                'entry_buy_sell_ratio': round(buy_sell_ratio, 4),
-                'entry_liquidity_mc_ratio': round(liquidity_mc_ratio, 4),
-                'entry_scan_count': STATE.scan_count, 'dex_url': coin.get('dexUrl'),
-                'coin_snapshot': coin,
-            }
-            STATE.positions.append(position)
-            report['opened'] += 1
-            append_audit('ENTRY', position)
-            open_addresses.add(address)
-            STATE.event(
-                f"PAPER ENTRY #{position['trade_no']} ${coin.get('symbol')} market ${price:.10g} "
-                f"→ fill ${entry_quote['fill_price']:.10g} · ${notional:.2f} · fee {entry_quote['dex_fee_bps'] / 100:.3f}% "
-                f"· impact {entry_quote['impact_pct']:.2f}% · {strategy_id} · NEO {coin.get('score'):.0f}/100"
-            )
+            with STATE.lock:
+                if STATE.demo_session_id!=session_at_check or not STATE.running or len(STATE.positions)>=MAX_POSITIONS:
+                    return
+                if STATE.available_balance_usd()<entry_quote['capital_committed_usd'] or STATE.risk_day_pnl()<=-MAX_DAILY_LOSS_USD:
+                    entry_policy.record(report,['balance'],coin); return
+                STATE.trade_seq += 1
+                position = {
+                    'id': f'{address}:{now_ms()}', 'address': address,
+                    'pairAddress': coin.get('pairAddress'), 'name': coin.get('name'),
+                    'symbol': coin.get('symbol'), 'imageUrl': coin.get('imageUrl'),
+                    'entry_price': price, 'market_entry_price': price,
+                    'execution_entry_price': round(entry_quote['fill_price'], 12),
+                    'current_price': price, 'peak_price': price,
+                    'trade_no': STATE.trade_seq, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
+                    'learning_mode': 'ADAPTIVE_CONTEXT_HOLD', 'entry_flow': flow,
+                    'entry_context': context, 'entry_conviction': context.get('conviction'),
+                    'entry_hold_mode': context.get('mode'), 'learning_sample': learning['sample'],
+                    'learning_win_rate': learning['win_rate'], 'learning_profit_factor': learning['profit_factor'],
+                    'learning_recent_losses': learning['recent_losses'], 'learning_bonus': learning['bonus'],
+                    'notional_usd': round(notional, 8),
+                    'capital_committed_usd': round(entry_quote['capital_committed_usd'], 8),
+                    'quantity': quantity, 'score': coin.get('score'),
+                    'current_score': coin.get('score'), 'opened_at': now_ms(),
+                    'updated_at': now_ms(), 'signal_pnl_pct': 0,
+                    'pnl_pct': immediate_roundtrip_pct, 'pnl_usd': immediate_roundtrip_pct*notional/100,
+                    'execution_mode': 'JUPITER_QUOTE_V2',
+                    'jupiter_usdc_in_raw': int(live_quote.get('input_usdc_raw') or 0),
+                    'jupiter_token_raw_expected': int(live_quote.get('token_raw_expected') or 0),
+                    'jupiter_token_raw_amount': expected_token_raw,
+                    'jupiter_entry_route': live_quote.get('route') or [],
+                    'jupiter_entry_quote_at': int(live_quote.get('quoted_at') or now_ms()),
+                    'jupiter_entry_price_impact_pct': impact_pct,
+                    'jupiter_slippage_bps': int(live_quote.get('slippage_bps') or paper_quotes.SLIPPAGE_BPS),
+                    'entry_roundtrip_pnl_pct': round(immediate_roundtrip_pct, 4),
+                    'entry_policy_version': entry_policy.POLICY_VERSION,
+                    'entry_worst_case_roundtrip_pnl_pct': round(worst_case_roundtrip_pct, 4),
+                    'stop_signal_trigger_pct': round(stop_signal_trigger_pct, 4),
+                    'hard_stop_net_pct': -STOP_LOSS_PCT,
+                    'entry_dex_fee_bps': round(entry_quote['dex_fee_bps'], 4),
+                    'entry_dex_fee_usd': round(entry_quote['dex_fee_usd'], 8),
+                    'entry_network_fee_usd': round(entry_quote['network_fee_usd'], 8),
+                    'entry_account_reserve_usd': entry_rent, 'token_decimals': decimals,
+                    'risk_check': safety, 'take_profit_net_pct': TAKE_PROFIT_PCT,
+                    'cost_assumptions': 'Jupiter AMM fees included; 10bps/leg buffer, network budget, account rent reserve',
+                    'entry_price_impact_pct': round(entry_quote['impact_pct'], 6),
+                    'entry_slippage_pct': round(entry_quote['slippage_pct'] + entry_quote['latency_pct'], 6),
+                    'why_entry': positive, 'risks_at_entry': risks,
+                    'balance_at_entry': round(STATE.demo_balance_usd, 8),
+                    'available_before_entry': round(available_before, 8),
+                    'available_after_entry': round(max(0.0, available_before - entry_quote['capital_committed_usd']), 8),
+                    'entry_liquidity_usd': coin.get('liquidityUsd'),
+                    'entry_volume_h1': (coin.get('volume') or {}).get('h1'),
+                    'entry_market_cap': coin.get('marketCap') or coin.get('fdv'),
+                    'entry_change_m5': (coin.get('priceChange') or {}).get('m5'),
+                    'entry_buy_sell_ratio': round(buy_sell_ratio, 4),
+                    'entry_liquidity_mc_ratio': round(liquidity_mc_ratio, 4),
+                    'entry_scan_count': STATE.scan_count, 'dex_url': coin.get('dexUrl'),
+                    'coin_snapshot': coin,
+                }
+                STATE.positions.append(position)
+                report['opened'] += 1
+                append_audit('ENTRY', position)
+                open_addresses.add(address)
+                STATE.event(
+                    f"PAPER ENTRY #{position['trade_no']} ${coin.get('symbol')} market ${price:.10g} "
+                    f"→ fill ${entry_quote['fill_price']:.10g} · ${notional:.2f} · fee {entry_quote['dex_fee_bps'] / 100:.3f}% "
+                    f"· impact {entry_quote['impact_pct']:.2f}% · {strategy_id} · NEO {coin.get('score'):.0f}/100"
+                )
 
     def scan_once(self) -> None:
         if not STATE.running or not self.scan_lock.acquire(blocking=False):
@@ -1261,11 +1228,11 @@ class Monitor:
                 STATE.status = 'monitoring'
                 STATE.source_status = {'dexscreener': 'online'}
                 self.update_price_history(feed)
-                self.update_positions(by_address)
-                self.maybe_open(feed)
                 setups = sum(1 for c in feed if c.get('posture') == 'SETUP')
                 STATE.message = STATE.entry_diagnostics.get('message') or f'Проверени {len(feed)} token-а; отворени позиции: {len(STATE.positions)}.'
                 STATE.save()
+            # Entry preparation and quotes must not hold the account/UI lock.
+            self.maybe_open(feed)
         except Exception as exc:
             with STATE.lock:
                 STATE.status = 'error'

@@ -36,21 +36,40 @@ class EngineEntryTests(unittest.TestCase):
         self.entry = {'token_raw_expected': 100000000, 'token_raw_floor': 99000000,
                       'input_usdc_raw': 200000000, 'price_impact_pct': 1.0,
                       'slippage_bps': 100, 'route': [], 'quoted_at': m.now_ms()}
-        self.exit = {'expected_usdc': 196.0, 'floor_usdc': 194.0}
+        self.exit = {'expected_usdc': 198.0, 'floor_usdc': 196.8}
         self.patches = [patch.object(m.STATE, 'live_flow', return_value=self.flow),
                         patch.object(self.monitor, 'market_context', return_value=self.context),
                         patch.object(m.paper_quotes, 'entry_quote', return_value=self.entry),
                         patch.object(m.paper_quotes, 'exit_quote', return_value=self.exit),
-                        patch.object(m, 'append_audit')]
+                        patch.object(m, 'append_audit'),
+                        patch.object(m.rug_guard,'check',return_value={'status':'pass','metrics':{'decimals':6,'token_account_rent_lamports':1650000}})]
         self.mocks = [p.start() for p in self.patches]
         self.addCleanup(lambda: [p.stop() for p in reversed(self.patches)])
+
+    def test_critical_rug_blocks_before_quote(self):
+        self.mocks[5].return_value={'status':'blocked','reasons':['rugcheck_critical']}
+        self.monitor.maybe_open([self.coin])
+        self.mocks[2].assert_not_called()
+        self.assertFalse(m.STATE.positions)
+
+    def test_unavailable_risk_does_not_invent_clearance(self):
+        self.mocks[5].return_value={'status':'pending','reasons':['risk_check_pending']}
+        self.monitor.maybe_open([self.coin])
+        self.mocks[2].assert_not_called()
+        self.assertFalse(m.STATE.positions)
+
+    def test_remaining_daily_risk_budget_blocks_new_position(self):
+        m.STATE.demo_balance_usd=905
+        m.STATE.risk_day_start_balance_usd=1000
+        self.monitor.maybe_open([self.coin])
+        self.mocks[2].assert_not_called()
 
     def test_preserve_user_risk_settings(self):
         self.assertEqual(m.TRADE_NOTIONAL_USD, 200)
         self.assertEqual(m.MAX_DAILY_LOSS_USD, 100)
-        self.assertEqual(m.STOP_LOSS_PCT, 5)
+        self.assertEqual(m.STOP_LOSS_PCT, 3)
         self.assertEqual(m.MAX_POSITIONS, 1)
-        self.assertEqual(m.TAKE_PROFIT_PCT, 18)
+        self.assertEqual(m.TAKE_PROFIT_PCT, 10)
 
     def test_valid_formerly_overfiltered_entry_reaches_quote_and_opens(self):
         self.monitor.maybe_open([self.coin])
@@ -59,8 +78,8 @@ class EngineEntryTests(unittest.TestCase):
         self.assertEqual(pos['notional_usd'], 200)
         self.assertEqual(pos['entry_policy_version'], policy.POLICY_VERSION)
         self.assertEqual(m.STATE.entry_diagnostics['status'], 'opened')
-        self.assertLess(pos['entry_roundtrip_pnl_pct'], -2)
-        self.assertEqual(pos['hard_stop_net_pct'], -5)
+        self.assertLess(pos['entry_roundtrip_pnl_pct'], 0)
+        self.assertEqual(pos['hard_stop_net_pct'], -3)
 
     def test_no_balance_session_history_reset(self):
         m.STATE.demo_balance_usd = 975
@@ -118,7 +137,7 @@ class EngineEntryTests(unittest.TestCase):
         self.assertIn('quote_age', m.STATE.entry_diagnostics['rejections'])
 
     def test_liquidity_dust_and_dump_protections_remain(self):
-        cases = [('liquidityUsd', 20000, 'liquidity'), ('score', 60, 'score')]
+        cases = [('liquidityUsd', 10000, 'liquidity'), ('score', 60, 'score')]
         for field, value, reason in cases:
             c = dict(self.coin, **{field: value})
             self.monitor.maybe_open([c])
@@ -153,8 +172,8 @@ class EngineEntryTests(unittest.TestCase):
 
     def test_reported_thresholds_match_real_policy(self):
         snapshot = m.STATE.snapshot()
-        self.assertEqual(snapshot['config']['entry_score'], 85)
-        self.assertEqual(snapshot['config']['min_liquidity_usd'], 30000)
+        self.assertEqual(snapshot['config']['entry_score'], 78)
+        self.assertEqual(snapshot['config']['min_liquidity_usd'], 20000)
         self.assertEqual(snapshot['config']['entry_policy_version'], policy.POLICY_VERSION)
         self.assertIn('entry_diagnostics', snapshot)
 
