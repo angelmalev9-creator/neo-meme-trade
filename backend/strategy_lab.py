@@ -140,7 +140,7 @@ STRATEGIES=[
  {'id':'ORDER_FLOW','name':'Order Flow','rule':lambda f: f['score']>=85 and f['liq']>=15000 and -5<=f['m5']<=25 and f['flow']['trades']>=3 and f['flow']['ratio']>=1.3 and f['flow']['unique_wallets']>=1 and f['flow']['max_sell']<max(750,f['flow']['buy_usd']*.8)},
  {'id':'EARLY','name':'Early Runner','rule':lambda f: f['score']>=90 and f['liq']>=15000 and 1<=f['m5']<=20 and f['bs']>=1.05 and f['lmc']>=.10 and 2<=f['age']<=60},
  {'id':'TREND','name':'Balanced Trend','rule':lambda f: f['score']>=88 and f['liq']>=20000 and 0<=f['m5']<=15 and 0<=f['h1']<=150 and .9<=f['bs']<=3.0 and f['lmc']>=.10 and 15<=f['age']<=480},
- {'id':'SCALPER','name':'Fast Scalper','rule':lambda f: f['score']>=85 and f['liq']>=15000 and -3<=f['m5']<=12 and f['bs']>=1.05 and f['lmc']>=.08 and 2<=f['age']<=180},
+ {'id':'SCALPER','name':'Fast Scalper 3/10','rule':lambda f: f['score']>=80 and f['liq']>=10000 and -5<=f['m5']<=15 and f['bs']>=.90 and f['lmc']>=.05 and 2<=f['age']<=300},
  {'id':'VOLUME_SURGE','name':'Volume Surge','rule':lambda f: f['score']>=88 and f['liq']>=15000 and 2<=f['m5']<=28 and f['vol_liq']>=.35 and f['bs']>=1.1 and f['lmc']>=.08 and 3<=f['age']<=360},
  {'id':'REVERSAL','name':'Reversal Catch','rule':lambda f: f['score']>=85 and f['liq']>=20000 and -10<=f['m5']<=3 and f['h1']>-25 and f['bs']>=1.15 and f['lmc']>=.10 and 10<=f['age']<=480},
  {'id':'FLOW_MOMENTUM','name':'Flow Momentum','rule':lambda f: f['score']>=85 and f['liq']>=15000 and 0<=f['m5']<=30 and f['flow']['trades']>=3 and f['flow']['ratio']>=1.8 and f['flow']['buy_usd']>=150},
@@ -265,7 +265,16 @@ def update_positions(flows):
         f=flows.get(pos['address'],{})
         reason=None
 
-        if book.get('id')=='FLOW_MOMENTUM_SCALE_OUT':
+        if book.get('id')=='SCALPER':
+            if pct<=-3.0:
+                reason='STOP_LOSS_3'
+            elif pct>=10.0:
+                reason='TAKE_PROFIT_10'
+            elif peak>=entry*1.06 and price<=peak*(1-3.0/100):
+                reason='TRAILING_STOP_3'
+            elif hold>=7.0:
+                reason='MAX_HOLD'
+        elif book.get('id')=='FLOW_MOMENTUM_SCALE_OUT':
             # Same FLOW_MOMENTUM entry logic; only exit management differs.
             # Lock 80% progressively and let the final 20% run.
             stages=((5.0,.20,'LOCK_5'),(10.0,.20,'LOCK_10'),(18.0,.20,'LOCK_18'),(30.0,.20,'LOCK_30'))
