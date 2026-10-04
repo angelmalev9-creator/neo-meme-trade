@@ -1,0 +1,21 @@
+{
+  "name": "NEO Meme Coins GOLD strategy",
+  "locked_at_utc": "2026-10-04T11:03:10Z",
+  "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
+  "strategy_file": "backend/market_monitor.py",
+  "sha256": "1e06a83b9d2978ae5af7f6495e36a0d76231394a899d5d58046341dffe01bb67",
+  "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
+  "rules": {
+    "entry_score": 80.0,
+    "max_positions": 1,
+    "stop_loss_pct": 5.0,
+    "take_profit_pct": 18.0,
+    "trailing_pct": 4.0,
+    "max_hold_minutes": 7,
+    "starting_balance_usd": 1000.0,
+    "trade_notional_usd": 200.0,
+    "max_daily_loss_usd": 30.0,
+    "min_liquidity_usd": 10000.0
+  },
+  "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy."
+}
