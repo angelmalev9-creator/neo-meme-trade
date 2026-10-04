@@ -3,6 +3,7 @@ import json, math, os, time
 from pathlib import Path
 from typing import Any, Callable
 import requests
+import lab_activity as activity
 
 API_URL=os.getenv('NEO_LOCAL_API','http://127.0.0.1:8788/state')
 DEX='https://api.dexscreener.com'
@@ -17,7 +18,7 @@ STOP_LOSS=3.0
 TAKE_PROFIT=10.0
 TRAILING=4.0
 MAX_HOLD_MIN=60.0
-REENTRY_COOLDOWN_MIN=20.0
+REENTRY_COOLDOWN_MIN=activity.REENTRY_SECONDS/60.0
 
 # Realistic paper execution costs for Strategy Lab. These are applied equally to
 # every strategy so comparisons stay fair. The main engine remains untouched.
@@ -187,9 +188,15 @@ def load_state():
         b=(raw.get('books') or {}).get(s['id']) or empty_book(s)
         b['id']=s['id']; b['name']=s['name']; books[s['id']]=b
     return {'started_at':now_ms() if reset_requested else (raw.get('started_at') or now_ms()),
-            'updated_at':now_ms(),'status':'starting','books':books}
+            'updated_at':now_ms(),'status':'starting','books':books,
+            'activity_version':raw.get('activity_version'),
+            'activity_started_at':raw.get('activity_started_at')}
 
 STATE=load_state()
+if STATE.get('activity_version')!=activity.POLICY_VERSION:
+    STATE['activity_version']=activity.POLICY_VERSION
+    STATE['activity_started_at']=now_ms()
+assert set(activity.RULES)=={s['id'] for s in STRATEGIES}, 'All 33 entries need a policy'
 
 def dex_position_prices(positions):
     if not positions: return {}
@@ -292,39 +299,74 @@ def update_positions(flows):
         if reason: close_position(book,pos,coin,reason)
 def maybe_open(feed,flows):
     now=now_ms()
-    for s in STRATEGIES:
-        book=STATE['books'][s['id']]
-        if book.get('position') or num(book.get('balance'))<10: continue
-        for c in feed:
-            a=c.get('address')
-            if not a: continue
-            last=int((book.get('last_entry_by_address') or {}).get(a,0))
-            if now-last<REENTRY_COOLDOWN_MIN*60*1000: continue
-            f=enrich(c,flows)
-            try: ok=bool(s['rule'](f))
-            except Exception: ok=False
-            if not ok: continue
-            price=num(c.get('priceUsd'))
-            if price<=0: continue
-            notional=min(TRADE_NOTIONAL,num(book['balance']))
-            exec_entry=entry_execution(c,notional)
-            qty=num(exec_entry.get('quantity'))
-            if qty<=0: continue
-            book['trade_seq']=int(book.get('trade_seq',0))+1
-            capital_basis=notional+num(exec_entry.get('network_fee_usd'))
-            pos={'trade_no':book['trade_seq'],'strategy_id':s['id'],'symbol':c.get('symbol'),'name':c.get('name'),
-                 'address':a,'pairAddress':c.get('pairAddress'),'entry_price':price,
-                 'execution_entry_price':round(exec_entry['fill_price'],12),'current_price':price,'peak_price':price,
-                 'quantity':qty,'original_quantity':qty,'notional_usd':notional,'opened_at':now,'updated_at':now,
-                 'score':c.get('score'),'entry_features':f,'partial_realized_pnl':0.0,'partial_exits':[],
-                 'remaining_cost_basis_usd':capital_basis,'entry_dex_fee_bps':round(exec_entry['dex_fee_bps'],4),
-                 'entry_dex_fee_usd':round(exec_entry['dex_fee_usd'],6),'entry_network_fee_usd':round(exec_entry['network_fee_usd'],6),
-                 'entry_price_impact_pct':round(exec_entry['impact_pct'],4),
-                 'entry_slippage_pct':round(exec_entry['slippage_pct']+exec_entry['latency_pct'],4),
-                 'execution_mode':'REALISTIC_COSTS_V1'}
-            book['position']=pos
-            book.setdefault('last_entry_by_address',{})[a]=now
-            break
+    candidates=[]
+    for c in feed:
+        if activity.usable_feed_coin(c,now):
+            candidates.append((c,enrich(c,flows)))
+    for strategy in STRATEGIES:
+        book=STATE['books'][strategy['id']]
+        if book.get('position') or num(book.get('balance'))<activity.MIN_NOTIONAL_USD:
+            continue
+        eligible=[]
+        checked=0
+        blocked_cost=0
+        blocked_cooldown=0
+        for coin,features in candidates:
+            if not activity.RULES[strategy['id']].matches(features):
+                continue
+            address=coin['address']
+            if activity.cooldown_remaining_ms(book,address,now)>0:
+                blocked_cooldown+=1
+                continue
+            checked+=1
+            proposed=activity.affordable_entry(
+                coin,num(book['balance']),TRADE_NOTIONAL,entry_execution,exit_execution
+            )
+            if proposed is None:
+                blocked_cost+=1
+                continue
+            eligible.append((proposed['initial_pnl_pct'],num(features.get('score')),
+                             coin,features,proposed))
+        book['entry_diagnostics']={
+            'at':now,'matched_candidates':checked,'cost_rejected':blocked_cost,
+            'cooldown_rejected':blocked_cooldown,'affordable_candidates':len(eligible),
+        }
+        if not eligible:
+            continue
+        _,_,coin,features,proposed=max(eligible,key=lambda item:(item[0],item[1]))
+        address=coin['address']; price=num(coin['priceUsd'])
+        notional=proposed['notional']; opening=proposed['entry']; mark=proposed['mark']
+        qty=num(opening['quantity'])
+        capital_basis=num(opening['capital_committed_usd'])
+        book['trade_seq']=int(book.get('trade_seq',0))+1
+        stamp=now_ms()
+        position={
+            'trade_no':book['trade_seq'],'strategy_id':strategy['id'],
+            'symbol':coin.get('symbol'),'name':coin.get('name'),
+            'address':address,'pairAddress':coin['pairAddress'],'entry_price':price,
+            'execution_entry_price':round(opening['fill_price'],12),
+            'current_price':price,'peak_price':price,'quantity':qty,'original_quantity':qty,
+            'notional_usd':notional,'opened_at':stamp,'updated_at':stamp,
+            'score':coin.get('score'),'entry_features':features,
+            'partial_realized_pnl':0.0,'partial_exits':[],
+            'remaining_cost_basis_usd':capital_basis,
+            'entry_dex_fee_bps':round(opening['dex_fee_bps'],4),
+            'entry_dex_fee_usd':round(opening['dex_fee_usd'],6),
+            'entry_network_fee_usd':round(opening['network_fee_usd'],6),
+            'entry_price_impact_pct':round(opening['impact_pct'],4),
+            'entry_slippage_pct':round(opening['slippage_pct']+opening['latency_pct'],4),
+            'execution_mode':'REALISTIC_COSTS_V1',
+            'entry_policy_version':activity.POLICY_VERSION,
+            'entry_roundtrip_pnl_pct':round(proposed['initial_pnl_pct'],6),
+            'entry_size_reduced':notional+0.02<min(TRADE_NOTIONAL,num(book['balance'])),
+            'pnl_pct':round(proposed['initial_pnl_pct'],3),
+            'open_pnl_usd':round(proposed['initial_pnl_usd'],4),
+            'execution_exit_price':round(mark['fill_price'],12),
+            'remaining_fraction':1.0,
+        }
+        book['position']=position
+        book.setdefault('last_entry_by_address',{})[address]=stamp
+
 
 def stats(book):
     start=num(book.get('starting_balance'),START_BALANCE)
@@ -339,11 +381,15 @@ def stats(book):
     return {'trades':len(h),'wins':len(wins),'losses':len(h)-len(wins),'win_rate':round(len(wins)/len(h)*100,1) if h else 0,
             'profit_factor':round(gp/gl,2) if gl>0 else (99.0 if gp>0 else 0.0),'realized_pnl':round(num(book.get('balance'))-start,2),
             'equity':round(equity,2),'return_pct':round((equity-start)/max(start,1e-18)*100,2),'open':bool(p),
-            'partial_exits':partial_count,'partial_locked_pnl':round(locked_partial,2)}
+            'partial_exits':partial_count,'partial_locked_pnl':round(locked_partial,2),
+            'active_policy_trades':sum(t.get('entry_policy_version')==activity.POLICY_VERSION for t in h),
+            'active_policy_wins':sum(t.get('entry_policy_version')==activity.POLICY_VERSION and num(t.get('pnl_usd'))>0 for t in h)}
 
 def persist(status='online',error=None):
     STATE['status']=status; STATE['updated_at']=now_ms()
     STATE['stats']={k:stats(v) for k,v in STATE['books'].items()}
+    STATE['activity_config']={**activity.policy_config(),'stop_loss_net_pct':STOP_LOSS,
+                              'take_profit_net_pct':TAKE_PROFIT,'trade_limit_usd':TRADE_NOTIONAL}
     if error: STATE['error']=str(error)[:200]
     else: STATE.pop('error',None)
     atomic_write(STATE)
