@@ -6,6 +6,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 import requests
 import paper_execution_quotes as paper_quotes
+import engine_entry_policy as entry_policy
 
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
@@ -35,13 +36,13 @@ TRADE_NOTIONAL_USD = float(os.getenv('NEO_TRADE_NOTIONAL_USD', '200'))
 MAX_DAILY_LOSS_USD = float(os.getenv('NEO_MAX_DAILY_LOSS_USD', '100'))
 MIN_LIQUIDITY_USD = 10000.0
 
-# STRICT_RISK_V3: fewer trades, materially lower account risk, and only
-# executable setups whose quoted round-trip friction leaves enough edge.
-STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '92'))
-STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '82'))
-STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '50000'))
-STRICT_MAX_ENTRY_IMPACT_PCT = float(os.getenv('NEO_STRICT_MAX_ENTRY_IMPACT_PCT', '0.75'))
-STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '1.50'))
+# BALANCED_V4: observable, bounded paper-entry checks. The prior AND-gate
+# rejected every observed candidate. Stops, position size and daily cap stay fixed.
+STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '85'))
+STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '72'))
+STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '30000'))
+STRICT_MAX_ENTRY_IMPACT_PCT = float(os.getenv('NEO_STRICT_MAX_ENTRY_IMPACT_PCT', '2.0'))
+STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '2.75'))
 STRICT_MAX_WORST_CASE_COST_PCT = float(os.getenv('NEO_STRICT_MAX_WORST_CASE_COST_PCT', '4.50'))
 
 # Paper execution model. Signal/exit rules stay unchanged; only simulated fills and PnL
@@ -212,6 +213,7 @@ class State:
         self.demo_started_at = now_ms()
         self.demo_session_id = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
         self.trade_seq = 0
+        self.entry_diagnostics = {'status': 'starting', 'policy_version': entry_policy.POLICY_VERSION}
         self.risk_day_key = time.strftime('%Y-%m-%d', time.gmtime())
         self.risk_day_start_balance_usd = STARTING_BALANCE_USD
         self.load()
@@ -354,6 +356,7 @@ class State:
                 'history': self.history[:100],
                 'events': self.events[:30],
                 'source_status': self.source_status,
+                'entry_diagnostics': self.entry_diagnostics,
                 'live_tape': tape.get('events', [])[:100],
                 'live_tape_status': {k: tape.get(k) for k in ('status','tracked_pairs','updated_at','source','error')},
                 'strategy_lab': read_strategy_lab(),
@@ -380,7 +383,7 @@ class State:
                 'config': {
                     'scan_seconds': SCAN_SECONDS,
                     'position_scan_seconds': POSITION_SCAN_SECONDS,
-                    'entry_score': ENTRY_SCORE,
+                    'entry_score': STRICT_ENTRY_SCORE,
                     'max_positions': MAX_POSITIONS,
                     'stop_loss_pct': STOP_LOSS_PCT,
                     'stop_loss_basis': 'EXECUTABLE_NET_PNL',
@@ -388,12 +391,14 @@ class State:
                     'take_profit_pct': TAKE_PROFIT_PCT,
                     'trailing_pct': TRAILING_PCT,
                     'max_hold_minutes': MAX_HOLD_MINUTES,
-                    'min_liquidity_usd': MIN_LIQUIDITY_USD,
+                    'min_liquidity_usd': STRICT_MIN_LIQUIDITY_USD,
                     'trade_notional_usd': TRADE_NOTIONAL_USD,
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
                     'starting_balance_usd': STARTING_BALANCE_USD,
                     'execution_mode': 'JUPITER_QUOTE_V2',
-                    'execution_note': 'STRICT_RISK_V3: Jupiter expected-output accounting, selective entries, $200 sizing, and enforced $100 daily loss cap.',
+                    'execution_note': 'Тестова търговия по Jupiter котировки; филтри BALANCED_V4; без гаранция за реално изпълнение.',
+                    'entry_policy_version': entry_policy.POLICY_VERSION,
+                    'max_quoted_candidates_per_scan': entry_policy.MAX_QUOTED_CANDIDATES,
                     'strict_entry_score': STRICT_ENTRY_SCORE,
                     'strict_min_conviction': STRICT_MIN_CONVICTION,
                     'strict_min_liquidity_usd': STRICT_MIN_LIQUIDITY_USD,
@@ -1020,12 +1025,24 @@ class Monitor:
             self.stop_event.wait(POSITION_SCAN_SECONDS)
 
     def maybe_open(self, feed: list[dict[str, Any]]) -> None:
+        report = {'policy_version': entry_policy.POLICY_VERSION, 'checked_at': now_ms(),
+                  'candidates': len(feed), 'evaluated': 0, 'signal_passed': 0,
+                  'quoted': 0, 'opened': 0, 'rejections': {}, 'examples': []}
+        try:
+            self._maybe_open_checked(feed, report)
+        finally:
+            STATE.entry_diagnostics = entry_policy.finish(report)
+
+    def _maybe_open_checked(self, feed: list[dict[str, Any]], report: dict[str, Any]) -> None:
         STATE.refresh_risk_day()
         if STATE.risk_day_pnl() <= -MAX_DAILY_LOSS_USD:
+            entry_policy.record(report, ['daily_limit'])
             return
         if len(STATE.positions) >= MAX_POSITIONS:
+            entry_policy.record(report, ['position_open'])
             return
         if STATE.available_balance_usd() < min(TRADE_NOTIONAL_USD, 10.0):
+            entry_policy.record(report, ['balance'])
             return
         open_addresses = {p.get('address') for p in STATE.positions}
         now = now_ms()
@@ -1036,7 +1053,9 @@ class Monitor:
                 break
             address = coin.get('address')
             if not address or address in open_addresses or address in recent:
+                entry_policy.record(report, ['cooldown'], coin)
                 continue
+            report['evaluated'] += 1
             score = num(coin.get('score'))
             liquidity = num(coin.get('liquidityUsd'))
             age = num(coin.get('ageMinutes'), 999999)
@@ -1049,25 +1068,18 @@ class Monitor:
             liquidity_mc_ratio = liquidity / max(market_cap, 1.0)
 
             flow = STATE.live_flow(address, 60)
-            change_h1 = num((coin.get('priceChange') or {}).get('h1'))
-            order_flow_core = (
-                score >= STRICT_ENTRY_SCORE
-                and liquidity >= STRICT_MIN_LIQUIDITY_USD
-                and 0.5 <= change_m5 <= 12.0
-                and -10.0 <= change_h1 <= 150.0
-                and buy_sell_ratio >= 1.20
-                and liquidity_mc_ratio >= 0.08
-                and flow['trades'] >= 6
-                and flow['buy_sell_usd_ratio'] >= 1.60
-                and flow['unique_wallets'] >= 5
-                and flow['buyer_wallets'] >= 3
-                and flow['wallet_buy_sell_ratio'] >= 1.0
-                and flow['max_sell_usd'] < max(250.0, flow['buy_usd'] * 0.50)
-            )
-            if not order_flow_core:
-                continue
             context = self.market_context(coin)
-            if num(context.get('conviction')) < STRICT_MIN_CONVICTION:
+            rejected = entry_policy.signal_rejections(
+                coin, flow, context, min_score=STRICT_ENTRY_SCORE,
+                min_liquidity=STRICT_MIN_LIQUIDITY_USD,
+                min_conviction=STRICT_MIN_CONVICTION, now=now_ms(),
+            )
+            if rejected:
+                entry_policy.record(report, rejected, coin)
+                continue
+            report['signal_passed'] += 1
+            if report['quoted'] >= entry_policy.MAX_QUOTED_CANDIDATES:
+                entry_policy.record(report, ['quote_budget'], coin)
                 continue
             strategy_id = 'ORDER_FLOW_ADAPTIVE'
             learning = {'sample': 0, 'win_rate': 0, 'profit_factor': 0, 'recent_losses': 0, 'bonus': 0, 'blocked': False}
@@ -1082,13 +1094,16 @@ class Monitor:
             notional = min(TRADE_NOTIONAL_USD, max(0.0, available_before - pre_network_fee))
             if notional < 10:
                 continue
+            report['quoted'] += 1
             live_quote = paper_quotes.entry_quote(address, str(coin.get('pairAddress') or ''), notional)
             if not live_quote:
+                entry_policy.record(report, ['entry_quote'], coin)
                 continue
             entry_network_fee = NETWORK_FEE_SOL * sol_usd_from_coin(coin)
             expected_token_raw = int(live_quote.get('token_raw_expected') or 0)
             initial_exit = paper_quotes.exit_quote(address, expected_token_raw)
             if not initial_exit:
+                entry_policy.record(report, ['exit_quote'], coin)
                 continue
             immediate_exit_net = max(0.0, num(initial_exit.get('expected_usdc')) - entry_network_fee)
             worst_case_exit_net = max(0.0, num(initial_exit.get('floor_usdc')) - entry_network_fee)
@@ -1099,11 +1114,18 @@ class Monitor:
                 (worst_case_exit_net - notional - entry_network_fee) / max(notional, 1e-18)
             ) * 100.0
             impact_pct = num(live_quote.get('price_impact_pct'))
-            if impact_pct > STRICT_MAX_ENTRY_IMPACT_PCT:
-                continue
-            if immediate_roundtrip_pct < -STRICT_MAX_ROUNDTRIP_COST_PCT:
-                continue
-            if worst_case_roundtrip_pct < -STRICT_MAX_WORST_CASE_COST_PCT:
+            quote_rejected = entry_policy.quote_rejections(
+                live_quote, immediate_roundtrip_pct, worst_case_roundtrip_pct,
+                max_impact=STRICT_MAX_ENTRY_IMPACT_PCT,
+                max_cost=STRICT_MAX_ROUNDTRIP_COST_PCT,
+                max_conservative_cost=STRICT_MAX_WORST_CASE_COST_PCT, now=now_ms(),
+            )
+            if quote_rejected:
+                entry_policy.record(report, quote_rejected, coin, {
+                    'expected_roundtrip_pct': round(immediate_roundtrip_pct, 4),
+                    'conservative_roundtrip_pct': round(worst_case_roundtrip_pct, 4),
+                    'entry_impact_pct': round(impact_pct, 4),
+                })
                 continue
             stop_signal_trigger_pct = -max(
                 0.50,
@@ -1154,6 +1176,7 @@ class Monitor:
                 'jupiter_entry_price_impact_pct': impact_pct,
                 'jupiter_slippage_bps': int(live_quote.get('slippage_bps') or paper_quotes.SLIPPAGE_BPS),
                 'entry_roundtrip_pnl_pct': round(immediate_roundtrip_pct, 4),
+                'entry_policy_version': entry_policy.POLICY_VERSION,
                 'entry_worst_case_roundtrip_pnl_pct': round(worst_case_roundtrip_pct, 4),
                 'stop_signal_trigger_pct': round(stop_signal_trigger_pct, 4),
                 'hard_stop_net_pct': -STOP_LOSS_PCT,
@@ -1176,6 +1199,7 @@ class Monitor:
                 'coin_snapshot': coin,
             }
             STATE.positions.append(position)
+            report['opened'] += 1
             append_audit('ENTRY', position)
             open_addresses.add(address)
             STATE.event(
@@ -1240,7 +1264,7 @@ class Monitor:
                 self.update_positions(by_address)
                 self.maybe_open(feed)
                 setups = sum(1 for c in feed if c.get('posture') == 'SETUP')
-                STATE.message = f'Live market scan · {len(feed)} coins · {setups} SETUP candidates · {len(STATE.positions)} paper positions.'
+                STATE.message = STATE.entry_diagnostics.get('message') or f'Проверени {len(feed)} token-а; отворени позиции: {len(STATE.positions)}.'
                 STATE.save()
         except Exception as exc:
             with STATE.lock:

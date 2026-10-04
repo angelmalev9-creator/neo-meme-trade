@@ -1,12 +1,12 @@
 {
   "name": "NEO Meme Coins GOLD strategy",
-  "locked_at_utc": "2026-10-04T18:45:00Z",
+  "locked_at_utc": "2026-10-04T20:25:00.548254+00:00",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "448f3b28dfff4261ef677f1a76e47f5321fe1d1c949dc13f8b5b7832035f1abf",
+  "sha256": "c122a86e08c54d266ff99e81ee759f0dc8e58c9ffdfd8f90645211d4121dbbe5",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
-    "entry_score": 80,
+    "entry_score": 85,
     "max_positions": 1,
     "stop_loss_pct": 5,
     "take_profit_pct": 18,
@@ -15,9 +15,30 @@
     "starting_balance_usd": 1000,
     "trade_notional_usd": 200,
     "max_daily_loss_usd": 100,
-    "min_liquidity_usd": 10000
+    "min_liquidity_usd": 30000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "STRICT_RISK_V3 remains active. Paper trade size set to $200 and enforced daily loss cap set to $100 by explicit user request. Fresh paper session requested; strategy lab unchanged.",
-  "execution_mode": "JUPITER_QUOTE_V2_EXPECTED"
+  "integrity_note": "Explicit inactivity fix: observable BALANCED_V4 entry policy. No reset. Existing $200 notional, $100 daily loss cap, 5% net stop, exits and quote accounting unchanged. Strategy Lab untouched.",
+  "execution_mode": "JUPITER_QUOTE_V2_EXPECTED",
+  "entry_policy_version": "ORDER_FLOW_BALANCED_V4",
+  "entry_policy_limits": {
+    "min_score": 85,
+    "min_conviction": 72,
+    "min_liquidity_usd": 30000,
+    "min_m5_pct": -3,
+    "max_m5_pct": 25,
+    "min_h1_pct": -30,
+    "max_h1_pct": 150,
+    "min_flow_trades": 4,
+    "min_unique_wallets": 4,
+    "min_buyer_wallets": 3,
+    "min_buy_usd": 150,
+    "max_entry_impact_pct": 2.0,
+    "max_expected_roundtrip_cost_pct": 2.75,
+    "max_conservative_roundtrip_cost_pct": 4.5
+  },
+  "support_files_sha256": {
+    "backend/engine_entry_policy.py": "6d80e4eaa4ed78adda6198b8e54b9fbc46504017101e5bcb5f458cf14334dd17",
+    "backend/paper_execution_quotes.py": "93fd07ba67904f6cdbf5497cc7c0587f6240e49c4de2d2276c9b68178790958b"
+  }
 }
