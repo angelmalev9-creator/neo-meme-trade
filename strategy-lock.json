@@ -1,21 +1,22 @@
 {
   "name": "NEO Meme Coins GOLD strategy",
-  "locked_at_utc": "2026-10-04T11:03:10Z",
+  "locked_at_utc": "2026-10-04T16:25:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "1e06a83b9d2978ae5af7f6495e36a0d76231394a899d5d58046341dffe01bb67",
+  "sha256": "0426c059bd92f5e965e79c5b4d71d25e2e6a3d4bf06a5da6336528fe9aa5818c",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
-    "entry_score": 80.0,
+    "entry_score": 80,
     "max_positions": 1,
-    "stop_loss_pct": 5.0,
-    "take_profit_pct": 18.0,
-    "trailing_pct": 4.0,
+    "stop_loss_pct": 5,
+    "take_profit_pct": 18,
+    "trailing_pct": 4,
     "max_hold_minutes": 7,
-    "starting_balance_usd": 1000.0,
-    "trade_notional_usd": 200.0,
-    "max_daily_loss_usd": 30.0,
-    "min_liquidity_usd": 10000.0
+    "starting_balance_usd": 1000,
+    "trade_notional_usd": 200,
+    "max_daily_loss_usd": 30,
+    "min_liquidity_usd": 10000
   },
-  "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy."
+  "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
+  "integrity_note": "Open paper positions are pinned to their exact entry pairAddress; strategy rules are unchanged."
 }

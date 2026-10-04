@@ -392,6 +392,21 @@ def best_pairs(pairs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return best
 
 
+def exact_position_pair(position: dict[str, Any], pairs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    address = str(position.get('address') or '').lower()
+    pair_address = str(position.get('pairAddress') or '').lower()
+    if not address or not pair_address:
+        return None
+    for pair in pairs:
+        if pair.get('chainId') != 'solana':
+            continue
+        base_address = str((pair.get('baseToken') or {}).get('address') or '').lower()
+        current_pair = str(pair.get('pairAddress') or '').lower()
+        if base_address == address and current_pair == pair_address:
+            return pair
+    return None
+
+
 def score_pair(pair: dict[str, Any], meta: dict[str, Any]):
     liq = num((pair.get('liquidity') or {}).get('usd'))
     volume = pair.get('volume') or {}
@@ -664,6 +679,15 @@ class Monitor:
             if not coin:
                 next_positions.append(position)
                 continue
+            expected_pair = str(position.get('pairAddress') or '').lower()
+            observed_pair = str(coin.get('pairAddress') or '').lower()
+            if expected_pair and observed_pair != expected_pair:
+                STATE.event(
+                    f"PRICE SOURCE BLOCKED #{position.get('trade_no')} {position.get('symbol')} "
+                    f"expected pair {position.get('pairAddress')} but received {coin.get('pairAddress') or 'none'}"
+                )
+                next_positions.append(position)
+                continue
             price, entry = num(coin.get('priceUsd')), num(position.get('entry_price'))
             if price <= 0 or entry <= 0:
                 next_positions.append(position)
@@ -754,11 +778,10 @@ class Monitor:
             if not addresses:
                 return
             pairs = fetch_pairs(addresses)
-            chosen = best_pairs(pairs)
             by_address = {}
             for position in positions:
                 address = position.get('address')
-                pair = chosen.get(address)
+                pair = exact_position_pair(position, pairs)
                 if not pair:
                     continue
                 snap = position.get('coin_snapshot') or {}
@@ -893,6 +916,24 @@ class Monitor:
             feed.sort(key=lambda c: (num(c.get('score')), num((c.get('volume') or {}).get('h1'))), reverse=True)
             feed = feed[:MAX_FEED]
             by_address = {c['address']: c for c in feed}
+            for position in STATE.positions:
+                address = position.get('address')
+                if not address:
+                    continue
+                pair = exact_position_pair(position, pairs)
+                if not pair:
+                    by_address.pop(address, None)
+                    continue
+                snap = position.get('coin_snapshot') or {}
+                meta = {
+                    'sources': ['open-position-pinned-pair'],
+                    'icon': snap.get('imageUrl') or '',
+                    'header': '',
+                    'description': '',
+                    'links': [],
+                    'boost_amount': 0,
+                }
+                by_address[address] = make_coin(address, pair, meta)
             with STATE.lock:
                 STATE.feed = feed
                 STATE.last_scan_at = now_ms()
