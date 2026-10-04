@@ -21,6 +21,7 @@ MAX_FEED = 70
 ENTRY_SCORE = 80.0
 MAX_POSITIONS = 1
 STOP_LOSS_PCT = 5.0
+STOP_EXECUTION_BUFFER_PCT = 0.5
 TAKE_PROFIT_PCT = 18.0
 TRAILING_PCT = 4.0
 MAX_HOLD_MINUTES = 7
@@ -348,6 +349,8 @@ class State:
                     'entry_score': ENTRY_SCORE,
                     'max_positions': MAX_POSITIONS,
                     'stop_loss_pct': STOP_LOSS_PCT,
+                    'stop_loss_basis': 'EXECUTABLE_NET_PNL',
+                    'stop_execution_buffer_pct': STOP_EXECUTION_BUFFER_PCT,
                     'take_profit_pct': TAKE_PROFIT_PCT,
                     'trailing_pct': TRAILING_PCT,
                     'max_hold_minutes': MAX_HOLD_MINUTES,
@@ -848,7 +851,8 @@ class Monitor:
 
             # The hard stop is always respected. Everything else can only exit earlier
             # or let a strong winner run longer while conviction remains high.
-            if pnl_pct <= -STOP_LOSS_PCT:
+            stop_signal_trigger_pct = num(position.get('stop_signal_trigger_pct'), -STOP_LOSS_PCT)
+            if pnl_pct <= -STOP_LOSS_PCT or signal_pnl_pct <= stop_signal_trigger_pct:
                 exit_reason = 'STOP_LOSS'
             elif conviction < 35 and signal_pnl_pct < 0:
                 exit_reason = 'CONVICTION_EXIT'
@@ -880,7 +884,7 @@ class Monitor:
                 exit_quote = fresh_exit_quote
                 pnl_usd = exit_quote['net_proceeds_usd'] - notional - entry_network_fee
                 pnl_pct = (pnl_usd / max(notional, 1e-18)) * 100.0
-                if exit_reason == 'STOP_LOSS' and pnl_pct > -STOP_LOSS_PCT:
+                if exit_reason == 'STOP_LOSS' and pnl_pct > -(STOP_LOSS_PCT - STOP_EXECUTION_BUFFER_PCT):
                     exit_reason = None
 
             updated = {
@@ -1030,9 +1034,23 @@ class Monitor:
             live_quote = paper_quotes.entry_quote(address, str(coin.get('pairAddress') or ''), notional)
             if not live_quote:
                 continue
+            entry_network_fee = NETWORK_FEE_SOL * sol_usd_from_coin(coin)
+            initial_exit = paper_quotes.exit_quote(address, int(live_quote.get('token_raw_floor') or 0))
+            if not initial_exit:
+                continue
+            immediate_exit_net = max(0.0, num(initial_exit.get('floor_usdc')) - entry_network_fee)
+            immediate_roundtrip_pct = (
+                (immediate_exit_net - notional - entry_network_fee) / max(notional, 1e-18)
+            ) * 100.0
+            if immediate_roundtrip_pct <= -(STOP_LOSS_PCT - STOP_EXECUTION_BUFFER_PCT):
+                continue
+            stop_signal_trigger_pct = -max(
+                0.25,
+                STOP_LOSS_PCT - abs(min(0.0, immediate_roundtrip_pct)) - STOP_EXECUTION_BUFFER_PCT,
+            )
             impact_pct = num(live_quote.get('price_impact_pct'))
             quote_slippage_pct = num(live_quote.get('slippage_bps')) / 100.0
-            quote_network_fee = NETWORK_FEE_SOL * sol_usd_from_coin(coin)
+            quote_network_fee = entry_network_fee
             quote_fill_price = price * (1.0 + impact_pct / 100.0 + quote_slippage_pct / 100.0)
             quantity = notional / max(quote_fill_price, 1e-18)
             entry_quote = {
@@ -1075,6 +1093,9 @@ class Monitor:
                 'jupiter_entry_quote_at': int(live_quote.get('quoted_at') or now_ms()),
                 'jupiter_entry_price_impact_pct': impact_pct,
                 'jupiter_slippage_bps': int(live_quote.get('slippage_bps') or paper_quotes.SLIPPAGE_BPS),
+                'entry_roundtrip_pnl_pct': round(immediate_roundtrip_pct, 4),
+                'stop_signal_trigger_pct': round(stop_signal_trigger_pct, 4),
+                'hard_stop_net_pct': -STOP_LOSS_PCT,
                 'entry_dex_fee_bps': round(entry_quote['dex_fee_bps'], 4),
                 'entry_dex_fee_usd': round(entry_quote['dex_fee_usd'], 8),
                 'entry_network_fee_usd': round(entry_quote['network_fee_usd'], 8),
