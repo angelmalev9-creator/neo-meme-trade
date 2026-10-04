@@ -266,11 +266,7 @@ def update_positions(flows):
         reason=None
 
         if book.get('id')=='SCALPER':
-            if pct<=-3.0:
-                reason='STOP_LOSS_3'
-            elif pct>=10.0:
-                reason='TAKE_PROFIT_10'
-            elif peak>=entry*1.06 and price<=peak*(1-3.0/100):
+            if peak>=entry*1.06 and price<=peak*(1-3.0/100):
                 reason='TRAILING_STOP_3'
             elif hold>=7.0:
                 reason='MAX_HOLD'
@@ -306,6 +302,11 @@ def update_positions(flows):
         open_pnl=live_quote['net_proceeds_usd']-remaining_basis
         total_live_pnl=num(pos.get('partial_realized_pnl'))+open_pnl
         total_live_pct=total_live_pnl/max(num(pos.get('notional_usd')),1e-18)*100
+        if book.get('id')=='SCALPER':
+            if total_live_pct<=-3.0:
+                reason='STOP_LOSS_3_NET'
+            elif total_live_pct>=10.0:
+                reason='TAKE_PROFIT_10_NET'
         pos.update({'current_price':price,'peak_price':peak,'execution_exit_price':round(live_quote['fill_price'],12),
                     'pnl_pct':round(total_live_pct,3),'open_pnl_usd':round(open_pnl,4),
                     'estimated_exit_fee_usd':round(live_quote['dex_fee_usd']+live_quote['network_fee_usd'],6),
