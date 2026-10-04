@@ -13,10 +13,10 @@ STRATEGY_START_BALANCES={'SCALPER':float(os.getenv('NEO_LAB_SCALPER_START_BALANC
 TRADE_NOTIONAL=float(os.getenv('NEO_LAB_TRADE_NOTIONAL','150'))
 POLL_SECONDS=float(os.getenv('NEO_LAB_POLL_SECONDS','2'))
 ENTRY_REFRESH_SECONDS=float(os.getenv('NEO_LAB_ENTRY_REFRESH_SECONDS','2'))
-STOP_LOSS=4.0
-TAKE_PROFIT=18.0
+STOP_LOSS=3.0
+TAKE_PROFIT=10.0
 TRAILING=4.0
-MAX_HOLD_MIN=7.0
+MAX_HOLD_MIN=60.0
 REENTRY_COOLDOWN_MIN=20.0
 
 # Realistic paper execution costs for Strategy Lab. These are applied equally to
@@ -265,48 +265,23 @@ def update_positions(flows):
         f=flows.get(pos['address'],{})
         reason=None
 
-        if book.get('id')=='SCALPER':
-            if peak>=entry*1.06 and price<=peak*(1-3.0/100):
-                reason='TRAILING_STOP_3'
-            elif hold>=7.0:
-                reason='MAX_HOLD'
-        elif book.get('id')=='FLOW_MOMENTUM_SCALE_OUT':
-            # Same FLOW_MOMENTUM entry logic; only exit management differs.
-            # Lock 80% progressively and let the final 20% run.
-            stages=((5.0,.20,'LOCK_5'),(10.0,.20,'LOCK_10'),(18.0,.20,'LOCK_18'),(30.0,.20,'LOCK_30'))
-            completed={x.get('stage') for x in (pos.get('partial_exits') or [])}
-            for threshold,fraction,label in stages:
-                if pct>=threshold and label not in completed:
-                    realize_partial(book,pos,coin,fraction,label)
-                    completed.add(label)
-
-            if pct<=-STOP_LOSS:
-                reason='STOP_LOSS'
-            elif f.get('trades',0)>=4 and f.get('sells',0)>=3 and num(f.get('sell_usd'))>=max(250,num(f.get('buy_usd'))*2.5) and pct<3:
-                reason='ORDERFLOW_EXIT'
-            elif pos.get('partial_exits') and price<=peak*(1-5.0/100):
-                reason='SCALE_OUT_PEAK_TRAIL'
-            elif hold>=MAX_HOLD_MIN:
-                reason='MAX_HOLD'
-        else:
-            if f.get('trades',0)>=4 and f.get('sells',0)>=3 and num(f.get('sell_usd'))>=max(250,num(f.get('buy_usd'))*2.5) and pct<3: reason='ORDERFLOW_EXIT'
-            elif pct<=-STOP_LOSS: reason='STOP_LOSS'
-            elif pct>=TAKE_PROFIT: reason='TAKE_PROFIT'
-            elif peak>=entry*1.10 and pct<4: reason='PROFIT_PROTECT'
-            elif peak>=entry*1.06 and price<=peak*(1-TRAILING/100): reason='TRAILING_STOP'
-            elif hold>=MAX_HOLD_MIN: reason='MAX_HOLD'
-
         remaining_qty=num(pos.get('quantity'))
         live_quote=exit_execution(coin,remaining_qty)
         remaining_basis=num(pos.get('remaining_cost_basis_usd'),num(pos.get('notional_usd'))+num(pos.get('entry_network_fee_usd')))
         open_pnl=live_quote['net_proceeds_usd']-remaining_basis
         total_live_pnl=num(pos.get('partial_realized_pnl'))+open_pnl
         total_live_pct=total_live_pnl/max(num(pos.get('notional_usd')),1e-18)*100
-        if book.get('id')=='SCALPER':
-            if total_live_pct<=-3.0:
-                reason='STOP_LOSS_3_NET'
-            elif total_live_pct>=10.0:
-                reason='TAKE_PROFIT_10_NET'
+
+        # Unified 3:10 NET exit framework across all 33 strategies.
+        # Entry logic stays strategy-specific; exits are identical and include
+        # DEX fee, price impact, slippage/latency and network cost.
+        if total_live_pct<=-STOP_LOSS:
+            reason='STOP_LOSS_3_NET'
+        elif total_live_pct>=TAKE_PROFIT:
+            reason='TAKE_PROFIT_10_NET'
+        elif hold>=MAX_HOLD_MIN:
+            reason='ABSOLUTE_MAX_HOLD_60'
+
         pos.update({'current_price':price,'peak_price':peak,'execution_exit_price':round(live_quote['fill_price'],12),
                     'pnl_pct':round(total_live_pct,3),'open_pnl_usd':round(open_pnl,4),
                     'estimated_exit_fee_usd':round(live_quote['dex_fee_usd']+live_quote['network_fee_usd'],6),
