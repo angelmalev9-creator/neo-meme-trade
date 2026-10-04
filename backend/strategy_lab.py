@@ -78,6 +78,7 @@ STRATEGIES=[
  {'id':'VOLUME_SURGE','name':'Volume Surge','rule':lambda f: f['score']>=88 and f['liq']>=15000 and 2<=f['m5']<=28 and f['vol_liq']>=.35 and f['bs']>=1.1 and f['lmc']>=.08 and 3<=f['age']<=360},
  {'id':'REVERSAL','name':'Reversal Catch','rule':lambda f: f['score']>=85 and f['liq']>=20000 and -10<=f['m5']<=3 and f['h1']>-25 and f['bs']>=1.15 and f['lmc']>=.10 and 10<=f['age']<=480},
  {'id':'FLOW_MOMENTUM','name':'Flow Momentum','rule':lambda f: f['score']>=85 and f['liq']>=15000 and 0<=f['m5']<=30 and f['flow']['trades']>=3 and f['flow']['ratio']>=1.8 and f['flow']['buy_usd']>=150},
+ {'id':'FLOW_MOMENTUM_SCALE_OUT','name':'Flow Momentum Scale-Out','rule':lambda f: f['score']>=85 and f['liq']>=15000 and 0<=f['m5']<=30 and f['flow']['trades']>=3 and f['flow']['ratio']>=1.8 and f['flow']['buy_usd']>=150},
 ]
 def empty_book(s):
     return {'id':s['id'],'name':s['name'],'starting_balance':START_BALANCE,'balance':START_BALANCE,
@@ -111,11 +112,32 @@ def dex_prices(addresses):
 
 def close_position(book,pos,price,reason):
     entry=num(pos.get('entry_price')); qty=num(pos.get('quantity'))
-    pnl=qty*(price-entry); pct=(price-entry)/max(entry,1e-18)*100
-    book['balance']=round(num(book['balance'])+pnl,8)
+    final_pnl=qty*(price-entry)
+    partial_pnl=num(pos.get('partial_realized_pnl'))
+    total_pnl=partial_pnl+final_pnl
+    original_notional=num(pos.get('notional_usd'))
+    pct=total_pnl/max(original_notional,1e-18)*100
+    book['balance']=round(num(book['balance'])+final_pnl,8)
     trade={**pos,'exit_price':price,'closed_at':now_ms(),'exit_reason':reason,
-           'pnl_usd':round(pnl,4),'pnl_pct':round(pct,3),'balance_after':round(book['balance'],4)}
+           'final_leg_pnl_usd':round(final_pnl,4),'pnl_usd':round(total_pnl,4),
+           'pnl_pct':round(pct,3),'balance_after':round(book['balance'],4)}
     book['history'].insert(0,trade); book['history']=book['history'][:300]; book['position']=None
+
+def realize_partial(book,pos,price,fraction,label):
+    entry=num(pos.get('entry_price'))
+    original_qty=num(pos.get('original_quantity'),num(pos.get('quantity')))
+    remaining_qty=num(pos.get('quantity'))
+    sell_qty=min(remaining_qty,original_qty*fraction)
+    if sell_qty<=0: return 0.0
+    pnl=sell_qty*(price-entry)
+    book['balance']=round(num(book['balance'])+pnl,8)
+    pos['quantity']=max(0.0,remaining_qty-sell_qty)
+    pos['partial_realized_pnl']=round(num(pos.get('partial_realized_pnl'))+pnl,8)
+    exits=pos.setdefault('partial_exits',[])
+    exits.append({'stage':label,'ts':now_ms(),'price':price,'quantity':sell_qty,
+                  'fraction_of_original':fraction,'pnl_usd':round(pnl,4),
+                  'move_pct':round((price-entry)/max(entry,1e-18)*100,3)})
+    return pnl
 
 def update_positions(flows):
     addresses=[b['position']['address'] for b in STATE['books'].values() if b.get('position')]
@@ -129,13 +151,41 @@ def update_positions(flows):
         pct=(price-entry)/entry*100; hold=(now_ms()-int(pos['opened_at']))/60000
         f=flows.get(pos['address'],{})
         reason=None
-        if f.get('trades',0)>=4 and f.get('sells',0)>=3 and num(f.get('sell_usd'))>=max(250,num(f.get('buy_usd'))*2.5) and pct<3: reason='ORDERFLOW_EXIT'
-        elif pct<=-STOP_LOSS: reason='STOP_LOSS'
-        elif pct>=TAKE_PROFIT: reason='TAKE_PROFIT'
-        elif peak>=entry*1.10 and pct<4: reason='PROFIT_PROTECT'
-        elif peak>=entry*1.06 and price<=peak*(1-TRAILING/100): reason='TRAILING_STOP'
-        elif hold>=MAX_HOLD_MIN: reason='MAX_HOLD'
-        pos.update({'current_price':price,'peak_price':peak,'pnl_pct':round(pct,3),'updated_at':now_ms()})
+
+        if book.get('id')=='FLOW_MOMENTUM_SCALE_OUT':
+            # Same FLOW_MOMENTUM entry logic; only exit management differs.
+            # Lock 80% progressively and let the final 20% run.
+            stages=((5.0,.20,'LOCK_5'),(10.0,.20,'LOCK_10'),(18.0,.20,'LOCK_18'),(30.0,.20,'LOCK_30'))
+            completed={x.get('stage') for x in (pos.get('partial_exits') or [])}
+            for threshold,fraction,label in stages:
+                if pct>=threshold and label not in completed:
+                    realize_partial(book,pos,price,fraction,label)
+                    completed.add(label)
+
+            if pct<=-STOP_LOSS:
+                reason='STOP_LOSS'
+            elif f.get('trades',0)>=4 and f.get('sells',0)>=3 and num(f.get('sell_usd'))>=max(250,num(f.get('buy_usd'))*2.5) and pct<3:
+                reason='ORDERFLOW_EXIT'
+            elif pos.get('partial_exits') and price<=peak*(1-5.0/100):
+                reason='SCALE_OUT_PEAK_TRAIL'
+            elif hold>=MAX_HOLD_MIN:
+                reason='MAX_HOLD'
+        else:
+            if f.get('trades',0)>=4 and f.get('sells',0)>=3 and num(f.get('sell_usd'))>=max(250,num(f.get('buy_usd'))*2.5) and pct<3: reason='ORDERFLOW_EXIT'
+            elif pct<=-STOP_LOSS: reason='STOP_LOSS'
+            elif pct>=TAKE_PROFIT: reason='TAKE_PROFIT'
+            elif peak>=entry*1.10 and pct<4: reason='PROFIT_PROTECT'
+            elif peak>=entry*1.06 and price<=peak*(1-TRAILING/100): reason='TRAILING_STOP'
+            elif hold>=MAX_HOLD_MIN: reason='MAX_HOLD'
+
+        remaining_qty=num(pos.get('quantity'))
+        open_pnl=remaining_qty*(price-entry)
+        total_live_pnl=num(pos.get('partial_realized_pnl'))+open_pnl
+        total_live_pct=total_live_pnl/max(num(pos.get('notional_usd')),1e-18)*100
+        pos.update({'current_price':price,'peak_price':peak,'pnl_pct':round(total_live_pct,3),
+                    'partial_realized_pnl':round(num(pos.get('partial_realized_pnl')),4),
+                    'remaining_fraction':round(remaining_qty/max(num(pos.get('original_quantity'),remaining_qty),1e-18),4),
+                    'updated_at':now_ms()})
         if reason: close_position(book,pos,price,reason)
 def maybe_open(feed,flows):
     now=now_ms()
@@ -155,10 +205,11 @@ def maybe_open(feed,flows):
             if price<=0: continue
             notional=min(TRADE_NOTIONAL,num(book['balance']))
             book['trade_seq']=int(book.get('trade_seq',0))+1
+            qty=notional/price
             pos={'trade_no':book['trade_seq'],'strategy_id':s['id'],'symbol':c.get('symbol'),'name':c.get('name'),
                  'address':a,'pairAddress':c.get('pairAddress'),'entry_price':price,'current_price':price,'peak_price':price,
-                 'quantity':notional/price,'notional_usd':notional,'opened_at':now,'updated_at':now,
-                 'score':c.get('score'),'entry_features':f}
+                 'quantity':qty,'original_quantity':qty,'notional_usd':notional,'opened_at':now,'updated_at':now,
+                 'score':c.get('score'),'entry_features':f,'partial_realized_pnl':0.0,'partial_exits':[]}
             book['position']=pos
             book.setdefault('last_entry_by_address',{})[a]=now
             break
@@ -170,9 +221,12 @@ def stats(book):
     p=book.get('position')
     if p: unreal=num(p.get('quantity'))*(num(p.get('current_price'))-num(p.get('entry_price')))
     equity=num(book.get('balance'))+unreal
+    partial_count=sum(len(t.get('partial_exits') or []) for t in h)+len((p or {}).get('partial_exits') or [])
+    locked_partial=sum(num(t.get('partial_realized_pnl')) for t in h)+num((p or {}).get('partial_realized_pnl'))
     return {'trades':len(h),'wins':len(wins),'losses':len(h)-len(wins),'win_rate':round(len(wins)/len(h)*100,1) if h else 0,
             'profit_factor':round(gp/gl,2) if gl>0 else (99.0 if gp>0 else 0.0),'realized_pnl':round(num(book.get('balance'))-START_BALANCE,2),
-            'equity':round(equity,2),'return_pct':round((equity-START_BALANCE)/START_BALANCE*100,2),'open':bool(p)}
+            'equity':round(equity,2),'return_pct':round((equity-START_BALANCE)/START_BALANCE*100,2),'open':bool(p),
+            'partial_exits':partial_count,'partial_locked_pnl':round(locked_partial,2)}
 
 def persist(status='online',error=None):
     STATE['status']=status; STATE['updated_at']=now_ms()
