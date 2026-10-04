@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 import requests
+import paper_execution_quotes as paper_quotes
 
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
@@ -354,7 +355,9 @@ class State:
                     'trade_notional_usd': TRADE_NOTIONAL_USD,
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
                     'starting_balance_usd': STARTING_BALANCE_USD,
-                    'execution_mode': 'REALISTIC_V1',
+                    'execution_mode': 'JUPITER_QUOTE_V2',
+                    'execution_note': 'New entries use live read-only Jupiter quotes; existing V1 trades remain unchanged.',
+                    'jupiter_slippage_bps': paper_quotes.SLIPPAGE_BPS,
                     'generic_dex_fee_bps': GENERIC_DEX_FEE_BPS,
                     'base_slippage_bps': BASE_SLIPPAGE_BPS,
                     'latency_buffer_bps': LATENCY_BUFFER_BPS,
@@ -816,7 +819,16 @@ class Monitor:
             peak = max(num(position.get('peak_price'), entry), price)
             signal_pnl_pct = round(((price - entry) / entry) * 100, 6)
             quantity = num(position.get('quantity')) or (num(position.get('notional_usd'), TRADE_NOTIONAL_USD) / entry)
-            exit_quote = exit_execution(coin, quantity)
+            is_live_quote_trade = position.get('execution_mode') == 'JUPITER_QUOTE_V2'
+            if is_live_quote_trade:
+                exit_quote = paper_quotes.position_mark(
+                    position, coin, NETWORK_FEE_SOL * sol_usd_from_coin(coin)
+                )
+                if exit_quote is None:
+                    next_positions.append(position)
+                    continue
+            else:
+                exit_quote = exit_execution(coin, quantity)
             entry_network_fee = num(position.get('entry_network_fee_usd'))
             notional = num(position.get('notional_usd'), TRADE_NOTIONAL_USD)
             pnl_usd = exit_quote['net_proceeds_usd'] - notional - entry_network_fee
@@ -858,6 +870,17 @@ class Monitor:
             elif hold_min >= 120:
                 exit_reason = 'ABSOLUTE_MAX_HOLD'
 
+            if exit_reason and is_live_quote_trade:
+                fresh_exit_quote = paper_quotes.position_mark(
+                    position, coin, NETWORK_FEE_SOL * sol_usd_from_coin(coin), force=True
+                )
+                if fresh_exit_quote is None:
+                    next_positions.append(position)
+                    continue
+                exit_quote = fresh_exit_quote
+                pnl_usd = exit_quote['net_proceeds_usd'] - notional - entry_network_fee
+                pnl_pct = (pnl_usd / max(notional, 1e-18)) * 100.0
+
             updated = {
                 **position, 'current_price': price, 'peak_price': peak,
                 'signal_pnl_pct': round(signal_pnl_pct, 3),
@@ -867,6 +890,7 @@ class Monitor:
                 'estimated_exit_network_fee_usd': round(exit_quote['network_fee_usd'], 6),
                 'estimated_exit_price_impact_pct': round(exit_quote['impact_pct'], 4),
                 'estimated_exit_slippage_pct': round(exit_quote['slippage_pct'] + exit_quote['latency_pct'], 4),
+                'execution_quote_source': exit_quote.get('execution_source', 'MODEL_V1'),
                 'conviction': conviction, 'hold_mode': context.get('mode'),
                 'adaptive_target_pct': target_pct, 'adaptive_max_hold_minutes': max_hold,
                 'adaptive_trail_arm_pct': trail_arm_pct, 'adaptive_trail_pct': trail_pct,
@@ -888,6 +912,9 @@ class Monitor:
                     'exit_network_fee_usd': round(exit_quote['network_fee_usd'], 8),
                     'exit_price_impact_pct': round(exit_quote['impact_pct'], 6),
                     'exit_slippage_pct': round(exit_quote['slippage_pct'] + exit_quote['latency_pct'], 6),
+                    'execution_quote_source': exit_quote.get('execution_source', 'MODEL_V1'),
+                    'jupiter_exit_route': exit_quote.get('route') or [],
+                    'jupiter_exit_quote_at': exit_quote.get('quoted_at'),
                     'total_fees_usd': round(
                         num(position.get('entry_dex_fee_usd')) + entry_network_fee +
                         exit_quote['dex_fee_usd'] + exit_quote['network_fee_usd'], 8
@@ -998,8 +1025,25 @@ class Monitor:
             notional = min(TRADE_NOTIONAL_USD, max(0.0, available_before - pre_network_fee))
             if notional < 10:
                 continue
-            entry_quote = entry_execution(coin, notional)
-            quantity = entry_quote['quantity']
+            live_quote = paper_quotes.entry_quote(address, str(coin.get('pairAddress') or ''), notional)
+            if not live_quote:
+                continue
+            impact_pct = num(live_quote.get('price_impact_pct'))
+            quote_slippage_pct = num(live_quote.get('slippage_bps')) / 100.0
+            quote_network_fee = NETWORK_FEE_SOL * sol_usd_from_coin(coin)
+            quote_fill_price = price * (1.0 + impact_pct / 100.0 + quote_slippage_pct / 100.0)
+            quantity = notional / max(quote_fill_price, 1e-18)
+            entry_quote = {
+                'fill_price': quote_fill_price,
+                'quantity': quantity,
+                'capital_committed_usd': notional + quote_network_fee,
+                'dex_fee_bps': 0.0,
+                'dex_fee_usd': 0.0,
+                'network_fee_usd': quote_network_fee,
+                'impact_pct': impact_pct,
+                'slippage_pct': quote_slippage_pct,
+                'latency_pct': 0.0,
+            }
             if quantity <= 0:
                 continue
             STATE.trade_seq += 1
@@ -1021,7 +1065,14 @@ class Monitor:
                 'quantity': quantity, 'score': coin.get('score'),
                 'current_score': coin.get('score'), 'opened_at': now_ms(),
                 'updated_at': now_ms(), 'signal_pnl_pct': 0, 'pnl_pct': 0, 'pnl_usd': 0,
-                'execution_mode': 'REALISTIC_V1',
+                'execution_mode': 'JUPITER_QUOTE_V2',
+                'jupiter_usdc_in_raw': int(live_quote.get('input_usdc_raw') or 0),
+                'jupiter_token_raw_expected': int(live_quote.get('token_raw_expected') or 0),
+                'jupiter_token_raw_amount': int(live_quote.get('token_raw_floor') or 0),
+                'jupiter_entry_route': live_quote.get('route') or [],
+                'jupiter_entry_quote_at': int(live_quote.get('quoted_at') or now_ms()),
+                'jupiter_entry_price_impact_pct': impact_pct,
+                'jupiter_slippage_bps': int(live_quote.get('slippage_bps') or paper_quotes.SLIPPAGE_BPS),
                 'entry_dex_fee_bps': round(entry_quote['dex_fee_bps'], 4),
                 'entry_dex_fee_usd': round(entry_quote['dex_fee_usd'], 8),
                 'entry_network_fee_usd': round(entry_quote['network_fee_usd'], 8),

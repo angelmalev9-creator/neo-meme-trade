@@ -1,9 +1,9 @@
 {
   "name": "NEO Meme Coins GOLD strategy",
-  "locked_at_utc": "2026-10-04T17:23:00Z",
+  "locked_at_utc": "2026-10-04T17:50:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "5680becfeddbe531eb55ac2a2b8c2a309680e697231f2e295912bddc1ddfb52b",
+  "sha256": "9f5d587c2fbaeaa14e6b6f690c4fe2862a145066fab42f72ee558ed456c301fc",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 80,
@@ -18,6 +18,6 @@
     "min_liquidity_usd": 10000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "Exact pair pinning, realistic execution, and strict Solana address validation before DexScreener requests. Trading rules unchanged.",
-  "execution_mode": "REALISTIC_V1"
+  "integrity_note": "No-reset paper upgrade: new entries and exits use read-only Jupiter executable quotes; existing history and V1 positions remain untouched; signal rules unchanged.",
+  "execution_mode": "JUPITER_QUOTE_V2"
 }
