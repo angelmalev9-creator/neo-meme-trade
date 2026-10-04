@@ -132,7 +132,14 @@ export default function App() {
     let cancelled = false;
     const loadToken = async () => {
       try {
-        const response = await fetch(`${API}/token?address=${encodeURIComponent(selectedAddress)}`, { cache: 'no-store' });
+        if (!supabase) return;
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token;
+        if (!token) return;
+        const response = await fetch(`${API}/user/token?address=${encodeURIComponent(selectedAddress)}`, {
+          cache: 'no-store',
+          headers: { Authorization: `Bearer ${token}` },
+        });
         if (!response.ok) return;
         const next = await response.json() as TokenDetail;
         if (!cancelled) setDetail(next);
@@ -354,7 +361,7 @@ export default function App() {
         <div className="overflow-x-auto"><table className="w-full min-w-[1450px] text-left"><thead><tr className="border-b border-white/[0.06] text-[8px] font-black uppercase tracking-[0.14em] text-slate-700"><th className="px-4 py-3"># / Coin</th><th className="px-4 py-3">Вход време</th><th className="px-4 py-3">Entry</th><th className="px-4 py-3">Изход време</th><th className="px-4 py-3">Exit</th><th className="px-4 py-3">Размер</th><th className="px-4 py-3">PnL</th><th className="px-4 py-3">Balance</th><th className="px-4 py-3">Score</th><th className="px-4 py-3">Изход</th><th className="px-4 py-3">Hold</th><th className="px-4 py-3">Проверка</th></tr></thead><tbody>{(state?.history || []).length === 0 ? <tr><td colSpan={12} className="px-4 py-8 text-center text-xs text-slate-600">Историята ще се появи след първите автоматично затворени demo позиции.</td></tr> : state?.history.slice(0, 100).map(trade => <tr key={trade.id} onClick={() => setSelectedAddress(trade.address)} className="cursor-pointer border-b border-white/[0.04] text-xs hover:bg-white/[0.02]"><td className="px-4 py-3"><div className="font-black text-white">#{trade.trade_no ?? '—'} · ${trade.symbol}</div><div className="mt-1 text-[9px] text-slate-700">{shortAddress(trade.address)}</div></td><td className="px-4 py-3 text-[10px] text-slate-500">{fullTimeLabel(trade.opened_at)}</td><td className="px-4 py-3 text-slate-300">{fmtPrice(trade.entry_price)}</td><td className="px-4 py-3 text-[10px] text-slate-500">{fullTimeLabel(trade.closed_at || trade.updated_at)}</td><td className="px-4 py-3 text-slate-300">{fmtPrice(trade.exit_price || trade.current_price)}</td><td className="px-4 py-3 text-slate-400">${trade.notional_usd.toFixed(2)}</td><td className={`px-4 py-3 font-black ${(trade.pnl_pct || 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}><div>{(trade.pnl_usd || 0) >= 0 ? '+' : ''}${(trade.pnl_usd || 0).toFixed(2)}</div><div className="mt-1 text-[9px]">{(trade.pnl_pct || 0) >= 0 ? '+' : ''}{(trade.pnl_pct || 0).toFixed(2)}%</div></td><td className="px-4 py-3"><div className="text-slate-500">${(trade.balance_before ?? 0).toFixed(2)}</div><div className="mt-1 font-black text-white">→ ${(trade.balance_after ?? 0).toFixed(2)}</div></td><td className="px-4 py-3 text-slate-400">{trade.score?.toFixed(0)}</td><td className="px-4 py-3 text-slate-400">{trade.exit_reason || '—'}</td><td className="px-4 py-3 text-slate-500">{durationLabel(trade.opened_at, trade.closed_at)}</td><td className="px-4 py-3">{trade.dex_url ? <a onClick={e => e.stopPropagation()} href={trade.dex_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1.5 text-[9px] font-black text-slate-400 hover:text-white">CHART <ExternalLink className="h-3 w-3" /></a> : '—'}</td></tr>)}</tbody></table></div>
       </section>
 
-      <footer className="mt-5 flex flex-col justify-between gap-2 border-t border-white/[0.06] py-5 text-[9px] leading-4 text-slate-700 sm:flex-row"><div>NEO Meme Coins · live public Solana market monitoring · no login · no extension</div><div className="max-w-2xl sm:text-right">Paper режимът е симулация. Meme coins са високорискови; score-ът е филтър за наблюдение, не обещание за печалба.</div></footer>
+      <footer className="mt-5 flex flex-col justify-between gap-2 border-t border-white/[0.06] py-5 text-[9px] leading-4 text-slate-700 sm:flex-row"><div>NEO Meme Coins · live Solana market monitoring · isolated account engine</div><div className="max-w-2xl sm:text-right">Paper режимът е симулация. Meme coins са високорискови; score-ът е филтър за наблюдение, не обещание за печалба.</div></footer>
     </main>
   </div>;
 }
