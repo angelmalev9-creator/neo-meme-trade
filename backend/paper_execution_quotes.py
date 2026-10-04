@@ -17,11 +17,13 @@ QUOTE_URL = os.getenv("NEO_JUPITER_QUOTE_URL", "https://api.jup.ag/swap/v1/quote
 API_KEY = os.getenv("JUPITER_API_KEY", "").strip()
 SLIPPAGE_BPS = int(os.getenv("NEO_JUPITER_SLIPPAGE_BPS", "100"))
 MIN_INTERVAL = float(os.getenv("NEO_JUPITER_KEYLESS_MIN_INTERVAL", "2.10"))
+MARK_TTL_MS = int(os.getenv("NEO_JUPITER_MARK_TTL_MS", "6000"))
 LOCK_PATH = Path(os.getenv("NEO_JUPITER_LOCK_PATH", "/var/lib/neo-market/jupiter_quote.lock"))
 STAMP_PATH = Path(os.getenv("NEO_JUPITER_STAMP_PATH", "/var/lib/neo-market/jupiter_quote_last.txt"))
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "NEO-Paper-Quote/1.0", "Accept": "application/json"})
+_MARK_CACHE: dict[tuple[str, int], dict[str, Any]] = {}
 
 
 def _compact_route(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -133,3 +135,46 @@ def exit_quote(token_mint: str, token_raw_amount: int) -> dict[str, Any] | None:
         "route": data.get("_compactRoute") or [],
         "quoted_at": data.get("_quotedAtMs"),
     }
+
+
+def position_mark(position: dict[str, Any], coin: dict[str, Any], network_fee_usd: float, force: bool = False) -> dict[str, Any] | None:
+    """Return a read-only executable liquidation mark for a paper position."""
+    if position.get("execution_mode") != "JUPITER_QUOTE_V2":
+        return None
+    token_mint = str(position.get("address") or "")
+    raw_amount = int(position.get("jupiter_token_raw_amount") or 0)
+    if raw_amount <= 0:
+        return None
+
+    key = (token_mint, raw_amount)
+    now = int(time.time() * 1000)
+    cached = _MARK_CACHE.get(key)
+    if not force and cached and now - int(cached.get("quoted_at") or 0) <= MARK_TTL_MS:
+        return dict(cached)
+
+    fresh = exit_quote(token_mint, raw_amount)
+    if not fresh:
+        return dict(cached) if cached and not force else None
+
+    market_price = float(coin.get("priceUsd") or 0)
+    impact_pct = float(fresh.get("price_impact_pct") or 0)
+    slippage_pct = float(fresh.get("slippage_bps") or SLIPPAGE_BPS) / 100.0
+    floor_usdc = float(fresh.get("floor_usdc") or 0)
+    expected_usdc = float(fresh.get("expected_usdc") or 0)
+    result = {
+        "execution_source": "JUPITER_QUOTE_V2",
+        "market_price": market_price,
+        "fill_price": max(0.0, market_price * (1.0 - impact_pct / 100.0 - slippage_pct / 100.0)),
+        "market_value_usd": expected_usdc,
+        "gross_proceeds_usd": floor_usdc,
+        "dex_fee_usd": 0.0,
+        "network_fee_usd": max(0.0, network_fee_usd),
+        "net_proceeds_usd": max(0.0, floor_usdc - max(0.0, network_fee_usd)),
+        "impact_pct": impact_pct,
+        "slippage_pct": slippage_pct,
+        "latency_pct": 0.0,
+        "quoted_at": int(fresh.get("quoted_at") or now),
+        "route": fresh.get("route") or [],
+    }
+    _MARK_CACHE[key] = dict(result)
+    return result
