@@ -1,9 +1,9 @@
 {
   "name": "NEO Meme Coins GOLD strategy",
-  "locked_at_utc": "2026-10-04T18:40:00Z",
+  "locked_at_utc": "2026-10-04T18:45:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "11d902a0b85fe7fcd1c1a28f8a81316e8c45565d01c191e0e656af4ea9ec12d9",
+  "sha256": "448f3b28dfff4261ef677f1a76e47f5321fe1d1c949dc13f8b5b7832035f1abf",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 80,
