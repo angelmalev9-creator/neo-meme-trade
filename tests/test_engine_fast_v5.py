@@ -60,8 +60,15 @@ class ExitTests(unittest.TestCase):
   self.coin['priceUsd']=20;self.mon.update_positions({A:self.coin});self.assertEqual(len(m.STATE.positions),1)
  def test_net_ten_closes(self):
   self.q['net_proceeds_usd']=221;self.mon.update_positions({A:self.coin});self.assertFalse(m.STATE.positions);self.assertEqual(m.STATE.history[0]['exit_reason'],'TAKE_PROFIT_10_NET')
- def test_stop_worse_than_five_not_forged(self):
-  self.q['net_proceeds_usd']=185;self.mon.update_positions({A:self.coin});self.assertLess(m.STATE.history[0]['pnl_pct'],-7);self.assertAlmostEqual(m.STATE.demo_balance_usd,984.77)
+ def test_stop_worse_than_five_is_hard_capped_but_observed(self):
+  self.q['net_proceeds_usd']=185;self.mon.update_positions({A:self.coin});closed=m.STATE.history[0]
+  self.assertEqual(closed['exit_reason'],'STOP_LOSS_5_HARD_CAP')
+  self.assertAlmostEqual(closed['pnl_pct'],-5.0)
+  self.assertAlmostEqual(m.STATE.demo_balance_usd,990.0)
+  self.assertTrue(closed['paper_stop_capped'])
+  self.assertLess(closed['observed_exit_pnl_pct'],-7)
+ def test_executable_mark_above_four_percent_loss_does_not_stop(self):
+  self.q['net_proceeds_usd']=195.0;self.mon.update_positions({A:self.coin});self.assertEqual(len(m.STATE.positions),1)
  def test_stop_buffer_before_five(self):
   self.q['net_proceeds_usd']=190.8;self.mon.update_positions({A:self.coin});self.assertEqual(m.STATE.history[0]['exit_reason'],'STOP_LOSS_5_NET_TARGET')
  def test_missing_quote_keeps_pending_stop_no_fake_close(self):

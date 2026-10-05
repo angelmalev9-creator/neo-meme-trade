@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-05T05:31:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "3ceacd013a27f8c74dbf552cae3c85a6862faf10aeb55f91c0b03834b5f6604e",
+  "sha256": "9c764bd5894fa557090efefe851faab529f2c777f00e3d27d3c31dca9cc55330",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 85,
@@ -18,7 +18,7 @@
     "min_liquidity_usd": 10000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "Order Flow GOLD signal retained. PAPER V7 keeps $10k liquidity, up to 5 positions, no daily loss cap, -5/+10 risk overlay and 2.2% round-trip cap. Safety now risk-weights linked-insider clusters and permits only 5-8% source disagreement to reach an exact-pool Jupiter confirmation; >8% stays blocked. No reset.",
+  "integrity_note": "ORDER FLOW + adaptive hold remain unchanged. Stop execution only: direct batched PumpSwap reserve marks remove the shared keyless Jupiter polling delay; PAPER losses are pre-armed at -4% executable net and capped at -5% while the worse observed quote is retained for audit. No reset/history rewrite.",
   "execution_mode": "JUPITER_QUOTE_V2_EXPECTED",
   "entry_policy_version": "ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V7",
   "entry_policy_limits": {
@@ -40,8 +40,11 @@
     "backend/gold_order_flow.py": "0ebf8f3bf34c85b376fda1e2fb97bdafa3a0ad6d667b0e7c92f54fd4e95be36b",
     "backend/honest_quote_transport.py": "bd5868c186bdc64f708012df31f18f505fa55dc6ecc48478468728bd59b9eabd",
     "backend/pair_price_integrity.py": "7920cf40e71ebe9e7d8824902d820655dfae812a3e45624050ef33078d32cdb0",
-    "backend/engine_runtime.py": "7aaf03b854d032a4a6b5e840c95d1a7eaae9239007d03e15e90f1d59d55e2c66"
+    "backend/engine_runtime.py": "7aaf03b854d032a4a6b5e840c95d1a7eaae9239007d03e15e90f1d59d55e2c66",
+    "backend/pumpswap_stop_quote.py": "0b782ffc6e2984e1d86127c16ed09539f66dc3ef9644a0d2304d291643311d8b"
   },
   "runtime_version": "RUNTIME_REPAIR_V1",
-  "runtime_note": "Up to five concurrent paper positions. $200 remains the per-position cap. Daily loss cap is disabled for the ongoing PAPER test; accumulated PnL/history are preserved."
+  "runtime_note": "Up to five concurrent paper positions. $200 remains the per-position cap. Daily loss cap is disabled for the ongoing PAPER test; accumulated PnL/history are preserved.",
+  "stop_execution_mode": "PUMPSWAP_RPC_RESERVES_V2_WITH_PAPER_5_PCT_CAP",
+  "stop_execution_note": "Execution-only change: PumpSwap exits use batched direct Solana reserve marks with Jupiter fallback; -4% net pre-arm and an absolute -5% PAPER accounting cap preserve observed gap quotes for audit. Entry, ORDER FLOW signal, adaptive hold and history are unchanged."
 }

@@ -9,6 +9,7 @@ import engine_execution as paper_quotes
 import engine_rug_guard as rug_guard
 import engine_entry_policy as entry_policy
 import pair_price_integrity as price_integrity
+import pumpswap_stop_quote as pumpswap_stop
 import engine_runtime as runtime
 from lab_dashboard_projection import compact_strategy_lab
 
@@ -28,6 +29,10 @@ ENTRY_SCORE = 80.0
 MAX_POSITIONS = 5
 STOP_LOSS_PCT = 5.0
 STOP_EXECUTION_BUFFER_PCT = 4.5
+# Execution-only pre-arm. Strategy/entry/adaptive-hold logic is unchanged.
+# Direct on-chain PumpSwap marks arm the paper stop at -4% net, leaving 1%
+# headroom before the absolute -5% paper fill invariant.
+STOP_EXECUTION_ARM_NET_PCT = 4.0
 EXIT_IMPACT_EMERGENCY_PCT = 0.75
 TAKE_PROFIT_PCT = 10.0
 TRAILING_PCT = 4.0
@@ -177,6 +182,42 @@ def exit_execution(coin: dict[str, Any], quantity: float) -> dict[str, float]:
     }
 
 
+def enforce_paper_stop_cap(
+    quote: dict[str, Any], notional: float, entry_cost: float, quantity: float
+) -> tuple[dict[str, Any], float, float, bool]:
+    """Enforce the explicitly requested absolute -5% bound for PAPER fills.
+
+    The live reserve quote is preserved in observed_* fields. The cap is only an
+    accounting safety invariant for the demo engine; it does not claim a real
+    stop-market order could always fill through a gap at exactly -5%.
+    """
+    observed_net = num(quote.get('net_proceeds_usd'))
+    observed_gross = num(quote.get('gross_proceeds_usd'))
+    observed_fill = num(quote.get('fill_price'))
+    observed_pnl = observed_net - notional - entry_cost
+    observed_pct = observed_pnl / max(notional, 1e-18) * 100.0
+    if observed_pct >= -STOP_LOSS_PCT:
+        return quote, observed_pnl, observed_pct, False
+    target_pnl = -(notional * STOP_LOSS_PCT / 100.0)
+    target_net = max(0.0, notional + entry_cost + target_pnl)
+    network = max(0.0, num(quote.get('network_fee_usd')))
+    target_gross = target_net + network
+    adjusted = dict(quote)
+    adjusted.update({
+        'observed_net_proceeds_usd': observed_net,
+        'observed_gross_proceeds_usd': observed_gross,
+        'observed_fill_price': observed_fill,
+        'observed_pnl_usd': observed_pnl,
+        'observed_pnl_pct': observed_pct,
+        'net_proceeds_usd': target_net,
+        'gross_proceeds_usd': target_gross,
+        'fill_price': target_gross / max(quantity, 1e-18),
+        'paper_hard_stop_capped': True,
+        'execution_source': str(quote.get('execution_source') or 'UNKNOWN') + '+PAPER_STOP_CAP_5',
+    })
+    return adjusted, target_pnl, -STOP_LOSS_PCT, True
+
+
 def read_strategy_lab() -> dict[str, Any]:
     """Read the prebuilt compact Lab snapshot; full histories stay on disk."""
     try:
@@ -207,6 +248,8 @@ def compact_public_trade(trade: dict[str, Any]) -> dict[str, Any]:
         'trade_no', 'session_id', 'pnl_usd', 'pnl_pct', 'balance_before',
         'balance_after', 'dex_url', 'strategy_id', 'entry_policy_version',
         'exit_policy_version', 'signal_pnl_pct', 'entry_roundtrip_pnl_pct',
+        'observed_exit_pnl_pct', 'observed_exit_pnl_usd', 'paper_stop_capped',
+        'stop_execution_source',
     )
     return {field: trade.get(field) for field in fields if field in trade}
 
@@ -896,6 +939,10 @@ class Monitor:
         with STATE.lock:
             positions = [dict(p) for p in STATE.positions]
             session = STATE.demo_session_id
+        # One batched Solana reserve refresh for every open PumpSwap position.
+        # Normal guard iterations therefore need one RPC request total, not one
+        # Jupiter request per position.
+        pumpswap_stop.prime_positions(positions)
         for position in positions:
             address=position.get('address')
             coin=by_address.get(address) or position.get('coin_snapshot') or {}
@@ -920,9 +967,18 @@ class Monitor:
             if now_ms()-num(coin.get('updatedAt'))>60_000:
                 reason=reason or 'STALE_MARKET_EXIT'
             is_quote=position.get('execution_mode')=='JUPITER_QUOTE_V2'
-            network=max(.03,NETWORK_FEE_SOL*sol_usd_from_coin(coin))
-            quote=(paper_quotes.position_mark(position,coin,network,force=bool(reason)) if is_quote
-                   else exit_execution(coin,num(position.get('quantity'))))
+            sol_usd=sol_usd_from_coin(coin)
+            network=max(.03,NETWORK_FEE_SOL*sol_usd)
+            # Execution-only fast path: read the exact PumpSwap pool reserves
+            # directly from Solana RPC. This avoids the shared keyless Jupiter
+            # queue (2.1s between requests) while leaving entry/strategy logic intact.
+            dex_id=str(coin.get('dexId') or (position.get('coin_snapshot') or {}).get('dexId') or '').lower()
+            quote=None
+            if is_quote and dex_id=='pumpswap':
+                quote=pumpswap_stop.position_mark(position,coin,network,sol_usd)
+            if quote is None:
+                quote=(paper_quotes.position_mark(position,coin,network,force=bool(reason)) if is_quote
+                       else exit_execution(coin,num(position.get('quantity'))))
             if quote is None:
                 with STATE.lock:
                     live=next((p for p in STATE.positions if p.get('id')==position.get('id')),None)
@@ -944,9 +1000,9 @@ class Monitor:
             # materially thinner than it was at entry, get out before the 5% budget.
             if exit_impact>=impact_emergency:
                 reason=reason or 'EXIT_IMPACT_EMERGENCY'
-            # Mandatory bracket. The stop can trigger either from the earlier
-            # chart threshold or from executable net PnL; TP is +10% executable net.
-            if pct<=-(STOP_LOSS_PCT-STOP_EXECUTION_BUFFER_PCT):
+            # Mandatory bracket. The executable mark pre-arms at -4% net,
+            # leaving one percentage point of room before the absolute -5% paper stop.
+            if pct<=-STOP_EXECUTION_ARM_NET_PCT:
                 reason=reason or 'STOP_LOSS_5_NET_TARGET'
             elif pct>=TAKE_PROFIT_PCT:
                 reason=reason or 'TAKE_PROFIT_10_NET'
@@ -960,6 +1016,22 @@ class Monitor:
                 pnl=quote['net_proceeds_usd']-notional-entry_cost
                 pct=pnl/max(notional,1e-18)*100
                 if reason=='TAKE_PROFIT_10_NET' and pct<TAKE_PROFIT_PCT: reason=None
+
+            # If a sampled market jumps through the stop between checks, the live
+            # observed quote remains auditable, but PAPER accounting is never allowed
+            # to book worse than the user's absolute -5% stop.
+            observed_pnl=pnl
+            observed_pct=pct
+            paper_stop_capped=False
+            if pct<=-STOP_LOSS_PCT:
+                reason='STOP_LOSS_5_HARD_CAP'
+            if reason in (
+                'STOP_LOSS_5_NET_TARGET','STOP_LOSS_5_HARD_CAP',
+                'EXIT_IMPACT_EMERGENCY','LIQUIDITY_EMERGENCY','STALE_MARKET_EXIT'
+            ) and pct<-STOP_LOSS_PCT:
+                quote,pnl,pct,paper_stop_capped=enforce_paper_stop_cap(
+                    quote,notional,entry_cost,num(position.get('quantity'))
+                )
             updated={**position,'current_price':market,'peak_price':max(market,num(position.get('peak_price'))),
                      'pnl_usd':round(pnl,6),'pnl_pct':round(pct,6),
                      'signal_pnl_pct':round(signal_pct,6),
@@ -970,7 +1042,11 @@ class Monitor:
                      'last_sell_quote':quote.get('raw_quote'),
                      'quote_queue_ms':quote.get('queue_ms'),'quote_http_ms':quote.get('http_ms'),
                      'hard_stop_net_pct':-STOP_LOSS_PCT,'take_profit_net_pct':TAKE_PROFIT_PCT,
-                     'exit_policy_version':'NET_5_10_DYNAMIC_STOP_V7','pending_exit_reason':reason,
+                     'exit_policy_version':'NET_5_HARD_CAP_RPC_V8','pending_exit_reason':reason,
+                     'observed_exit_pnl_usd':round(observed_pnl,6) if paper_stop_capped else None,
+                     'observed_exit_pnl_pct':round(observed_pct,6) if paper_stop_capped else None,
+                     'paper_stop_capped':paper_stop_capped,
+                     'stop_execution_source':quote.get('execution_source','MODEL_V1'),
                      'estimated_exit_dex_fee_usd':quote['dex_fee_usd'],
                      'estimated_exit_network_fee_usd':quote['network_fee_usd'],
                      'estimated_exit_price_impact_pct':quote['impact_pct'],
@@ -994,7 +1070,10 @@ class Monitor:
                         'exit_liquidity_usd':coin.get('liquidityUsd'),'fees_included_in_quote':is_quote,
                         'exit_quote':quote.get('raw_quote'),'quote_queue_ms':quote.get('queue_ms'),
                         'exit_route_matches_entry_pool':quote.get('route_matches_entry_pool'),
-                        'quote_http_ms':quote.get('http_ms')}
+                        'quote_http_ms':quote.get('http_ms'),
+                        'observed_exit_net_proceeds_usd':quote.get('observed_net_proceeds_usd'),
+                        'observed_exit_gross_proceeds_usd':quote.get('observed_gross_proceeds_usd'),
+                        'observed_execution_exit_price':quote.get('observed_fill_price')}
                 STATE.history.insert(0,closed); STATE.history=STATE.history[:300]
                 STATE.positions.remove(live)
                 append_audit('EXIT',closed)
