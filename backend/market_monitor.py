@@ -1084,10 +1084,13 @@ class Monitor:
             # Keep the user's $200 cap but fit the existing daily allowance.
             # This never resets the day's loss or raises its $100 ceiling.
             fixed_cost_budget=2*pre_network_fee+entry_rent
+            # With up to five concurrent positions, reserve each open
+            # position's planned loss before sizing another one.
+            open_planned_risk=sum(num(p.get('planned_risk_usd')) for p in STATE.positions)
             notional = runtime.plan_notional(
                 TRADE_NOTIONAL_USD,available_before,MAX_DAILY_LOSS_USD,
-                STATE.risk_day_pnl(),STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,
-                fixed_cost_budget,
+                STATE.risk_day_pnl()-open_planned_risk,
+                STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
             )
             if notional < 10:
                 entry_policy.record(report,['risk_budget_unavailable'],coin); return
@@ -1148,9 +1151,11 @@ class Monitor:
                     return
                 if STATE.available_balance_usd()<entry_quote['capital_committed_usd'] or STATE.risk_day_pnl()<=-MAX_DAILY_LOSS_USD:
                     entry_policy.record(report,['balance'],coin); return
+                live_open_risk=sum(num(p.get('planned_risk_usd')) for p in STATE.positions)
                 permitted = runtime.plan_notional(
                     TRADE_NOTIONAL_USD,STATE.available_balance_usd(),MAX_DAILY_LOSS_USD,
-                    STATE.risk_day_pnl(),STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
+                    STATE.risk_day_pnl()-live_open_risk,
+                    STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
                 )
                 if notional>permitted:
                     entry_policy.record(report,['risk_budget_unavailable'],coin); return
