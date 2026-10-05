@@ -7,21 +7,21 @@ import engine_execution as ex
 import market_monitor as m
 
 class Budget(unittest.TestCase):
- def test_full_allowance_retains_user_size(self):self.assertEqual(r.plan_notional(200,1000,100,0,3,.3,.25),200)
+ def test_full_allowance_retains_user_size(self):self.assertEqual(r.plan_notional(200,1000,100,0,5,.5,.25),200)
  def test_spent_limit_never_reopens(self):
-  for pnl in [-100,-110]:self.assertEqual(r.plan_notional(200,900,100,pnl,3,.3,.06),0)
+  for pnl in [-100,-110]:self.assertEqual(r.plan_notional(200,900,100,pnl,5,.5,.06),0)
  def test_existing_user_remainder_permits_smaller_order(self):
   pnl=901.8761553-997.46197285
-  size=r.plan_notional(200,901.8761553,100,pnl,3,.3,.06)
+  size=r.plan_notional(200,901.8761553,100,pnl,5,.5,.06)
   self.assertGreater(size,100);self.assertLess(size,200)
-  self.assertLessEqual(size*.033+.06,100+pnl)
+  self.assertLessEqual(size*.055+.06,100+pnl)
  def test_fixed_costs_and_cash_reserved(self):
-  size=r.plan_notional(200,100,100,0,3,.3,.26)
+  size=r.plan_notional(200,100,100,0,5,.5,.26)
   self.assertLessEqual(size+.26,100)
  def test_nonfinite_budget_never_passes(self):
-  for bad in [float('nan'),float('inf'),'bad']:self.assertEqual(r.plan_notional(200,bad,100,0,3,.3,.03),0)
+  for bad in [float('nan'),float('inf'),'bad']:self.assertEqual(r.plan_notional(200,bad,100,0,5,.5,.03),0)
  def test_constants_and_original_signal_unchanged(self):
-  self.assertEqual((m.STOP_LOSS_PCT,m.TAKE_PROFIT_PCT,m.TRADE_NOTIONAL_USD,m.MAX_DAILY_LOSS_USD),(3,10,200,100))
+  self.assertEqual((m.STOP_LOSS_PCT,m.TAKE_PROFIT_PCT,m.TRADE_NOTIONAL_USD,m.MAX_DAILY_LOSS_USD),(5,10,200,100))
 
 class Persistence(unittest.TestCase):
  def test_complete_json_replaces_whole_file(self):
