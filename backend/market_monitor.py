@@ -10,6 +10,7 @@ import engine_rug_guard as rug_guard
 import engine_entry_policy as entry_policy
 import pair_price_integrity as price_integrity
 import engine_runtime as runtime
+from lab_dashboard_projection import compact_strategy_lab
 
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
@@ -19,6 +20,7 @@ STATE_PATH = Path(os.getenv('NEO_MARKET_STATE_PATH', '/var/lib/neo-market/state.
 AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.jsonl'))
 LIVE_TAPE_PATH = Path(os.getenv('NEO_LIVE_TAPE_PATH', '/var/lib/neo-market/live_tape.json'))
 STRATEGY_LAB_PATH = Path(os.getenv('NEO_STRATEGY_LAB_PATH', '/var/lib/neo-market/strategy_lab.json'))
+STRATEGY_LAB_COMPACT_PATH = Path(os.getenv('NEO_STRATEGY_LAB_COMPACT_PATH', str(STRATEGY_LAB_PATH.parent / 'strategy_lab_compact.json')))
 POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
@@ -175,69 +177,16 @@ def exit_execution(coin: dict[str, Any], quantity: float) -> dict[str, float]:
 
 
 def read_strategy_lab() -> dict[str, Any]:
-    """Return only the Lab fields the dashboard renders.
-
-    The full Strategy Lab state and histories remain unchanged on disk. Shipping
-    multi-megabyte histories on every /state poll made initial dashboard
-    connection unnecessarily slow.
-    """
+    """Read the prebuilt compact Lab snapshot; full histories stay on disk."""
+    try:
+        data = json.loads(STRATEGY_LAB_COMPACT_PATH.read_text())
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
     try:
         data = json.loads(STRATEGY_LAB_PATH.read_text())
-        if not isinstance(data, dict):
-            raise ValueError('invalid strategy lab state')
-
-        books = {}
-        for key, raw in (data.get('books') or {}).items():
-            if not isinstance(raw, dict):
-                continue
-            position = raw.get('position')
-            if isinstance(position, dict):
-                position = {
-                    field: position.get(field)
-                    for field in ('symbol', 'address', 'strategy_id', 'opened_at', 'pnl_pct', 'notional_usd')
-                }
-            else:
-                position = None
-            books[key] = {
-                'id': raw.get('id', key),
-                'name': raw.get('name', key),
-                'starting_balance': raw.get('starting_balance', 0),
-                'balance': raw.get('balance', 0),
-                'position': position,
-                'history': [],
-            }
-
-        result = {
-            'started_at': data.get('started_at'),
-            'updated_at': data.get('updated_at'),
-            'status': data.get('status', 'offline'),
-            'books': books,
-            'stats': data.get('stats') or {},
-            'data_integrity_note': data.get('data_integrity_note'),
-            'activity_config': data.get('activity_config') or {},
-        }
-
-        astra = data.get('astra')
-        if isinstance(astra, dict):
-            astra_view = {
-                key: value for key, value in astra.items()
-                if key not in ('book',)
-            }
-            book = astra.get('book')
-            if isinstance(book, dict):
-                astra_view['book'] = {
-                    'balance': book.get('balance', 0),
-                    'starting_balance': book.get('starting_balance', 0),
-                    'positions': book.get('positions') or [],
-                    'history': (book.get('history') or [])[:30],
-                }
-            result['astra'] = astra_view
-
-        paired = data.get('paired')
-        if isinstance(paired, dict):
-            result['paired'] = paired
-
-        return result
+        return compact_strategy_lab(data)
     except Exception:
         return {'status': 'offline', 'books': {}, 'stats': {}}
 
