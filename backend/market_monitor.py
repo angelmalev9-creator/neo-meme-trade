@@ -422,7 +422,7 @@ class State:
                     'signal_strategy': 'ORDER_FLOW_ADAPTIVE',
                     'signal_source_commit': '44a7a09b019f068a97c2165068a556cadcc6bfc4',
                     'risk_overlay': 'USER_NET_5_10_DYNAMIC_STOP',
-                    'execution_verification_version': 'QUOTE_EVIDENCE_V6',
+                    'execution_verification_version': 'QUOTE_EVIDENCE_V7',
                     'rug_guard': rug_guard.VERSION,
                     'paper_only': True,
                     'runtime_version': runtime.VERSION,
@@ -440,7 +440,7 @@ class State:
                     'execution_note': 'Original GOLD entry signal; mandatory +10% net TP and dynamic early chart stop targeting a 5% net loss budget including expected execution costs',
                     'entry_policy_version': entry_policy.POLICY_VERSION,
                     'signal_source_commit': '44a7a09b019f068a97c2165068a556cadcc6bfc4',
-                    'execution_verification_version': 'QUOTE_EVIDENCE_V6',
+                    'execution_verification_version': 'QUOTE_EVIDENCE_V7',
                     'max_quoted_candidates_per_scan': entry_policy.MAX_QUOTED_CANDIDATES,
                     'strict_entry_score': STRICT_ENTRY_SCORE,
                     'strict_min_conviction': STRICT_MIN_CONVICTION,
@@ -1076,7 +1076,11 @@ class Monitor:
                 continue
             report['signal_passed'] += 1
             validation=price_integrity.check(coin)
-            if validation.get('status')!='pass':
+            price_review=(
+                validation.get('status')=='review'
+                and validation.get('reason')=='price_source_disagreement_needs_jupiter'
+            )
+            if validation.get('status')!='pass' and not price_review:
                 entry_policy.record(report,[validation.get('reason') or 'price_unavailable'],coin,validation)
                 continue
             safety=rug_guard.check(coin)
@@ -1156,6 +1160,13 @@ class Monitor:
             decimals=int(safety['metrics']['decimals'])
             quantity=expected_token_raw/(10**decimals)
             quote_fill_price=notional/max(quantity,1e-18)
+            if price_review:
+                validation=price_integrity.jupiter_tiebreak(validation,quote_fill_price)
+                if validation.get('status')!='pass':
+                    entry_policy.record(
+                        report,[validation.get('reason') or 'price_tiebreak_failed'],coin,validation
+                    )
+                    continue
             entry_quote = {
                 'fill_price': quote_fill_price,
                 'quantity': quantity,
