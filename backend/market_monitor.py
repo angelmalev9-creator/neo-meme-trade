@@ -15,19 +15,20 @@ from lab_dashboard_projection import compact_strategy_lab
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
 SCAN_SECONDS = max(5, int(os.getenv('NEO_SCAN_SECONDS', '5')))
-POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
+POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '0.5'))
 STATE_PATH = Path(os.getenv('NEO_MARKET_STATE_PATH', '/var/lib/neo-market/state.json'))
 AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.jsonl'))
 LIVE_TAPE_PATH = Path(os.getenv('NEO_LIVE_TAPE_PATH', '/var/lib/neo-market/live_tape.json'))
 STRATEGY_LAB_PATH = Path(os.getenv('NEO_STRATEGY_LAB_PATH', '/var/lib/neo-market/strategy_lab.json'))
 STRATEGY_LAB_COMPACT_PATH = Path(os.getenv('NEO_STRATEGY_LAB_COMPACT_PATH', str(STRATEGY_LAB_PATH.parent / 'strategy_lab_compact.json')))
-POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '2'))
+POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '0.5'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
 ENTRY_SCORE = 80.0
 MAX_POSITIONS = 5
 STOP_LOSS_PCT = 5.0
-STOP_EXECUTION_BUFFER_PCT = 0.5
+STOP_EXECUTION_BUFFER_PCT = 3.0
+EXIT_IMPACT_EMERGENCY_PCT = 2.25
 TAKE_PROFIT_PCT = 10.0
 TRAILING_PCT = 4.0
 MAX_HOLD_MINUTES = 60
@@ -46,9 +47,9 @@ MIN_LIQUIDITY_USD = 10000.0
 STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '85'))
 STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '75'))
 STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '10000'))
-STRICT_MAX_ENTRY_IMPACT_PCT = float(os.getenv('NEO_STRICT_MAX_ENTRY_IMPACT_PCT', '2.0'))
-STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '2.20'))
-STRICT_MAX_WORST_CASE_COST_PCT = float(os.getenv('NEO_STRICT_MAX_WORST_CASE_COST_PCT', '2.90'))
+STRICT_MAX_ENTRY_IMPACT_PCT = float(os.getenv('NEO_STRICT_MAX_ENTRY_IMPACT_PCT', '0.75'))
+STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '1.25'))
+STRICT_MAX_WORST_CASE_COST_PCT = float(os.getenv('NEO_STRICT_MAX_WORST_CASE_COST_PCT', '1.75'))
 
 # Paper execution model. Signal/exit rules stay unchanged; only simulated fills and PnL
 # include real-world friction. PumpSwap canonical fee tiers mirror pump.fun fees
@@ -428,6 +429,7 @@ class State:
                     'runtime_version': runtime.VERSION,
                     'daily_budget_sizing': True,
                     'stop_execution_buffer_pct': STOP_EXECUTION_BUFFER_PCT,
+                    'exit_impact_emergency_pct': EXIT_IMPACT_EMERGENCY_PCT,
                     'take_profit_pct': TAKE_PROFIT_PCT,
                     'trailing_pct': TRAILING_PCT,
                     'max_hold_minutes': MAX_HOLD_MINUTES,
@@ -935,6 +937,13 @@ class Monitor:
             pnl=quote['net_proceeds_usd']-notional-entry_cost
             pct=pnl/max(notional,1e-18)*100
             hold=(now_ms()-int(position.get('opened_at',now_ms())))/60000
+            exit_impact=num(quote.get('impact_pct'))
+            entry_impact=num(position.get('entry_price_impact_pct'))
+            impact_emergency=max(EXIT_IMPACT_EMERGENCY_PCT, entry_impact*3.0)
+            # Risk-only emergency: if a $200 liquidation route starts becoming
+            # materially thinner than it was at entry, get out before the 5% budget.
+            if exit_impact>=impact_emergency:
+                reason=reason or 'EXIT_IMPACT_EMERGENCY'
             # Mandatory bracket. The stop can trigger either from the earlier
             # chart threshold or from executable net PnL; TP is +10% executable net.
             if pct<=-(STOP_LOSS_PCT-STOP_EXECUTION_BUFFER_PCT):
