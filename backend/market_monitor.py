@@ -604,8 +604,8 @@ class State:
                     'stop_loss_basis': 'EXECUTABLE_NET_PNL',
                     'stop_trigger_net_pct': -STOP_LOSS_PCT,
                     'take_profit_basis': 'EXECUTABLE_NET_PNL',
-                    'reentry_seconds': 1200, 'loss_reentry_seconds': 1200,
-                    'signal_strategy': 'ORDER_FLOW_EARLY_FIXED_PAPER_V9',
+                    'reentry_seconds': WIN_REENTRY_SECONDS, 'loss_reentry_seconds': LOSS_REENTRY_SECONDS,
+                    'signal_strategy': 'ORDER_FLOW_EARLY_SCOUT_PAPER_V10',
                     'signal_source_commit': order_flow.SOURCE_COMMIT,
                     'risk_overlay': 'PLANNED_NET_STOP_NO_FILL_GUARANTEE',
                     'execution_verification_version': 'QUOTE_EVIDENCE_V9',
@@ -628,7 +628,7 @@ class State:
                     'daily_loss_cap_enabled': MAX_DAILY_LOSS_USD > 0,
                     'starting_balance_usd': STARTING_BALANCE_USD,
                     'execution_mode': 'PAPER_QUOTE_OR_OBSERVED_POOL_MODEL',
-                    'execution_note': 'PAPER only; observed quotes with modeled fills, full fees and uncapped gap losses. Validated learning portfolios are separate.',
+                    'execution_note': 'PAPER only; high-frequency early micro scouts, observed quotes with modeled fills, full fees and uncapped gap losses. Main journal learns scout size; validated strategy experiments remain separate.',
                     'entry_policy_version': entry_policy.POLICY_VERSION,
                     'exit_policy': 'fixed', 'exit_policy_version': exit_policy.VERSION,
                     'effective_config_hash': effective_config_hash(),
@@ -707,6 +707,8 @@ def effective_config_hash():
               'exit_version': exit_policy.VERSION, 'stop_pct': STOP_LOSS_PCT, 'take_profit_pct': TAKE_PROFIT_PCT,
               'risk_buffer_pct': STOP_EXECUTION_BUFFER_PCT, 'daily_loss_usd': MAX_DAILY_LOSS_USD,
               'max_positions': MAX_POSITIONS, 'notional_usd': TRADE_NOTIONAL_USD,
+              'win_reentry_seconds': WIN_REENTRY_SECONDS, 'loss_reentry_seconds': LOSS_REENTRY_SECONDS,
+              'micro_flow_seconds': 10, 'ultra_flow_seconds': 20,
               'max_position_full_loss_usd': MAX_POSITION_RISK_USD,'max_exposure_pct': MAX_TOTAL_EXPOSURE_PCT,'max_drawdown_pct':MAX_DRAWDOWN_PCT,
               'max_impact_pct': STRICT_MAX_ENTRY_IMPACT_PCT, 'max_cost_pct': STRICT_MAX_ROUNDTRIP_COST_PCT,
               'max_conservative_cost_pct': STRICT_MAX_WORST_CASE_COST_PCT,
@@ -1000,24 +1002,30 @@ def score_pair(pair: dict[str, Any], meta: dict[str, Any]):
         score += 13; signals.append(signal('positive', 'Добра ликвидност', f'${liq:,.0f}'))
     elif liq >= 10000:
         score += 7; signals.append(signal('neutral', 'Приемлива ликвидност', f'${liq:,.0f}'))
-    elif liq < 5000:
-        score -= 22; signals.append(signal('risk', 'Много ниска ликвидност', f'${liq:,.0f}'))
+    elif liq >= 5000:
+        score -= 4; signals.append(signal('risk', 'Тънка ликвидност', f'${liq:,.0f}'))
+    elif liq >= 3000:
+        score -= 10; signals.append(signal('risk', 'Много ранна тънка ликвидност', f'${liq:,.0f}'))
     else:
-        score -= 7; signals.append(signal('risk', 'Тънка ликвидност', f'${liq:,.0f}'))
+        score -= 25; signals.append(signal('risk', 'Недостатъчна ликвидност', f'${liq:,.0f}'))
 
     if vol_h1 >= 50000:
         score += 12; signals.append(signal('positive', 'Силен 1h volume', f'${vol_h1:,.0f}'))
     elif vol_h1 >= 10000:
         score += 7; signals.append(signal('positive', 'Активен 1h volume', f'${vol_h1:,.0f}'))
-    elif vol_h1 < 1000:
+    elif vol_h1 < 1000 and age > 15:
         score -= 8; signals.append(signal('risk', 'Слаб volume', f'${vol_h1:,.0f}'))
+    elif vol_h1 < 1000:
+        signals.append(signal('neutral', 'Нов pool — volume още се натрупва', f'${vol_h1:,.0f}'))
 
     if tx_count >= 120:
         score += 10; signals.append(signal('positive', 'Много активни сделки', f'{int(tx_count)} tx / 5m'))
     elif tx_count >= 35:
         score += 6; signals.append(signal('positive', 'Добра активност', f'{int(tx_count)} tx / 5m'))
-    elif tx_count < 8:
+    elif tx_count < 8 and age > 15:
         score -= 6; signals.append(signal('risk', 'Малко сделки', f'{int(tx_count)} tx / 5m'))
+    elif tx_count < 8:
+        signals.append(signal('neutral', 'Първи сделки', f'{int(tx_count)} tx / 5m'))
 
     if 1.05 <= buy_sell <= 2.8:
         score += 8; signals.append(signal('positive', 'Купувачите водят', f'Buy/Sell {buy_sell:.2f}x'))
@@ -1038,7 +1046,7 @@ def score_pair(pair: dict[str, Any], meta: dict[str, Any]):
     if 0.25 <= age <= 360:
         score += 8; signals.append(signal('positive', 'Ранен етап', f'{age:.1f} мин.'))
     elif age < 0.25:
-        score -= 5; signals.append(signal('risk', 'Pair под 15 секунди', f'{age:.2f} мин.'))
+        score += 4; signals.append(signal('neutral', 'Нов pool под 15 секунди', f'{age:.2f} мин.'))
     elif age > 4320:
         score -= 4
     if mc > 0:
@@ -1511,8 +1519,17 @@ class Monitor:
             return
         open_addresses = {p.get('address') for p in STATE.positions}
         now = now_ms()
-        # Keep per-token cooldown so high frequency does not become revenge re-entry.
-        recent = {t.get('address') for t in STATE.history if now-int(t.get('closed_at',0))<20*60*1000}
+        # Outcome-aware cooldown: keep sampling many different coins, but avoid
+        # immediate revenge loops on the same mint.
+        recent = set()
+        for trade in STATE.history:
+            recent_address = trade.get('address')
+            closed_at = int(trade.get('closed_at') or 0)
+            if not recent_address or closed_at <= 0:
+                continue
+            cooldown = LOSS_REENTRY_SECONDS if num(trade.get('pnl_pct')) <= 0 else WIN_REENTRY_SECONDS
+            if now - closed_at < cooldown * 1000:
+                recent.add(recent_address)
         for coin in feed:
             if len(STATE.positions) >= MAX_POSITIONS:
                 break
@@ -1532,7 +1549,8 @@ class Monitor:
             market_cap = num(coin.get('marketCap') or coin.get('fdv'))
             liquidity_mc_ratio = liquidity / max(market_cap, 1.0)
 
-            flow = STATE.live_flow(address, 30, str(coin.get('pairAddress') or ''))
+            flow_seconds = 10 if age <= 15 else 20 if age <= 45 else 30
+            flow = STATE.live_flow(address, flow_seconds, str(coin.get('pairAddress') or ''))
             context = self.market_context(coin)
             rejected = entry_policy.signal_rejections(
                 coin, flow, context, min_score=EFFECTIVE_ENTRY_THRESHOLDS.min_score,
@@ -1570,11 +1588,10 @@ class Monitor:
             if report['quoted'] >= entry_policy.MAX_QUOTED_CANDIDATES:
                 reject(report, ['quote_budget'], coin)
                 continue
-            strategy_id = 'ORDER_FLOW_EARLY_FIXED_PAPER_V9'
-            # Main policy stays fixed. Candidate training/promotions run in the
-            # separate training PAPER accounts with their own validation gates.
-            learning = {'sample': 0, 'win_rate': 0, 'profit_factor': None,
-                        'recent_losses': 0, 'bonus': 0, 'size_multiplier': 1.0}
+            strategy_id = 'ORDER_FLOW_EARLY_SCOUT_PAPER_V10'
+            # Learn from mistakes without killing trade frequency: the main journal
+            # adapts only scout size. Threshold/exit experiments remain isolated.
+            learning = adaptive_scout_profile(entry_mode)
             recovery = False
             price = num(coin.get('priceUsd'))
             if price <= 0:
@@ -1680,7 +1697,7 @@ class Monitor:
                 if STATE.demo_session_id!=session_at_check or not STATE.running or len(STATE.positions)>=MAX_POSITIONS:
                     return
                 current_coin = next((c for c in STATE.feed if c.get('address') == address and c.get('pairAddress') == coin.get('pairAddress')), coin)
-                final_flow = STATE.live_flow(address, 30, str(coin.get('pairAddress') or ''))
+                final_flow = STATE.live_flow(address, flow_seconds, str(coin.get('pairAddress') or ''))
                 final_context = self.market_context(current_coin)
                 final_rejections = entry_policy.signal_rejections(current_coin,final_flow,final_context,
                     min_score=EFFECTIVE_ENTRY_THRESHOLDS.min_score,min_liquidity=EFFECTIVE_ENTRY_THRESHOLDS.min_liquidity,
@@ -1715,7 +1732,7 @@ class Monitor:
                     'trade_no': next_trade_no, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
                     'entry_mode': entry_mode,
                     'provisional_early_safety': bool(safety.get('provisional_early')),
-                    'learning_mode': 'FIXED_MAIN_SEPARATE_VALIDATED_TRAINING', 'entry_flow': final_flow,
+                    'learning_mode': 'HIGH_FREQ_SCOUT_SIZE_LEARNING+SEPARATE_VALIDATED_TRAINING', 'entry_flow': final_flow,
                     'entry_context': context, 'entry_conviction': context.get('conviction'),
                     'entry_hold_mode': context.get('mode'), 'learning_sample': learning['sample'],
                     'learning_win_rate': learning['win_rate'], 'learning_profit_factor': learning['profit_factor'],
