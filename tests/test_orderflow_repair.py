@@ -21,7 +21,7 @@ class GoldParityTests(unittest.TestCase):
    expected=bool(eval(fn,{'max':max},locals()) and conviction>=75)
    oracle=(score>=85 and liquidity>=10000 and -5<=change_m5<=25 and flow['trades']>=3 and flow['buy_sell_usd_ratio']>=1.3 and flow['unique_wallets']>=1 and flow['max_sell_usd']<max(750.,flow['buy_usd']*.8) and conviction>=75)
    self.assertEqual(oracle,expected)
-  self.assertEqual(gold.SOURCE_COMMIT,'EARLY_ORDER_FLOW_REPAIR_2026_10_05')
+  self.assertEqual(gold.SOURCE_COMMIT,'HIGH_FREQ_EARLY_SCOUT_2026_10_05')
  def test_gold_tag_contains_known_nonphysical_stop_clamp(self):
   text=(Path(__file__).parent/'fixtures/gold_stop_clamp.txt').read_text()
   self.assertIn('pnl_pct = -STOP_LOSS_PCT',text)
