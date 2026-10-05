@@ -1254,6 +1254,7 @@ class Monitor:
                 and validation.get('reason') in {
                     'price_source_disagreement_needs_jupiter',
                     'price_unavailable_needs_jupiter',
+                    'price_crosscheck_pending_needs_jupiter',
                 }
             )
             if validation.get('status')!='pass' and not price_review:
