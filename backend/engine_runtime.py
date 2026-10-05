@@ -14,17 +14,20 @@ def _number(value):
     return x
 
 def plan_notional(requested,available,day_limit,day_pnl,stop_pct,buffer_pct,fixed_cost):
-    """Fit the next paper order inside the EXISTING daily risk allowance.
-    Reserve a execution-gap buffer and both network legs/account creation.
-    Never increase the requested size or reset accumulated losses.
+    """Plan paper notional without resetting accumulated PnL.
+    day_limit=0 disables the daily cap while cash availability still limits size.
+    A positive day_limit preserves bounded daily-risk sizing.
     """
     try:
         requested,available,day_limit,day_pnl,stop_pct,buffer_pct,fixed_cost=map(_number,(requested,available,day_limit,day_pnl,stop_pct,buffer_pct,fixed_cost))
-        if requested<=0 or available<=0 or day_limit<=0 or stop_pct<=0 or buffer_pct<0 or fixed_cost<0:return 0.0
-        remaining=max(0.,day_limit+day_pnl)
+        if requested<=0 or available<=0 or day_limit<0 or stop_pct<=0 or buffer_pct<0 or fixed_cost<0:return 0.0
         cash=max(0.,available-fixed_cost)
-        risk=max(0.,remaining-fixed_cost)/((stop_pct+buffer_pct)/100)
-        amount=min(requested,cash,risk)
+        if day_limit == 0:
+            amount=min(requested,cash)
+        else:
+            remaining=max(0.,day_limit+day_pnl)
+            risk=max(0.,remaining-fixed_cost)/((stop_pct+buffer_pct)/100)
+            amount=min(requested,cash,risk)
         return float(Decimal(str(amount)).quantize(Decimal('.01'),rounding=ROUND_DOWN))
     except (ValueError,TypeError,OverflowError):return 0.0
 
