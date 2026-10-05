@@ -173,9 +173,15 @@ def _token_account_amount(data: bytes) -> int:
 
 
 def _mint_supply(data: bytes) -> int:
-    if len(data) < 44:
+    if len(data) < 45:
         raise ValueError("mint account too short")
     return int.from_bytes(data[36:44], "little")
+
+
+def _mint_decimals(data: bytes) -> int:
+    if len(data) < 45:
+        raise ValueError("mint account too short")
+    return int(data[44])
 
 
 def _fees(data: bytes, offset: int) -> tuple[dict[str, int], int]:
@@ -304,6 +310,7 @@ def prime_positions(positions: list[dict[str, Any]]) -> bool:
                 "base_reserve": _token_account_amount(_account_bytes(base_value)),
                 "quote_reserve": _token_account_amount(_account_bytes(quote_value)),
                 "base_supply": _mint_supply(_account_bytes(mint_value)),
+                "base_decimals": _mint_decimals(_account_bytes(mint_value)),
                 "quoted_at": received,
                 "slot": slot,
                 "http_ms": http_ms,
@@ -354,7 +361,9 @@ def quote_from_reserves(
 ) -> dict[str, Any]:
     if min(base_reserve, quote_reserve, base_amount) <= 0:
         raise ValueError("invalid reserves")
-    effective_quote = quote_reserve + max(0, virtual_quote_reserve)
+    effective_quote = quote_reserve + int(virtual_quote_reserve)
+    if effective_quote <= 0:
+        raise ValueError("effective quote reserve is non-positive")
     no_impact = effective_quote * base_amount // base_reserve
     raw_out = effective_quote * base_amount // (base_reserve + base_amount)
     lp_fee = math.ceil(raw_out * fee_schedule.get("lp", 0) / 10_000)
@@ -376,6 +385,183 @@ def quote_from_reserves(
         "creator_fee_raw": creator_fee,
         "impact_pct": impact_pct,
     }
+
+
+def buy_quote_from_reserves(
+    base_reserve: int,
+    quote_reserve: int,
+    virtual_quote_reserve: int,
+    quote_amount: int,
+    fee_schedule: dict[str, int],
+) -> dict[str, Any]:
+    """Exact-quote-in PumpSwap buy math mirrored from the official SDK."""
+    if min(base_reserve, quote_reserve, quote_amount) <= 0:
+        raise ValueError("invalid reserves")
+    effective_quote_reserve = quote_reserve + int(virtual_quote_reserve)
+    if effective_quote_reserve <= 0:
+        raise ValueError("effective quote reserve is non-positive")
+
+    total_fee_bps = (
+        int(fee_schedule.get("lp", 0))
+        + int(fee_schedule.get("protocol", 0))
+        + int(fee_schedule.get("creator", 0))
+    )
+    effective_quote = quote_amount * 10_000 // (10_000 + total_fee_bps)
+    lp_fee = math.ceil(effective_quote * fee_schedule.get("lp", 0) / 10_000)
+    protocol_fee = math.ceil(effective_quote * fee_schedule.get("protocol", 0) / 10_000)
+    creator_fee = math.ceil(effective_quote * fee_schedule.get("creator", 0) / 10_000)
+    total_with_fees = effective_quote + lp_fee + protocol_fee + creator_fee
+    if total_with_fees > quote_amount:
+        effective_quote -= total_with_fees - quote_amount
+    if effective_quote <= 1:
+        raise ValueError("quote too small after fees")
+
+    input_amount = effective_quote - 1
+    base_out = base_reserve * input_amount // (effective_quote_reserve + input_amount)
+    if base_out <= 0 or base_out >= base_reserve:
+        raise ValueError("invalid base output")
+
+    no_impact_base = base_reserve * input_amount // effective_quote_reserve
+    impact_pct = max(0.0, (1.0 - base_out / max(no_impact_base, 1)) * 100.0)
+    return {
+        "effective_quote_reserve": effective_quote_reserve,
+        "quote_input_raw": quote_amount,
+        "effective_quote_raw": effective_quote,
+        "base_out_raw": base_out,
+        "lp_fee_raw": lp_fee,
+        "protocol_fee_raw": protocol_fee,
+        "creator_fee_raw": creator_fee,
+        "impact_pct": impact_pct,
+    }
+
+
+def prepare_entry(
+    coin: dict[str, Any],
+    notional_usd: float,
+    sol_usd: float,
+    buffer_bps: int = 10,
+    slippage_bps: int = 100,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Fast PAPER PumpSwap entry + immediate-exit estimate from one RPC snapshot."""
+    pair = str(coin.get("pairAddress") or "")
+    mint = str(coin.get("address") or "")
+    if not pair or not mint or notional_usd <= 0 or sol_usd <= 0:
+        return None
+    probe = {"pairAddress": pair, "address": mint, "coin_snapshot": coin}
+    try:
+        if not prime_positions([probe]):
+            with _LOCK:
+                snapshot = dict(_SNAPSHOT_CACHE.get(pair) or {})
+        else:
+            with _LOCK:
+                snapshot = dict(_SNAPSHOT_CACHE.get(pair) or {})
+        if not snapshot or now_ms() - int(snapshot.get("quoted_at") or 0) > SNAPSHOT_TTL_MS:
+            return None
+
+        pool = snapshot["pool"]
+        if pool.get("base_mint") != mint or pool.get("quote_mint") != WSOL:
+            return None
+        base_reserve = int(snapshot["base_reserve"])
+        quote_reserve = int(snapshot["quote_reserve"])
+        effective_quote_reserve = quote_reserve + int(pool["virtual_quote_reserves"])
+        if effective_quote_reserve <= 0:
+            return None
+        schedule, canonical, market_cap_sol, fee_fallback = _fee_schedule(
+            pool, base_reserve, effective_quote_reserve, int(snapshot["base_supply"])
+        )
+
+        # Account is USD-denominated; model conversion into SOL conservatively.
+        conversion_factor = max(0.0, 1.0 - max(0, int(buffer_bps)) / 10_000.0)
+        sol_budget = (notional_usd / sol_usd) * conversion_factor
+        quote_raw = int(sol_budget * 1_000_000_000)
+        if quote_raw <= 0:
+            return None
+
+        buy = buy_quote_from_reserves(
+            base_reserve,
+            quote_reserve,
+            int(pool["virtual_quote_reserves"]),
+            quote_raw,
+            schedule,
+        )
+        expected_raw = int(buy["base_out_raw"])
+        assumed_raw = expected_raw * (10_000 - max(0, int(buffer_bps))) // 10_000
+        if assumed_raw <= 0:
+            return None
+
+        # Conservative immediate-exit estimate. This intentionally applies the
+        # same USD/SOL conversion buffer on the way back.
+        sale = quote_from_reserves(
+            base_reserve,
+            quote_reserve,
+            int(pool["virtual_quote_reserves"]),
+            assumed_raw,
+            schedule,
+        )
+        expected_usd = (
+            sale["final_quote_out"] / 1_000_000_000 * sol_usd * conversion_factor
+        )
+        floor_usd = expected_usd * (1.0 - max(0, int(slippage_bps)) / 10_000.0)
+        decimals = int(snapshot.get("base_decimals") or 0)
+        route = [{"ammKey": pair, "label": "Pump.fun Amm", "percent": 100}]
+        raw_quote = {
+            "source": "PUMPSWAP_RPC_ENTRY_V1",
+            "rpc_source": snapshot.get("rpc_source"),
+            "slot": snapshot.get("slot"),
+            "pair": pair,
+            "quote_input_lamports": quote_raw,
+            "token_raw_expected": expected_raw,
+            "token_raw_assumed": assumed_raw,
+            "base_reserve_raw": base_reserve,
+            "quote_reserve_raw": quote_reserve,
+            "virtual_quote_reserve_raw": pool["virtual_quote_reserves"],
+            "fee_bps": schedule,
+            "canonical_pool": canonical,
+            "market_cap_sol": market_cap_sol,
+            "fee_config_fallback": fee_fallback,
+        }
+        entry = {
+            "input_usdc_raw": int(notional_usd * 1_000_000),
+            "token_raw_expected": expected_raw,
+            "token_raw_amount": assumed_raw,
+            "token_raw_floor": assumed_raw,
+            "price_impact_pct": float(buy["impact_pct"]),
+            "slippage_bps": int(slippage_bps),
+            "route": route,
+            "quoted_at": int(snapshot.get("quoted_at") or now_ms()),
+            "context_slot": snapshot.get("slot"),
+            "assumed_buffer_bps": int(buffer_bps),
+            "raw_quote": raw_quote,
+            "preflight_buy_quote": raw_quote,
+            "preflight_sell_quote": {
+                "source": "PUMPSWAP_RPC_ROUNDTRIP_V1",
+                "expected_usd": expected_usd,
+                "floor_usd": floor_usd,
+                "token_input_raw": assumed_raw,
+            },
+            "preflight_quantity_adjustment": assumed_raw / max(expected_raw, 1),
+            "execution_source": "PUMPSWAP_RPC_ENTRY_V1",
+            "token_decimals": decimals,
+            "queue_ms": 0,
+            "http_ms": snapshot.get("http_ms"),
+        }
+        exit_preview = {
+            "expected_usdc": expected_usd,
+            "provider_expected_usdc": expected_usd,
+            "floor_usdc": floor_usd,
+            "price_impact_pct": float(sale["impact_pct"]),
+            "slippage_bps": int(slippage_bps),
+            "route": route,
+            "quoted_at": int(snapshot.get("quoted_at") or now_ms()),
+            "context_slot": snapshot.get("slot"),
+            "token_input_raw": assumed_raw,
+            "route_matches_entry_pool": True,
+            "assumed_buffer_bps": int(buffer_bps),
+            "raw_quote": entry["preflight_sell_quote"],
+        }
+        return entry, exit_preview
+    except (requests.RequestException, ValueError, TypeError, KeyError, RuntimeError, OverflowError):
+        return None
 
 
 def position_mark(
@@ -403,7 +589,9 @@ def position_mark(
         pool = snapshot["pool"]
         base_reserve = int(snapshot["base_reserve"])
         quote_reserve = int(snapshot["quote_reserve"])
-        effective_quote = quote_reserve + max(0, int(pool["virtual_quote_reserves"]))
+        effective_quote = quote_reserve + int(pool["virtual_quote_reserves"])
+        if effective_quote <= 0:
+            return None
         schedule, canonical, market_cap_sol, fee_fallback = _fee_schedule(
             pool, base_reserve, effective_quote, int(snapshot["base_supply"])
         )
