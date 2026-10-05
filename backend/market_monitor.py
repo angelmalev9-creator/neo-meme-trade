@@ -520,7 +520,7 @@ class State:
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
                     'daily_loss_cap_enabled': MAX_DAILY_LOSS_USD > 0,
                     'starting_balance_usd': STARTING_BALANCE_USD,
-                    'execution_mode': 'JUPITER_QUOTE_V2',
+                    'execution_mode': live_quote.get('execution_source') or 'JUPITER_QUOTE_V2',
                     'execution_note': 'High-frequency EARLY Order Flow PAPER mode; liquidity-aware scout sizing, adaptive hold, direct stop monitoring and absolute -5% paper stop cap',
                     'entry_policy_version': entry_policy.POLICY_VERSION,
                     'signal_source_commit': 'EARLY_ORDER_FLOW_2026_10_05',
@@ -1173,7 +1173,7 @@ class Monitor:
                 reason=reason or 'LIQUIDITY_EMERGENCY'
             if now_ms()-num(coin.get('updatedAt'))>60_000:
                 reason=reason or 'STALE_MARKET_EXIT'
-            is_quote=position.get('execution_mode')=='JUPITER_QUOTE_V2'
+            is_quote=position.get('execution_mode') in {'JUPITER_QUOTE_V2','PUMPSWAP_RPC_ENTRY_V1'}
             sol_usd=sol_usd_from_coin(coin) or sol_usd_market_price()
             network=max(.03,NETWORK_FEE_SOL*sol_usd)
             # Execution-only fast path: read the exact PumpSwap pool reserves
@@ -1430,7 +1430,17 @@ class Monitor:
             if notional < 10:
                 entry_policy.record(report,['risk_budget_unavailable'],coin); return
             report['quoted'] += 1
-            prepared=paper_quotes.prepare_entry(address,str(coin.get('pairAddress') or ''),notional)
+            dex_id = str(coin.get('dexId') or '').lower()
+            if dex_id == 'pumpswap':
+                prepared = pumpswap_stop.prepare_entry(
+                    coin, notional, sol_usd,
+                    buffer_bps=paper_quotes.BUFFER_BPS,
+                    slippage_bps=paper_quotes.SLIPPAGE_BPS,
+                )
+            else:
+                prepared = paper_quotes.prepare_entry(
+                    address, str(coin.get('pairAddress') or ''), notional
+                )
             if not prepared:
                 entry_policy.record(report,['quote_inconsistent'],coin)
                 continue
@@ -1540,7 +1550,11 @@ class Monitor:
                     'entry_roundtrip_pnl_pct': round(immediate_roundtrip_pct, 4),
                     'entry_policy_version': entry_policy.POLICY_VERSION,
                     'signal_source_commit': 'EARLY_ORDER_FLOW_2026_10_05',
-                    'execution_verification_version': 'QUOTE_EVIDENCE_V6',
+                    'execution_verification_version': (
+                        'PUMPSWAP_RPC_ENTRY_V1'
+                        if live_quote.get('execution_source') == 'PUMPSWAP_RPC_ENTRY_V1'
+                        else 'QUOTE_EVIDENCE_V6'
+                    ),
                     'entry_quote': live_quote.get('raw_quote'),
                     'preflight_buy_quote': live_quote.get('preflight_buy_quote'),
                     'preflight_sell_quote': live_quote.get('preflight_sell_quote'),
