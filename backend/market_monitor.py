@@ -67,6 +67,9 @@ MAX_PRICE_IMPACT_PCT = float(os.getenv('NEO_EXEC_MAX_PRICE_IMPACT_PCT', '20'))
 
 SESSION = requests.Session()
 SESSION.headers.update({'User-Agent': 'NEO-Meme-Market-Monitor/2.0', 'Accept': 'application/json'})
+SOL_MINT = 'So11111111111111111111111111111111111111112'
+_SOL_USD_CACHE = {'price': 0.0, 'ts': 0}
+_SOL_USD_LOCK = threading.Lock()
 
 def now_ms() -> int:
     return int(time.time() * 1000)
@@ -258,6 +261,36 @@ def api(path: str) -> Any:
     response = SESSION.get(f'{DEX_API}{path}', timeout=15)
     response.raise_for_status()
     return response.json()
+
+
+def sol_usd_market_price() -> float:
+    current = now_ms()
+    with _SOL_USD_LOCK:
+        cached_price = num(_SOL_USD_CACHE.get('price'))
+        cached_at = int(_SOL_USD_CACHE.get('ts') or 0)
+    if cached_price > 0 and 0 <= current - cached_at <= 60_000:
+        return cached_price
+    try:
+        response = SESSION.get(f'{DEX_API}/latest/dex/tokens/{SOL_MINT}', timeout=(1.0, 3.0))
+        response.raise_for_status()
+        pairs = response.json().get('pairs') or []
+        candidates = []
+        for pair in pairs:
+            base = pair.get('baseToken') or {}
+            if pair.get('chainId') != 'solana' or base.get('address') != SOL_MINT:
+                continue
+            price = num(pair.get('priceUsd'))
+            liquidity = num((pair.get('liquidity') or {}).get('usd'))
+            if price > 0:
+                candidates.append((liquidity, price))
+        if candidates:
+            price = max(candidates)[1]
+            with _SOL_USD_LOCK:
+                _SOL_USD_CACHE.update(price=price, ts=current)
+            return price
+    except (requests.RequestException, ValueError, TypeError, AttributeError):
+        pass
+    return cached_price if cached_price > 0 else 0.0
 
 
 def signal(kind: str, title: str, detail: str) -> dict[str, str]:
@@ -967,7 +1000,7 @@ class Monitor:
             if now_ms()-num(coin.get('updatedAt'))>60_000:
                 reason=reason or 'STALE_MARKET_EXIT'
             is_quote=position.get('execution_mode')=='JUPITER_QUOTE_V2'
-            sol_usd=sol_usd_from_coin(coin)
+            sol_usd=sol_usd_from_coin(coin) or sol_usd_market_price()
             network=max(.03,NETWORK_FEE_SOL*sol_usd)
             # Execution-only fast path: read the exact PumpSwap pool reserves
             # directly from Solana RPC. This avoids the shared keyless Jupiter
@@ -1166,7 +1199,10 @@ class Monitor:
             validation=price_integrity.check(coin)
             price_review=(
                 validation.get('status')=='review'
-                and validation.get('reason')=='price_source_disagreement_needs_jupiter'
+                and validation.get('reason') in {
+                    'price_source_disagreement_needs_jupiter',
+                    'price_unavailable_needs_jupiter',
+                }
             )
             if validation.get('status')!='pass' and not price_review:
                 entry_policy.record(report,[validation.get('reason') or 'price_unavailable'],coin,validation)
@@ -1187,7 +1223,7 @@ class Monitor:
             positive = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'positive'][:4]
             risks = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'risk'][:4]
             available_before = STATE.available_balance_usd()
-            sol_usd=num(safety.get('metrics',{}).get('sol_usd')) or sol_usd_from_coin(coin)
+            sol_usd=num(safety.get('metrics',{}).get('sol_usd')) or sol_usd_from_coin(coin) or sol_usd_market_price()
             if sol_usd<=0:
                 entry_policy.record(report,['network_price_unknown'],coin); continue
             pre_network_fee = max(.03, NETWORK_FEE_SOL * sol_usd)
