@@ -340,7 +340,7 @@ class EffectiveThresholds(unittest.TestCase):
         coin={'score':60,'liquidityUsd':4500,'ageMinutes':1,'priceChange':{'m5':5}}
         flow={'trades':1,'unique_wallets':1,'buy_usd':25,'sell_usd':1,'max_sell_usd':1,'buy_sell_usd_ratio':2}
         context={'conviction':35}
-        self.assertEqual(flow_policy.entry_mode(coin,flow,context),'ULTRA_EARLY')
+        self.assertEqual(flow_policy.entry_mode(coin,flow,context),'MICRO_SCOUT')
         for thresholds in (flow_policy.EntryThresholds(61,4000,30),flow_policy.EntryThresholds(58,4501,30),flow_policy.EntryThresholds(58,4000,36)):
             with self.subTest(thresholds=thresholds): self.assertIsNone(flow_policy.entry_mode(coin,flow,context,thresholds))
 
