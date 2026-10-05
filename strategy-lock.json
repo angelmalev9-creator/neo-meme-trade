@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-05T05:31:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "2868e6cdbe07ca8715674a9dfea1653967e78a47f97a5ba36f9334a61191474a",
+  "sha256": "3ceacd013a27f8c74dbf552cae3c85a6862faf10aeb55f91c0b03834b5f6604e",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 85,
@@ -18,9 +18,9 @@
     "min_liquidity_usd": 10000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "Order Flow GOLD logic retained with explicit user overrides only: minimum liquidity $10k, up to 5 concurrent positions, no daily loss cap in PAPER mode, and compact dashboard transport for Strategy Lab/history. Trading rules and stored audit history are not reset or rewritten.",
+  "integrity_note": "Order Flow GOLD signal retained. PAPER V7 keeps $10k liquidity, up to 5 positions, no daily loss cap, -5/+10 risk overlay and 2.2% round-trip cap. Safety now risk-weights linked-insider clusters and permits only 5-8% source disagreement to reach an exact-pool Jupiter confirmation; >8% stays blocked. No reset.",
   "execution_mode": "JUPITER_QUOTE_V2_EXPECTED",
-  "entry_policy_version": "ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V6",
+  "entry_policy_version": "ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V7",
   "entry_policy_limits": {
     "min_score": 85,
     "min_conviction": 75,
@@ -33,13 +33,13 @@
     "risk_overlay": "USER_NET_5_10_DYNAMIC_STOP"
   },
   "support_files_sha256": {
-    "backend/engine_entry_policy.py": "58d698d78ac236e712beef911aa24d435f7853b33f6b8ec66d57a93c295c4a7a",
+    "backend/engine_entry_policy.py": "8d5990dd4da438c2db383050fc3ba554c94ad96e2229a68cafba12ec7963c2d6",
     "backend/paper_execution_quotes.py": "93fd07ba67904f6cdbf5497cc7c0587f6240e49c4de2d2276c9b68178790958b",
-    "backend/engine_rug_guard.py": "4144b8b7dc132f470264dc477309385b812335f46c18bf526a14db0e4308a3a7",
+    "backend/engine_rug_guard.py": "871d62ea0769d3d6d34eb0f4d1032dc822bae0134c5fb5506ceec60591e9cc0e",
     "backend/engine_execution.py": "e7f7f2dc403c6bfd6d99b0935b29cc76c8ca8f8b9dcc5f25a7f2cee5a58b0ae7",
     "backend/gold_order_flow.py": "0ebf8f3bf34c85b376fda1e2fb97bdafa3a0ad6d667b0e7c92f54fd4e95be36b",
     "backend/honest_quote_transport.py": "bd5868c186bdc64f708012df31f18f505fa55dc6ecc48478468728bd59b9eabd",
-    "backend/pair_price_integrity.py": "945d1723eb3ab785f0d9641c2787e31deff2846dfae58eba2367caf430df81f0",
+    "backend/pair_price_integrity.py": "7920cf40e71ebe9e7d8824902d820655dfae812a3e45624050ef33078d32cdb0",
     "backend/engine_runtime.py": "7aaf03b854d032a4a6b5e840c95d1a7eaae9239007d03e15e90f1d59d55e2c66"
   },
   "runtime_version": "RUNTIME_REPAIR_V1",
