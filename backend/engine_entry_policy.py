@@ -8,15 +8,15 @@ import math
 import re
 from typing import Any
 
-POLICY_VERSION = 'ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V7'
+POLICY_VERSION = 'ORDER_FLOW_EARLY_LEARNER_V8'
 import gold_order_flow
 MAX_FEED_AGE_MS = 30_000
 MAX_ENTRY_QUOTE_AGE_MS = 10_000
-MAX_QUOTED_CANDIDATES = 2
+MAX_QUOTED_CANDIDATES = 6
 _ADDRESS = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 LABELS = {
     'risk_budget_unavailable': 'недостатъчен оставащ дневен бюджет за минималната позиция',
-    'gold_signal': 'не покрива оригиналния Order Flow сигнал',
+    'gold_signal': 'няма достатъчно ранен buy-flow импулс',
     'price_crosscheck_pending': 'проверка на цената от втори източник',
     'price_reference_expired': 'ценовата проверка е остаряла',
     'price_source_disagreement': 'силно несъответствие между ценовите източници',
