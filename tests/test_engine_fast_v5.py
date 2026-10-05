@@ -55,18 +55,27 @@ class ExitTests(unittest.TestCase):
   self.mark=patch.object(m.paper_quotes,'position_mark',return_value=self.q).start();self.audit=patch.object(m,'append_audit').start()
   self.addCleanup(patch.stopall)
  def test_fixed_net_contract(self):
-  self.assertEqual((m.STOP_LOSS_PCT,m.TAKE_PROFIT_PCT,m.TRADE_NOTIONAL_USD,m.MAX_DAILY_LOSS_USD),(3,10,200,100))
+  self.assertEqual((m.STOP_LOSS_PCT,m.TAKE_PROFIT_PCT,m.TRADE_NOTIONAL_USD,m.MAX_DAILY_LOSS_USD),(5,10,200,100))
  def test_profit_requires_ten_net_not_chart(self):
   self.coin['priceUsd']=20;self.mon.update_positions({A:self.coin});self.assertEqual(len(m.STATE.positions),1)
  def test_net_ten_closes(self):
   self.q['net_proceeds_usd']=221;self.mon.update_positions({A:self.coin});self.assertFalse(m.STATE.positions);self.assertEqual(m.STATE.history[0]['exit_reason'],'TAKE_PROFIT_10_NET')
- def test_stop_worse_than_three_not_forged(self):
+ def test_stop_worse_than_five_not_forged(self):
   self.q['net_proceeds_usd']=185;self.mon.update_positions({A:self.coin});self.assertLess(m.STATE.history[0]['pnl_pct'],-7);self.assertAlmostEqual(m.STATE.demo_balance_usd,984.77)
- def test_stop_buffer_before_three(self):
-  self.q['net_proceeds_usd']=194.6;self.mon.update_positions({A:self.coin});self.assertEqual(m.STATE.history[0]['exit_reason'],'STOP_LOSS_3_NET')
+ def test_stop_buffer_before_five(self):
+  self.q['net_proceeds_usd']=190.8;self.mon.update_positions({A:self.coin});self.assertEqual(m.STATE.history[0]['exit_reason'],'STOP_LOSS_5_NET_TARGET')
  def test_missing_quote_keeps_pending_stop_no_fake_close(self):
-  m.STATE.positions[0]['pending_exit_reason']='STOP_LOSS_3_NET';self.mark.return_value=None
-  self.mon.update_positions({A:self.coin});self.assertEqual(m.STATE.demo_balance_usd,1000);self.assertEqual(m.STATE.positions[0]['pending_exit_reason'],'STOP_LOSS_3_NET');self.assertFalse(m.STATE.history)
+  m.STATE.positions[0]['pending_exit_reason']='STOP_LOSS_5_NET_TARGET';self.mark.return_value=None
+  self.mon.update_positions({A:self.coin});self.assertEqual(m.STATE.demo_balance_usd,1000);self.assertEqual(m.STATE.positions[0]['pending_exit_reason'],'STOP_LOSS_5_NET_TARGET');self.assertFalse(m.STATE.history)
+ def test_dynamic_chart_stop_is_mandatory_before_net_five(self):
+  m.STATE.positions[0]['stop_signal_trigger_pct']=-3.5
+  self.coin['priceUsd']=1.929
+  self.q['net_proceeds_usd']=196.0
+  self.mon.update_positions({A:self.coin})
+  self.assertFalse(m.STATE.positions)
+  self.assertEqual(m.STATE.history[0]['exit_reason'],'STOP_LOSS_5_NET_TARGET')
+  self.assertGreater(m.STATE.history[0]['pnl_pct'],-5)
+
  def test_liquidity_collapse_emergency(self):
   self.coin['liquidityUsd']=10000;self.mon.update_positions({A:self.coin});self.assertEqual(m.STATE.history[0]['exit_reason'],'LIQUIDITY_EMERGENCY')
  def test_no_reset_and_ledger_reconciles(self):
