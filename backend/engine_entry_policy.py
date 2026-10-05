@@ -8,11 +8,11 @@ import math
 import re
 from typing import Any
 
-POLICY_VERSION = 'ORDER_FLOW_VALIDATED_THRESHOLDS_V9'
+POLICY_VERSION = 'ORDER_FLOW_HIGH_FREQ_SCOUT_V10'
 import gold_order_flow
 MAX_FEED_AGE_MS = 30_000
 MAX_ENTRY_QUOTE_AGE_MS = 10_000
-MAX_QUOTED_CANDIDATES = 6
+MAX_QUOTED_CANDIDATES = 12
 _ADDRESS = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 LABELS = {
     'risk_budget_unavailable': 'недостатъчен оставащ дневен бюджет за минималната позиция',
