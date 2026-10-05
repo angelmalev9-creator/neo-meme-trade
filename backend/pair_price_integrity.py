@@ -7,11 +7,13 @@ import fcntl,json,math,os,re,threading,time
 from pathlib import Path
 import requests
 
-VERSION='PRICE_CROSSCHECK_V1'
+VERSION='PRICE_CROSSCHECK_V2'
 ROOT=Path(os.getenv('NEO_PRICE_CHECK_DIR','/var/lib/neo-market/price-crosscheck'))
 ADDRESS=re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 TTL_MS=30_000
 MAX_DIVERGENCE_PCT=5.0
+JUPITER_REVIEW_MAX_DIVERGENCE_PCT=8.0
+JUPITER_CONFIRM_OBSERVED_MAX_PCT=3.0
 POOL=cf.ThreadPoolExecutor(max_workers=1,thread_name_prefix='price-crosscheck')
 PENDING={};LOCK=threading.Lock()
 
@@ -30,12 +32,31 @@ def validate(coin,ref,stamp=None):
  price=num(coin.get('priceUsd')); other=num(ref.get('price_usd'))
  if price<=0 or other<=0:return {'status':'blocked','reason':'price_unavailable'}
  divergence=abs(price/other-1)*100
- return {'status':'pass' if divergence<=MAX_DIVERGENCE_PCT else 'blocked',
-         'reason':'' if divergence<=MAX_DIVERGENCE_PCT else 'price_source_disagreement',
+ if divergence<=MAX_DIVERGENCE_PCT:
+  status,reason='pass',''
+ elif divergence<=JUPITER_REVIEW_MAX_DIVERGENCE_PCT:
+  status,reason='review','price_source_disagreement_needs_jupiter'
+ else:
+  status,reason='blocked','price_source_disagreement'
+ return {'status':status,'reason':reason,
          'version':VERSION,'observed_price':price,'reference_price':other,
          'divergence_pct':divergence,'reference_received_at':ref['received_at'],
          'source':'GeckoTerminal exact pool','pair':ref['pair'],'mint':ref['mint'],
          'provider_market_timestamp_available':False}
+
+def jupiter_tiebreak(validation,jupiter_entry_price):
+ observed=num(validation.get('observed_price')); jupiter=num(jupiter_entry_price)
+ if validation.get('status')!='review' or validation.get('reason')!='price_source_disagreement_needs_jupiter':
+  return validation
+ if observed<=0 or jupiter<=0:
+  return {**validation,'status':'blocked','reason':'price_tiebreak_failed'}
+ delta=abs(jupiter/observed-1)*100
+ passed=delta<=JUPITER_CONFIRM_OBSERVED_MAX_PCT
+ return {**validation,'status':'pass' if passed else 'blocked',
+         'reason':'' if passed else 'price_tiebreak_failed',
+         'jupiter_tiebreak':True,'jupiter_entry_price':jupiter,
+         'jupiter_vs_observed_pct':delta,
+         'jupiter_confirm_max_pct':JUPITER_CONFIRM_OBSERVED_MAX_PCT}
 
 def _path(mint,pair):return ROOT/(mint+'-'+pair+'.json')
 def _read(mint,pair):
