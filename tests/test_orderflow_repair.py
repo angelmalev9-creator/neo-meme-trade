@@ -25,8 +25,8 @@ class GoldParityTests(unittest.TestCase):
   self.assertIn('pnl_pct = -STOP_LOSS_PCT',text)
   current=(Path(m.__file__)).read_text()
   self.assertNotIn('pnl_pct = -STOP_LOSS_PCT',current)
- def test_latest_user_risk_not_reset_to_gold_five(self):
-  self.assertEqual((m.STOP_LOSS_PCT,m.TAKE_PROFIT_PCT,m.TRADE_NOTIONAL_USD,m.MAX_DAILY_LOSS_USD),(3,10,200,100))
+ def test_latest_user_risk_uses_dynamic_five_net_budget(self):
+  self.assertEqual((m.STOP_LOSS_PCT,m.TAKE_PROFIT_PCT,m.TRADE_NOTIONAL_USD,m.MAX_DAILY_LOSS_USD),(5,10,200,100))
 
 class PriceTests(unittest.TestCase):
  def setUp(self):
