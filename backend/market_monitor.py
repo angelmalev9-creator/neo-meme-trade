@@ -27,8 +27,8 @@ MAX_FEED = 70
 ENTRY_SCORE = 80.0
 MAX_POSITIONS = 5
 STOP_LOSS_PCT = 5.0
-STOP_EXECUTION_BUFFER_PCT = 3.0
-EXIT_IMPACT_EMERGENCY_PCT = 2.25
+STOP_EXECUTION_BUFFER_PCT = 4.5
+EXIT_IMPACT_EMERGENCY_PCT = 0.75
 TAKE_PROFIT_PCT = 10.0
 TRAILING_PCT = 4.0
 MAX_HOLD_MINUTES = 60
@@ -939,7 +939,7 @@ class Monitor:
             hold=(now_ms()-int(position.get('opened_at',now_ms())))/60000
             exit_impact=num(quote.get('impact_pct'))
             entry_impact=num(position.get('entry_price_impact_pct'))
-            impact_emergency=max(EXIT_IMPACT_EMERGENCY_PCT, entry_impact*3.0)
+            impact_emergency=max(EXIT_IMPACT_EMERGENCY_PCT, entry_impact+0.50)
             # Risk-only emergency: if a $200 liquidation route starts becoming
             # materially thinner than it was at entry, get out before the 5% budget.
             if exit_impact>=impact_emergency:
