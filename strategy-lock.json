@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-05T05:31:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "ca9705b21ca2bfe08e2f4968be9a118fd31a4be0c49354019f0f2b8ebd986ad4",
+  "sha256": "723974d1703606a8afe3ac859bc0d6a197a1c039bdb6be310286d97d909ba93c",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 85,
@@ -14,11 +14,11 @@
     "max_hold_minutes": 60,
     "starting_balance_usd": 1000,
     "trade_notional_usd": 200,
-    "max_daily_loss_usd": 100,
+    "max_daily_loss_usd": 0,
     "min_liquidity_usd": 10000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "Order Flow GOLD logic retained with explicit user overrides only: minimum liquidity $10k and up to 5 concurrent positions. Mandatory dynamic stop targets <=5% net loss with +10% net TP. Aggregate planned open-position risk is reserved against the $100 daily cap. No reset.",
+  "integrity_note": "Order Flow GOLD logic retained with explicit user overrides only: minimum liquidity $10k, up to 5 concurrent positions, and no daily loss cap in PAPER mode. Mandatory dynamic stop targets <=5% net loss with +10% net TP. No reset.",
   "execution_mode": "JUPITER_QUOTE_V2_EXPECTED",
   "entry_policy_version": "ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V6",
   "entry_policy_limits": {
@@ -40,8 +40,8 @@
     "backend/gold_order_flow.py": "0ebf8f3bf34c85b376fda1e2fb97bdafa3a0ad6d667b0e7c92f54fd4e95be36b",
     "backend/honest_quote_transport.py": "bd5868c186bdc64f708012df31f18f505fa55dc6ecc48478468728bd59b9eabd",
     "backend/pair_price_integrity.py": "945d1723eb3ab785f0d9641c2787e31deff2846dfae58eba2367caf430df81f0",
-    "backend/engine_runtime.py": "00959c07145619bbd01a81ad862c890ebf6803ece31b4f9ad47e1e63160ff5bb"
+    "backend/engine_runtime.py": "7aaf03b854d032a4a6b5e840c95d1a7eaae9239007d03e15e90f1d59d55e2c66"
   },
   "runtime_version": "RUNTIME_REPAIR_V1",
-  "runtime_note": "Up to five concurrent paper positions. Each additional position is sized after reserving planned risk from already-open positions. $200 remains the per-position cap and $100 the daily loss cap."
+  "runtime_note": "Up to five concurrent paper positions. $200 remains the per-position cap. Daily loss cap is disabled for the ongoing PAPER test; accumulated PnL/history are preserved."
 }
