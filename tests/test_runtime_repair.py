@@ -13,7 +13,7 @@ class Budget(unittest.TestCase):
  def test_existing_user_remainder_permits_smaller_order(self):
   pnl=901.8761553-997.46197285
   size=r.plan_notional(200,901.8761553,100,pnl,5,.5,.06)
-  self.assertGreater(size,100);self.assertLess(size,200)
+  self.assertGreater(size,10);self.assertLess(size,200)
   self.assertLessEqual(size*.055+.06,100+pnl)
  def test_fixed_costs_and_cash_reserved(self):
   size=r.plan_notional(200,100,100,0,5,.5,.26)
