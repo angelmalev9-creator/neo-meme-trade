@@ -107,12 +107,13 @@ class EngineEntryTests(unittest.TestCase):
         self.mocks[2].assert_not_called()
         self.assertEqual(m.STATE.entry_diagnostics['status'], 'daily_limit')
 
-    def test_existing_position_is_not_closed_or_replaced(self):
+    def test_existing_position_is_preserved_when_second_position_opens(self):
         original = {'id': 'existing', 'address': 'D'*44, 'notional_usd': 200, 'quantity': 123}
         m.STATE.positions = [copy.deepcopy(original)]
         self.monitor.maybe_open([self.coin])
-        self.assertEqual(m.STATE.positions, [original])
-        self.mocks[2].assert_not_called()
+        self.assertEqual(m.STATE.positions[0], original)
+        self.assertEqual(len(m.STATE.positions), 2)
+        self.assertTrue(self.mocks[2].called)
 
     def test_no_quote_does_not_invent_a_fill(self):
         self.mocks[2].return_value = None
@@ -144,8 +145,8 @@ class EngineEntryTests(unittest.TestCase):
         self.assertFalse(m.STATE.positions)
         self.assertIn('quote_inconsistent', m.STATE.entry_diagnostics['rejections'])
 
-    def test_original_gold_signal_rejects_low_liquidity_and_score(self):
-        for key,val in [('liquidityUsd',10000),('score',84.9)]:
+    def test_user_tuned_gold_signal_rejects_below_10k_liquidity_and_low_score(self):
+        for key,val in [('liquidityUsd',9999),('score',84.9)]:
             self.monitor.maybe_open([{**self.coin,key:val}])
             self.assertFalse(m.STATE.positions)
             self.assertIn('gold_signal',m.STATE.entry_diagnostics['rejections'])
