@@ -8,6 +8,7 @@ import requests
 import engine_execution as paper_quotes
 import engine_rug_guard as rug_guard
 import engine_entry_policy as entry_policy
+import gold_order_flow as order_flow
 import pair_price_integrity as price_integrity
 import pumpswap_stop_quote as pumpswap_stop
 import engine_runtime as runtime
@@ -15,7 +16,7 @@ from lab_dashboard_projection import compact_strategy_lab
 
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
-SCAN_SECONDS = max(5, int(os.getenv('NEO_SCAN_SECONDS', '5')))
+SCAN_SECONDS = max(2, int(os.getenv('NEO_SCAN_SECONDS', '3')))
 POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '0.5'))
 STATE_PATH = Path(os.getenv('NEO_MARKET_STATE_PATH', '/var/lib/neo-market/state.json'))
 AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.jsonl'))
@@ -24,9 +25,9 @@ STRATEGY_LAB_PATH = Path(os.getenv('NEO_STRATEGY_LAB_PATH', '/var/lib/neo-market
 STRATEGY_LAB_COMPACT_PATH = Path(os.getenv('NEO_STRATEGY_LAB_COMPACT_PATH', str(STRATEGY_LAB_PATH.parent / 'strategy_lab_compact.json')))
 POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '0.5'))
 DEX_API = 'https://api.dexscreener.com'
-MAX_FEED = 70
-ENTRY_SCORE = 80.0
-MAX_POSITIONS = 5
+MAX_FEED = 90
+ENTRY_SCORE = 70.0
+MAX_POSITIONS = 8
 STOP_LOSS_PCT = 5.0
 STOP_EXECUTION_BUFFER_PCT = 4.5
 # Execution-only pre-arm. Strategy/entry/adaptive-hold logic is unchanged.
@@ -49,12 +50,12 @@ MIN_LIQUIDITY_USD = 10000.0
 
 # BALANCED_V4: observable, bounded paper-entry checks. The prior AND-gate
 # rejected every observed candidate. Stops, position size and daily cap stay fixed.
-STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '85'))
-STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '75'))
-STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '10000'))
-STRICT_MAX_ENTRY_IMPACT_PCT = float(os.getenv('NEO_STRICT_MAX_ENTRY_IMPACT_PCT', '0.75'))
-STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '1.25'))
-STRICT_MAX_WORST_CASE_COST_PCT = float(os.getenv('NEO_STRICT_MAX_WORST_CASE_COST_PCT', '1.75'))
+STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '65'))
+STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '35'))
+STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '4000'))
+STRICT_MAX_ENTRY_IMPACT_PCT = float(os.getenv('NEO_STRICT_MAX_ENTRY_IMPACT_PCT', '1.75'))
+STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '2.75'))
+STRICT_MAX_WORST_CASE_COST_PCT = float(os.getenv('NEO_STRICT_MAX_WORST_CASE_COST_PCT', '4.0'))
 
 # Paper execution model. Signal/exit rules stay unchanged; only simulated fills and PnL
 # include real-world friction. PumpSwap canonical fee tiers mirror pump.fun fees
@@ -830,7 +831,7 @@ class Monitor:
         self.position_lock = threading.Lock()
         self.position_poll_lock = threading.Lock()
         self.entry_lock = threading.Lock()
-        self.discovery = runtime.DiscoveryCache(discover)
+        self.discovery = runtime.DiscoveryCache(discover, refresh_seconds=8, max_age_seconds=90)
 
     def update_price_history(self, feed: list[dict[str, Any]]) -> None:
         stamp = now_ms()
@@ -1185,7 +1186,7 @@ class Monitor:
             market_cap = num(coin.get('marketCap') or coin.get('fdv'))
             liquidity_mc_ratio = liquidity / max(market_cap, 1.0)
 
-            flow = STATE.live_flow(address, 60)
+            flow = STATE.live_flow(address, 30)
             context = self.market_context(coin)
             rejected = entry_policy.signal_rejections(
                 coin, flow, context, min_score=STRICT_ENTRY_SCORE,
@@ -1217,8 +1218,13 @@ class Monitor:
             if report['quoted'] >= entry_policy.MAX_QUOTED_CANDIDATES:
                 entry_policy.record(report, ['quote_budget'], coin)
                 continue
-            strategy_id = 'ORDER_FLOW_ADAPTIVE'
-            learning = {'sample': 0, 'win_rate': 0, 'profit_factor': 0, 'recent_losses': 0, 'bonus': 0, 'blocked': False}
+            entry_mode = order_flow.entry_mode(coin, flow, context) or 'EARLY'
+            strategy_id = 'ORDER_FLOW_EARLY_ADAPTIVE'
+            learning = adaptive_profile({
+                'strategy_id': strategy_id, 'entry_mode': entry_mode,
+                'score': score, 'liquidity': liquidity, 'change_m5': change_m5,
+                'age': age, 'flow_ratio': num(flow.get('buy_sell_usd_ratio')),
+            })
             recovery = False
             price = num(coin.get('priceUsd'))
             if price <= 0:
@@ -1241,8 +1247,9 @@ class Monitor:
             # With up to five concurrent positions, reserve each open
             # position's planned loss before sizing another one.
             open_planned_risk=sum(num(p.get('planned_risk_usd')) for p in STATE.positions)
+            requested_notional = early_requested_notional(coin, learning)
             notional = runtime.plan_notional(
-                TRADE_NOTIONAL_USD,available_before,MAX_DAILY_LOSS_USD,
+                requested_notional,available_before,MAX_DAILY_LOSS_USD,
                 STATE.risk_day_pnl()-open_planned_risk,
                 STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
             )
@@ -1314,7 +1321,7 @@ class Monitor:
                     entry_policy.record(report,['balance'],coin); return
                 live_open_risk=sum(num(p.get('planned_risk_usd')) for p in STATE.positions)
                 permitted = runtime.plan_notional(
-                    TRADE_NOTIONAL_USD,STATE.available_balance_usd(),MAX_DAILY_LOSS_USD,
+                    requested_notional,STATE.available_balance_usd(),MAX_DAILY_LOSS_USD,
                     STATE.risk_day_pnl()-live_open_risk,
                     STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
                 )
@@ -1331,11 +1338,15 @@ class Monitor:
                     'execution_entry_price': round(entry_quote['fill_price'], 12),
                     'current_price': price, 'peak_price': price,
                     'trade_no': STATE.trade_seq, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
-                    'learning_mode': 'ADAPTIVE_CONTEXT_HOLD', 'entry_flow': flow,
+                    'entry_mode': entry_mode,
+                    'learning_mode': 'EARLY_SIZE_LEARNING+ADAPTIVE_CONTEXT_HOLD', 'entry_flow': flow,
                     'entry_context': context, 'entry_conviction': context.get('conviction'),
                     'entry_hold_mode': context.get('mode'), 'learning_sample': learning['sample'],
                     'learning_win_rate': learning['win_rate'], 'learning_profit_factor': learning['profit_factor'],
                     'learning_recent_losses': learning['recent_losses'], 'learning_bonus': learning['bonus'],
+                    'learning_avg_pnl_pct': learning.get('avg_pnl_pct'),
+                    'learning_size_multiplier': learning.get('size_multiplier'),
+                    'requested_notional_usd': round(requested_notional, 8),
                     'notional_usd': round(notional, 8),
                     'size_limited_by_daily_budget': notional<min(TRADE_NOTIONAL_USD,available_before-fixed_cost_budget),
                     'planned_risk_usd': notional*(STOP_LOSS_PCT+STOP_EXECUTION_BUFFER_PCT)/100+fixed_cost_budget,
