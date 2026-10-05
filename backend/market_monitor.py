@@ -1196,7 +1196,11 @@ class Monitor:
                 entry_policy.record(report, rejected, coin)
                 continue
             report['signal_passed'] += 1
+            # Start independent price and rug checks together. Both helpers are
+            # cached/asynchronous; running them concurrently avoids serial provider
+            # latency without weakening either veto.
             validation=price_integrity.check(coin)
+            safety=rug_guard.check(coin)
             price_review=(
                 validation.get('status')=='review'
                 and validation.get('reason') in {
@@ -1207,7 +1211,6 @@ class Monitor:
             if validation.get('status')!='pass' and not price_review:
                 entry_policy.record(report,[validation.get('reason') or 'price_unavailable'],coin,validation)
                 continue
-            safety=rug_guard.check(coin)
             if safety.get('status')!='pass':
                 entry_policy.record(report, safety.get('reasons') or ['risk_check_pending'], coin)
                 continue
