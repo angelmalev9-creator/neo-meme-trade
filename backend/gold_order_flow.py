@@ -33,9 +33,9 @@ def entry_mode(coin, flow, context):
     # First real buying impulse. Small scouts are sized later by liquidity and
     # learned performance, so this gate can deliberately fire early.
     ultra_early=(
-        age <= 45 and score >= 65 and -8 <= change_m5 <= 25
+        age <= 45 and score >= 58 and -8 <= change_m5 <= 25
         and trades >= 1 and ratio >= 1.05 and buy_usd >= 8
-        and buy_usd >= sell_usd * 1.02 and conviction >= 35
+        and buy_usd >= sell_usd * 1.02 and conviction >= 30
     )
     if ultra_early:
         return 'ULTRA_EARLY'
