@@ -498,8 +498,8 @@ class State:
                     'take_profit_basis': 'EXECUTABLE_NET_PNL',
                     'reentry_seconds': 1200, 'loss_reentry_seconds': 1200,
                     'signal_strategy': 'ORDER_FLOW_ADAPTIVE',
-                    'signal_source_commit': '44a7a09b019f068a97c2165068a556cadcc6bfc4',
-                    'risk_overlay': 'USER_NET_5_10_DYNAMIC_STOP',
+                    'signal_source_commit': 'EARLY_ORDER_FLOW_2026_10_05',
+                    'risk_overlay': 'USER_NET_5_HARD_CAP',
                     'execution_verification_version': 'QUOTE_EVIDENCE_V7',
                     'rug_guard': rug_guard.VERSION,
                     'paper_only': True,
@@ -516,9 +516,9 @@ class State:
                     'daily_loss_cap_enabled': MAX_DAILY_LOSS_USD > 0,
                     'starting_balance_usd': STARTING_BALANCE_USD,
                     'execution_mode': 'JUPITER_QUOTE_V2',
-                    'execution_note': 'Original GOLD entry signal; mandatory +10% net TP and dynamic early chart stop targeting a 5% net loss budget including expected execution costs',
+                    'execution_note': 'High-frequency EARLY Order Flow PAPER mode; liquidity-aware scout sizing, adaptive hold, direct stop monitoring and absolute -5% paper stop cap',
                     'entry_policy_version': entry_policy.POLICY_VERSION,
-                    'signal_source_commit': '44a7a09b019f068a97c2165068a556cadcc6bfc4',
+                    'signal_source_commit': 'EARLY_ORDER_FLOW_2026_10_05',
                     'execution_verification_version': 'QUOTE_EVIDENCE_V7',
                     'max_quoted_candidates_per_scan': entry_policy.MAX_QUOTED_CANDIDATES,
                     'strict_entry_score': STRICT_ENTRY_SCORE,
@@ -1225,7 +1225,7 @@ class Monitor:
             return
         open_addresses = {p.get('address') for p in STATE.positions}
         now = now_ms()
-        # Original GOLD re-entry cooldown. No rapid revenge re-entry.
+        # Keep per-token cooldown so high frequency does not become revenge re-entry.
         recent = {t.get('address') for t in STATE.history if now-int(t.get('closed_at',0))<20*60*1000}
         for coin in feed:
             if len(STATE.positions) >= MAX_POSITIONS:
@@ -1426,7 +1426,7 @@ class Monitor:
                     'jupiter_slippage_bps': int(live_quote.get('slippage_bps') or paper_quotes.SLIPPAGE_BPS),
                     'entry_roundtrip_pnl_pct': round(immediate_roundtrip_pct, 4),
                     'entry_policy_version': entry_policy.POLICY_VERSION,
-                    'signal_source_commit': '44a7a09b019f068a97c2165068a556cadcc6bfc4',
+                    'signal_source_commit': 'EARLY_ORDER_FLOW_2026_10_05',
                     'execution_verification_version': 'QUOTE_EVIDENCE_V6',
                     'entry_quote': live_quote.get('raw_quote'),
                     'preflight_buy_quote': live_quote.get('preflight_buy_quote'),
