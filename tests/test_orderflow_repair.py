@@ -15,7 +15,7 @@ class GoldParityTests(unittest.TestCase):
   self.assertEqual(hashlib.sha256(ast.dump(node).encode()).hexdigest(),gold.CORE_AST_SHA256)
   fn=compile(ast.Expression(node),'<original-GOLD>','eval');rnd=random.Random(21)
   for _ in range(20000):
-   score=rnd.choice([0,78,84.99,85,90,100]);liquidity=rnd.choice([1000,14999,15000,50000])
+   score=rnd.choice([0,78,84.99,85,90,100]);liquidity=rnd.choice([1000,9999,10000,14999,15000,50000])
    change_m5=rnd.choice([-6,-5,0,25,26]);flow={'trades':rnd.choice([0,2,3,9]),'buy_sell_usd_ratio':rnd.choice([1.29,1.3,3]),'unique_wallets':rnd.choice([0,1,5]),'max_sell_usd':rnd.choice([100,749.9,750,850]),'buy_usd':rnd.choice([10,500,1000,10000])}
    conviction=rnd.choice([35,74.9,75,100])
    expected=bool(eval(fn,{'max':max},locals()) and conviction>=75)
