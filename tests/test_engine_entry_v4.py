@@ -69,13 +69,13 @@ class EngineEntryTests(unittest.TestCase):
         size=quote.call_args.args[2]
         self.assertLess(size,200)
         self.assertGreaterEqual(size,10)
-        self.assertLessEqual(size*.033+.225,5.01)
+        self.assertLessEqual(size*.055+.225,5.01)
 
 
     def test_preserve_user_risk_settings(self):
         self.assertEqual(m.TRADE_NOTIONAL_USD, 200)
         self.assertEqual(m.MAX_DAILY_LOSS_USD, 100)
-        self.assertEqual(m.STOP_LOSS_PCT, 3)
+        self.assertEqual(m.STOP_LOSS_PCT, 5)
         self.assertEqual(m.MAX_POSITIONS, 1)
         self.assertEqual(m.TAKE_PROFIT_PCT, 10)
 
@@ -87,7 +87,7 @@ class EngineEntryTests(unittest.TestCase):
         self.assertEqual(pos['entry_policy_version'], policy.POLICY_VERSION)
         self.assertEqual(m.STATE.entry_diagnostics['status'], 'opened')
         self.assertLess(pos['entry_roundtrip_pnl_pct'], 0)
-        self.assertEqual(pos['hard_stop_net_pct'], -3)
+        self.assertEqual(pos['hard_stop_net_pct'], -5)
 
     def test_no_balance_session_history_reset(self):
         m.STATE.demo_balance_usd = 975
