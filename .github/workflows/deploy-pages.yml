@@ -33,7 +33,7 @@ jobs:
       - name: Verify Python backend syntax
         run: |
           python3 -m py_compile backend/*.py
-          PYTHONPATH=backend python3 -m unittest -v tests.test_early_order_flow_v8
+          PYTHONPATH=backend python3 -m unittest -v tests.test_early_order_flow_v8 tests.test_pumpswap_stop_quote
 
       - name: Build and verify strategy lock
         run: npm run build
