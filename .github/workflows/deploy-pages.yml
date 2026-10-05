@@ -30,7 +30,12 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Build and verify GOLD strategy lock
+      - name: Verify Python backend syntax
+        run: |
+          python3 -m py_compile backend/*.py
+          PYTHONPATH=backend python3 -m unittest -v tests.test_early_order_flow_v8
+
+      - name: Build and verify strategy lock
         run: npm run build
 
       - name: Add .nojekyll
