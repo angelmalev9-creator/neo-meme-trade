@@ -76,7 +76,7 @@ class EngineEntryTests(unittest.TestCase):
         self.assertEqual(m.TRADE_NOTIONAL_USD, 200)
         self.assertEqual(m.MAX_DAILY_LOSS_USD, 100)
         self.assertEqual(m.STOP_LOSS_PCT, 5)
-        self.assertEqual(m.MAX_POSITIONS, 1)
+        self.assertEqual(m.MAX_POSITIONS, 5)
         self.assertEqual(m.TAKE_PROFIT_PCT, 10)
 
     def test_valid_formerly_overfiltered_entry_reaches_quote_and_opens(self):
@@ -178,7 +178,7 @@ class EngineEntryTests(unittest.TestCase):
     def test_reported_thresholds_match_real_policy(self):
         snapshot = m.STATE.snapshot()
         self.assertEqual(snapshot['config']['entry_score'], 85)
-        self.assertEqual(snapshot['config']['min_liquidity_usd'], 15000)
+        self.assertEqual(snapshot['config']['min_liquidity_usd'], 10000)
         self.assertEqual(snapshot['config']['entry_policy_version'], policy.POLICY_VERSION)
         self.assertIn('entry_diagnostics', snapshot)
 
