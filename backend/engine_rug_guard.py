@@ -13,12 +13,14 @@ import time
 from pathlib import Path
 import requests
 
-VERSION='RUG_GUARD_V1'
+VERSION='RUG_GUARD_V2'
 RPC=os.getenv('NEO_RISK_RPC_URL','https://api.mainnet-beta.solana.com')
 ROOT=Path(os.getenv('NEO_RISK_CACHE_DIR','/var/lib/neo-market/engine-risk-cache'))
 TOKEN_PROGRAMS={'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA','TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'}
 ADDR=re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 TTL_MS=60_000
+INSIDER_HARD_BLOCK_COUNT=50
+INSIDER_REVIEW_COUNT=10
 _POOL=cf.ThreadPoolExecutor(max_workers=2,thread_name_prefix='engine-risk')
 _LOCK=threading.Lock()
 _PENDING={}
@@ -31,6 +33,7 @@ def num(x,default=math.nan):
 
 def assess(mint,pair,account,report):
     reasons=[]; metrics={}
+    reported_lp=math.nan; top1=math.nan; top10=math.nan
     try:
         if account.get('owner') not in TOKEN_PROGRAMS: reasons.append('unsupported_token_program')
         parsed=(account.get('data') or {}).get('parsed') or {}
@@ -64,6 +67,7 @@ def assess(mint,pair,account,report):
         if not selected: reasons.append('pool_not_verified')
         else:
             pct=num((selected.get('lp') or {}).get('lpLockedPct'))
+            reported_lp=pct
             metrics['reported_lp_locked_pct']=pct if math.isfinite(pct) else None
             lp=selected.get('lp') or {}
             if lp.get('quoteMint')=='So11111111111111111111111111111111111111112': metrics['sol_usd']=num(lp.get('quotePrice'),0)
@@ -89,7 +93,25 @@ def assess(mint,pair,account,report):
             top1=largest[0] if largest else 0; top10=sum(largest[:10])
             metrics.update(reported_top_owner_pct=top1,reported_top10_pct=top10)
             if top1>20 or top10>35: reasons.append('holder_concentration')
-        if num(report.get('graphInsidersDetected'),0)>0: reasons.append('reported_linked_insiders')
+
+        insiders=max(0,int(num(report.get('graphInsidersDetected'),0)))
+        rug_score=num(report.get('score_normalised'),num(report.get('score'),math.nan))
+        metrics['reported_linked_insiders_count']=insiders
+        metrics['rugcheck_score_normalised']=rug_score if math.isfinite(rug_score) else None
+        # A handful of linked wallets is not equivalent to a large coordinated cluster.
+        # 50+ is always blocked. 10-49 requires an otherwise exceptionally clean
+        # report (very low RugCheck score, >=99% reported LP lock and dispersed holders).
+        if insiders>=INSIDER_HARD_BLOCK_COUNT:
+            reasons.append('reported_linked_insiders')
+        elif insiders>=INSIDER_REVIEW_COUNT:
+            clean_cluster=(
+                math.isfinite(rug_score) and rug_score<=5
+                and math.isfinite(reported_lp) and reported_lp>=99
+                and math.isfinite(top1) and top1<=5
+                and math.isfinite(top10) and top10<=20
+            )
+            if not clean_cluster:
+                reasons.append('reported_linked_insiders')
         metrics['report_detected_at']=report.get('detectedAt')
     except (TypeError,ValueError,KeyError,AttributeError,OverflowError):
         reasons.append('risk_schema_unverified')
