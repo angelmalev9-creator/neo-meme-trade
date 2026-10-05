@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, math, os, re, threading, time
+import copy, hashlib, json, math, os, re, shutil, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from datetime import datetime
@@ -13,6 +13,8 @@ import gold_order_flow as order_flow
 import pair_price_integrity as price_integrity
 import pumpswap_stop_quote as pumpswap_stop
 import engine_runtime as runtime
+import engine_exit_policy as exit_policy
+import training_bridge
 from lab_dashboard_projection import compact_strategy_lab
 
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
@@ -30,11 +32,8 @@ MAX_FEED = 90
 ENTRY_SCORE = 60.0
 MAX_POSITIONS = 8
 STOP_LOSS_PCT = 5.0
-STOP_EXECUTION_BUFFER_PCT = 4.5
-# Execution-only pre-arm. Strategy/entry/adaptive-hold logic is unchanged.
-# Direct on-chain PumpSwap marks arm the paper stop at -4% net, leaving 1%
-# headroom before the absolute -5% paper fill invariant.
-STOP_EXECUTION_ARM_NET_PCT = 4.0
+STOP_EXECUTION_BUFFER_PCT = 0.5  # Planned risk allowance, never a fill clamp.
+STOP_EXECUTION_ARM_NET_PCT = 5.0
 EXIT_IMPACT_EMERGENCY_PCT = 0.75
 TAKE_PROFIT_PCT = 10.0
 TRAILING_PCT = 4.0
@@ -47,19 +46,29 @@ HEALTH_WINDOW = 12
 STARTING_BALANCE_USD = 1000.0
 TRADE_NOTIONAL_USD = float(os.getenv('NEO_TRADE_NOTIONAL_USD', '200'))
 MAX_DAILY_LOSS_USD = float(os.getenv('NEO_MAX_DAILY_LOSS_USD', '0'))
+MAX_POSITION_RISK_USD = float(os.getenv('NEO_MAX_POSITION_RISK_USD', '250'))
+MAX_TOTAL_EXPOSURE_PCT = float(os.getenv('NEO_MAX_TOTAL_EXPOSURE_PCT', '100'))
+MAX_DRAWDOWN_PCT = float(os.getenv('NEO_MAX_DRAWDOWN_PCT', '0'))
 MIN_LIQUIDITY_USD = 10000.0
 
-# BALANCED_V4: observable, bounded paper-entry checks. The prior AND-gate
-# rejected every observed candidate. Stops, position size and daily cap stay fixed.
+# One validated effective threshold object governs every EARLY signal call.
 STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '58'))
 STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '30'))
 STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '4000'))
 STRICT_MAX_ENTRY_IMPACT_PCT = float(os.getenv('NEO_STRICT_MAX_ENTRY_IMPACT_PCT', '1.75'))
 STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '2.75'))
 STRICT_MAX_WORST_CASE_COST_PCT = float(os.getenv('NEO_STRICT_MAX_WORST_CASE_COST_PCT', '4.0'))
+EFFECTIVE_ENTRY_THRESHOLDS = order_flow.EntryThresholds(STRICT_ENTRY_SCORE, STRICT_MIN_LIQUIDITY_USD, STRICT_MIN_CONVICTION)
+for _threshold in (STRICT_MAX_ENTRY_IMPACT_PCT, STRICT_MAX_ROUNDTRIP_COST_PCT, STRICT_MAX_WORST_CASE_COST_PCT,
+                   TRADE_NOTIONAL_USD, MAX_DAILY_LOSS_USD, POSITION_SCAN_SECONDS, MAX_POSITION_RISK_USD,
+                   MAX_TOTAL_EXPOSURE_PCT, MAX_DRAWDOWN_PCT):
+    if not math.isfinite(_threshold) or _threshold < 0: raise ValueError('invalid PAPER configuration')
+if TRADE_NOTIONAL_USD <= 0 or POSITION_SCAN_SECONDS <= 0: raise ValueError('invalid PAPER configuration')
+if MAX_POSITION_RISK_USD <= 0 or not 0 < MAX_TOTAL_EXPOSURE_PCT <= 100 or not 0 <= MAX_DRAWDOWN_PCT <= 100:
+    raise ValueError('invalid PAPER risk limits')
 
-# Paper execution model. Signal/exit rules stay unchanged; only simulated fills and PnL
-# include real-world friction. PumpSwap canonical fee tiers mirror pump.fun fees
+# Legacy deterministic PAPER friction model; quote-backed positions use the
+# versioned engine_execution adapter. PumpSwap canonical fee tiers mirror pump.fun fees
 # published 2026-05-20. Non-PumpSwap pools use the conservative fallback below.
 GENERIC_DEX_FEE_BPS = float(os.getenv('NEO_EXEC_GENERIC_DEX_FEE_BPS', '30'))
 BASE_SLIPPAGE_BPS = float(os.getenv('NEO_EXEC_BASE_SLIPPAGE_BPS', '10'))
@@ -194,56 +203,32 @@ def exit_execution(coin: dict[str, Any], quantity: float) -> dict[str, float]:
 def enforce_paper_stop_cap(
     quote: dict[str, Any], notional: float, entry_cost: float, quantity: float
 ) -> tuple[dict[str, Any], float, float, bool]:
-    """Enforce the explicitly requested absolute -5% bound for PAPER fills.
+    """Compatibility entry point: return the observed modeled proceeds unchanged.
 
-    The live reserve quote is preserved in observed_* fields. The cap is only an
-    accounting safety invariant for the demo engine; it does not claim a real
-    stop-market order could always fill through a gap at exactly -5%.
+    Historical V8 silently invented proceeds through gaps. The name remains
+    solely for older callers; there is no accounting cap in the repaired model.
     """
-    observed_net = num(quote.get('net_proceeds_usd'))
-    observed_gross = num(quote.get('gross_proceeds_usd'))
-    observed_fill = num(quote.get('fill_price'))
-    observed_pnl = observed_net - notional - entry_cost
-    observed_pct = observed_pnl / max(notional, 1e-18) * 100.0
-    if observed_pct >= -STOP_LOSS_PCT:
-        return quote, observed_pnl, observed_pct, False
-    target_pnl = -(notional * STOP_LOSS_PCT / 100.0)
-    target_net = max(0.0, notional + entry_cost + target_pnl)
-    network = max(0.0, num(quote.get('network_fee_usd')))
-    target_gross = target_net + network
-    adjusted = dict(quote)
-    adjusted.update({
-        'observed_net_proceeds_usd': observed_net,
-        'observed_gross_proceeds_usd': observed_gross,
-        'observed_fill_price': observed_fill,
-        'observed_pnl_usd': observed_pnl,
-        'observed_pnl_pct': observed_pct,
-        'net_proceeds_usd': target_net,
-        'gross_proceeds_usd': target_gross,
-        'fill_price': target_gross / max(quantity, 1e-18),
-        'paper_hard_stop_capped': True,
-        'execution_source': str(quote.get('execution_source') or 'UNKNOWN') + '+PAPER_STOP_CAP_5',
-    })
-    return adjusted, target_pnl, -STOP_LOSS_PCT, True
+    pnl = num(quote.get('net_proceeds_usd')) - notional - entry_cost
+    return quote, pnl, pnl / max(notional, 1e-18) * 100.0, False
 
 
 def read_strategy_lab() -> dict[str, Any]:
     """Read the prebuilt compact Lab snapshot; full histories stay on disk."""
     try:
-        data = json.loads(STRATEGY_LAB_COMPACT_PATH.read_text())
+        data = json.loads(STRATEGY_LAB_COMPACT_PATH.read_text(encoding='utf-8'))
         if isinstance(data, dict):
             return data
     except Exception:
         pass
     try:
-        data = json.loads(STRATEGY_LAB_PATH.read_text())
+        data = json.loads(STRATEGY_LAB_PATH.read_text(encoding='utf-8'))
         return compact_strategy_lab(data)
     except Exception:
         return {'status': 'offline', 'books': {}, 'stats': {}}
 
 def read_live_tape() -> dict[str, Any]:
     try:
-        data = json.loads(LIVE_TAPE_PATH.read_text())
+        data = json.loads(LIVE_TAPE_PATH.read_text(encoding='utf-8'))
         return data if isinstance(data, dict) else {'status': 'offline', 'events': []}
     except Exception:
         return {'status': 'offline', 'events': []}
@@ -304,7 +289,7 @@ def signal(kind: str, title: str, detail: str) -> dict[str, str]:
 
 
 class State:
-    def __init__(self) -> None:
+    def __init__(self, load_state: bool = True) -> None:
         self.lock = threading.RLock()
         self.running = True
         self.status = 'starting'
@@ -313,6 +298,7 @@ class State:
         self.scan_count = 0
         self.feed: list[dict[str, Any]] = []
         self.positions: list[dict[str, Any]] = []
+        self.position_market: dict[str, dict[str, Any]] = {}
         self.history: list[dict[str, Any]] = []
         self.events: list[dict[str, Any]] = []
         self.price_history: dict[str, list[dict[str, Any]]] = {}
@@ -322,21 +308,39 @@ class State:
         self.demo_started_at = now_ms()
         self.demo_session_id = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
         self.trade_seq = 0
+        self.pending_audit: list[dict[str, Any]] = []
+        self.audit_status = 'ok'
+        self.equity_peak_usd = STARTING_BALANCE_USD
         self.entry_diagnostics = {'status': 'starting', 'policy_version': entry_policy.POLICY_VERSION}
         self.risk_day_key = time.strftime('%Y-%m-%d', time.gmtime())
         self.risk_day_start_balance_usd = STARTING_BALANCE_USD
-        self.load()
+        if load_state: self.load()
 
     def load(self) -> None:
         if not STATE_PATH.exists():
             return
         try:
-            data = json.loads(STATE_PATH.read_text())
-            self.positions = data.get('positions', [])[-20:]
-            self.history = data.get('history', [])[-300:]
+            data = json.loads(STATE_PATH.read_text(encoding='utf-8'))
+            if not isinstance(data, dict) or not isinstance(data.get('positions', []), list) or not isinstance(data.get('history', []), list):
+                raise ValueError('invalid account schema')
+            if int(data.get('schema_version') or 1) > 3:
+                raise ValueError('unsupported future account schema')
+            ids = [p.get('id') for p in data.get('positions', [])]
+            if any(not i for i in ids) or len(ids) != len(set(ids)):
+                raise ValueError('missing or duplicate open position identifiers')
+            if not math.isfinite(float(data.get('demo_balance_usd', STARTING_BALANCE_USD))):
+                raise ValueError('nonfinite balance')
+            self.positions = data.get('positions', [])
+            self.running = bool(data.get('running', True))
+            self.status = str(data.get('status') or ('starting' if self.running else 'paused'))
+            self.history = data.get('history', [])
+            self.position_market = data.get('position_market', {})
+            self.pending_audit = data.get('pending_audit', [])
+            self.audit_status = 'pending' if self.pending_audit else 'ok'
             self.events = data.get('events', [])[-100:]
             self.demo_starting_balance_usd = num(data.get('demo_starting_balance_usd'), STARTING_BALANCE_USD)
             self.demo_balance_usd = num(data.get('demo_balance_usd'), self.demo_starting_balance_usd)
+            self.equity_peak_usd = num(data.get('equity_peak_usd'), max(self.demo_starting_balance_usd,self.demo_balance_usd))
             self.demo_started_at = int(data.get('demo_started_at') or self.demo_started_at)
             self.demo_session_id = str(data.get('demo_session_id') or self.demo_session_id)
             self.trade_seq = int(data.get('trade_seq') or 0)
@@ -356,18 +360,24 @@ class State:
             # Never boot a silently reset $1000 account from an unreadable file.
             raise RuntimeError('Account state is unreadable; refusing automatic reset') from exc
 
-    def save(self) -> None:
+    def _persist(self) -> None:
+        self.equity_peak_usd = max(self.equity_peak_usd, self.equity_usd())
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         keep = {c.get('address') for c in self.feed[:50]}
         keep |= {p.get('address') for p in self.positions}
         keep |= {t.get('address') for t in self.history[:100]}
         price_history = {k: v[-480:] for k, v in self.price_history.items() if k in keep}
         runtime.atomic_json(STATE_PATH,{
-            'positions': self.positions[-20:],
-            'history': self.history[-300:],
+            'schema_version': 3,
+            'running': self.running, 'status': self.status,
+            'positions': self.positions,
+            'position_market': self.position_market,
+            'history': self.history,
+            'pending_audit': self.pending_audit,
             'events': self.events[-100:],
             'demo_starting_balance_usd': self.demo_starting_balance_usd,
             'demo_balance_usd': self.demo_balance_usd,
+            'equity_peak_usd': self.equity_peak_usd,
             'demo_started_at': self.demo_started_at,
             'demo_session_id': self.demo_session_id,
             'trade_seq': self.trade_seq,
@@ -375,6 +385,65 @@ class State:
             'risk_day_start_balance_usd': self.risk_day_start_balance_usd,
             'price_history': price_history,
         })
+
+    def save(self) -> None:
+        """Commit the authoritative ledger before draining the durable audit outbox."""
+        with self.lock:
+            self._persist()
+            if not self.pending_audit: return
+            try:
+                for row in list(self.pending_audit): append_audit(row['event'], row['payload'])
+                old_pending = self.pending_audit
+                self.pending_audit = []
+                try: self._persist()
+                except Exception:
+                    self.pending_audit = old_pending
+                    raise
+                self.audit_status = 'ok'
+            except Exception as exc:
+                self.audit_status = 'pending:' + type(exc).__name__
+                self.message = 'Audit write pending; ledger committed and retryable.'
+
+    def commit(self, event, payload, **changes):
+        """Atomic balance/position/history transition; failed state write rolls back memory."""
+        with self.lock:
+            previous = {key: getattr(self, key) for key in changes}
+            previous_peak = self.equity_peak_usd
+            previous_pending = self.pending_audit
+            payload = dict(payload, event_id=f"{payload.get('session_id', self.demo_session_id)}:{event}:{payload.get('id', uuid.uuid4().hex)}")
+            for key, value in changes.items(): setattr(self, key, value)
+            self.pending_audit = previous_pending + [{'event': event, 'payload': payload}]
+            try: self.save()
+            except Exception:
+                for key, value in previous.items(): setattr(self, key, value)
+                self.pending_audit = previous_pending
+                self.equity_peak_usd = previous_peak
+                raise
+
+    def reset_with_archive(self):
+        """An explicit PAPER reset archives the full pre-reset state and audit first."""
+        with self.lock:
+            self.save()
+            archive = STATE_PATH.parent / 'archives' / (str(now_ms()) + '-' + uuid.uuid4().hex[:8])
+            archive.mkdir(parents=True, exist_ok=False)
+            manifest = {'old_session_id': self.demo_session_id, 'created_at': now_ms(), 'files': []}
+            for source in (STATE_PATH, AUDIT_PATH):
+                if source.exists():
+                    target = archive / source.name
+                    shutil.copy2(source, target)
+                    manifest['files'].append({'source': str(source), 'archive': str(target), 'sha256': hashlib.sha256(target.read_bytes()).hexdigest()})
+            runtime.atomic_json(archive / 'manifest.json', manifest)
+            new_session = time.strftime('%Y%m%d-%H%M%S', time.gmtime()) + '-' + uuid.uuid4().hex[:8]
+            self.commit('RESET', {'id': new_session, 'session_id': new_session, 'starting_balance_usd': STARTING_BALANCE_USD, 'archive': str(archive)},
+                positions=[], history=[], events=[], price_history={}, position_market={},
+                demo_starting_balance_usd=STARTING_BALANCE_USD, demo_balance_usd=STARTING_BALANCE_USD,
+                demo_started_at=now_ms(), demo_session_id=new_session, trade_seq=0,
+                equity_peak_usd=STARTING_BALANCE_USD,
+                risk_day_key=time.strftime('%Y-%m-%d', time.gmtime()), risk_day_start_balance_usd=STARTING_BALANCE_USD,
+                entry_diagnostics={'status': 'reset', 'policy_version': entry_policy.POLICY_VERSION})
+            self.event(f'New PAPER session with ${STARTING_BALANCE_USD:.2f}; archive {archive.name}.')
+            self.save()
+            return str(archive)
 
     def event(self, text: str) -> None:
         self.events.insert(0, {'ts': now_ms(), 'text': text[:500]})
@@ -401,7 +470,7 @@ class State:
 
     def risk_day_pnl(self) -> float:
         self.refresh_risk_day()
-        return self.demo_balance_usd - self.risk_day_start_balance_usd
+        return self.equity_usd() - self.risk_day_start_balance_usd
 
     def realized_today(self) -> float:
         day = time.strftime('%Y-%m-%d', time.gmtime())
@@ -412,10 +481,28 @@ class State:
                 total += num(trade.get('pnl_usd'))
         return total
 
-    def live_flow(self, address: str, seconds: int = 30) -> dict[str, Any]:
+    def live_flow(self, address: str, seconds: int = 30, pair_address: str | None = None) -> dict[str, Any]:
         tape = read_live_tape()
-        cutoff = now_ms() - seconds * 1000
-        rows = [e for e in tape.get('events', []) if e.get('address') == address and int(e.get('ts', 0)) >= cutoff]
+        decision_at = now_ms()
+        cutoff = decision_at - seconds * 1000
+        coverage = (tape.get('pair_coverage') or {}).get(pair_address, {})
+        quality = str(coverage.get('status') or 'UNKNOWN').upper()
+        if not pair_address or num(coverage.get('complete_since_ms'), decision_at+1) > cutoff:
+            quality = 'DEGRADED' if quality == 'COMPLETE' else 'UNKNOWN'
+        available_rows = [e for e in tape.get('events', []) if e.get('address') == address
+                and (not pair_address or e.get('pairAddress') == pair_address)
+                and cutoff <= num(e.get('ts')) <= decision_at
+                and 0 < num(e.get('available_at', e.get('ingested_at'))) <= decision_at]
+        if any(e.get('quality_flags') or num(e.get('usd_amount')) <= 0 for e in available_rows):
+            quality = 'DEGRADED'
+        rows = []
+        event_ids = set()
+        for event in available_rows:
+            if event.get('quality_flags') or num(event.get('usd_amount')) <= 0: continue
+            event_id = event.get('event_id')
+            if event_id and event_id in event_ids: continue
+            if event_id: event_ids.add(event_id)
+            rows.append(event)
         buys = [e for e in rows if e.get('direction') == 'BUY']
         sells = [e for e in rows if e.get('direction') == 'SELL']
         buy_usd = sum(num(e.get('usd_amount')) for e in buys)
@@ -436,6 +523,9 @@ class State:
         whale_buy_usd = sum(num(e.get('usd_amount')) for e in buys if num(e.get('usd_amount')) >= 750)
         whale_sell_usd = sum(num(e.get('usd_amount')) for e in sells if num(e.get('usd_amount')) >= 750)
         return {
+            'quality': quality, 'coverage': coverage, 'decision_at': decision_at,
+            'fresh': quality == 'COMPLETE',
+            'latest_at': max([num(e.get('available_at', e.get('ingested_at'))) for e in rows] or [0]),
             'seconds': seconds, 'trades': len(rows), 'buys': len(buys), 'sells': len(sells),
             'buy_usd': round(buy_usd, 2), 'sell_usd': round(sell_usd, 2),
             'net_buy_usd': round(buy_usd - sell_usd, 2),
@@ -451,9 +541,9 @@ class State:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
-            wins = sum(1 for t in self.history if num(t.get('pnl_pct')) > 0)
-            closed = len(self.history)
-            closed_total = max(self.trade_seq - len(self.positions), closed)
+            lifetime = trade_metrics(self.history)
+            wins, closed = lifetime['wins'], lifetime['closed_trades']
+            closed_total = closed
             tape = read_live_tape()
             return {
                 'running': self.running,
@@ -470,12 +560,23 @@ class State:
                 'live_tape': [],
                 'live_tape_status': {k: tape.get(k) for k in ('status','tracked_pairs','updated_at','source','error')},
                 'strategy_lab': read_strategy_lab(),
+                'paper_training': training_bridge.snapshot(),
                 'stats': {
                     'feed_count': len(self.feed),
                     'open_positions': len(self.positions),
                     'closed_trades': closed_total,
                     'wins': wins,
                     'win_rate': round((wins / closed) * 100, 1) if closed else 0,
+                    'metrics': {'lifetime': lifetime,
+                        'session': trade_metrics([t for t in self.history if t.get('session_id') == self.demo_session_id]),
+                        'rolling_100': trade_metrics(self.history[:100]),
+                        'policy_versions': {v: trade_metrics([t for t in self.history if str(t.get('exit_policy_version') or 'legacy_unknown') == v])
+                            for v in {str(t.get('exit_policy_version') or 'legacy_unknown') for t in self.history}}},
+                    'historical_records_missing': max(0, self.trade_seq - len(self.positions) - len(self.history)),
+                    'audit_status': self.audit_status,
+                    'unavailable_liquidation_positions': sum(1 for p in self.positions if p.get('valuation_status') == 'unavailable'),
+                    'conservative_open_risk_usd': sum(num(p.get('conservative_risk_usd'), num(p.get('capital_committed_usd'))) for p in self.positions),
+                    'drawdown_pct': max(0,1-self.equity_usd()/max(self.equity_peak_usd,1))*100,
                     'realized_today_usd': round(self.realized_today(), 2),
                     'risk_day_pnl_usd': round(self.risk_day_pnl(), 2),
                     'daily_risk_remaining_usd': (round(max(0.,MAX_DAILY_LOSS_USD+self.risk_day_pnl()),4) if MAX_DAILY_LOSS_USD > 0 else None),
@@ -499,13 +600,13 @@ class State:
                     'max_positions': MAX_POSITIONS,
                     'stop_loss_pct': STOP_LOSS_PCT,
                     'stop_loss_basis': 'EXECUTABLE_NET_PNL',
-                    'stop_trigger_net_pct': -(STOP_LOSS_PCT-STOP_EXECUTION_BUFFER_PCT),
+                    'stop_trigger_net_pct': -STOP_LOSS_PCT,
                     'take_profit_basis': 'EXECUTABLE_NET_PNL',
                     'reentry_seconds': 1200, 'loss_reentry_seconds': 1200,
-                    'signal_strategy': 'ORDER_FLOW_ADAPTIVE',
-                    'signal_source_commit': 'EARLY_ORDER_FLOW_2026_10_05',
-                    'risk_overlay': 'USER_NET_5_HARD_CAP',
-                    'execution_verification_version': 'QUOTE_EVIDENCE_V7',
+                    'signal_strategy': 'ORDER_FLOW_EARLY_FIXED_PAPER_V9',
+                    'signal_source_commit': order_flow.SOURCE_COMMIT,
+                    'risk_overlay': 'PLANNED_NET_STOP_NO_FILL_GUARANTEE',
+                    'execution_verification_version': 'QUOTE_EVIDENCE_V9',
                     'rug_guard': rug_guard.VERSION,
                     'paper_only': True,
                     'runtime_version': runtime.VERSION,
@@ -518,13 +619,19 @@ class State:
                     'min_liquidity_usd': STRICT_MIN_LIQUIDITY_USD,
                     'trade_notional_usd': TRADE_NOTIONAL_USD,
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
+                    'max_position_full_loss_risk_usd': MAX_POSITION_RISK_USD,
+                    'max_total_exposure_pct': MAX_TOTAL_EXPOSURE_PCT,
+                    'max_drawdown_pct': MAX_DRAWDOWN_PCT,
+                    'drawdown_cap_enabled': MAX_DRAWDOWN_PCT > 0,
                     'daily_loss_cap_enabled': MAX_DAILY_LOSS_USD > 0,
                     'starting_balance_usd': STARTING_BALANCE_USD,
-                    'execution_mode': live_quote.get('execution_source') or 'JUPITER_QUOTE_V2',
-                    'execution_note': 'High-frequency EARLY Order Flow PAPER mode; liquidity-aware scout sizing, adaptive hold, direct stop monitoring and absolute -5% paper stop cap',
+                    'execution_mode': 'PAPER_QUOTE_OR_OBSERVED_POOL_MODEL',
+                    'execution_note': 'PAPER only; observed quotes with modeled fills, full fees and uncapped gap losses. Validated learning portfolios are separate.',
                     'entry_policy_version': entry_policy.POLICY_VERSION,
-                    'signal_source_commit': 'EARLY_ORDER_FLOW_2026_10_05',
-                    'execution_verification_version': 'QUOTE_EVIDENCE_V7',
+                    'exit_policy': 'fixed', 'exit_policy_version': exit_policy.VERSION,
+                    'effective_config_hash': effective_config_hash(),
+                    'effective_entry_thresholds': EFFECTIVE_ENTRY_THRESHOLDS.as_dict(),
+                    'signal_source_commit': order_flow.SOURCE_COMMIT,
                     'max_quoted_candidates_per_scan': entry_policy.MAX_QUOTED_CANDIDATES,
                     'strict_entry_score': STRICT_ENTRY_SCORE,
                     'strict_min_conviction': STRICT_MIN_CONVICTION,
@@ -559,74 +666,55 @@ class State:
 
 
 def append_audit(event: str, payload: dict[str, Any]) -> None:
-    try:
-        AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        record = {'ts': now_ms(), 'event': event, 'session_id': STATE.demo_session_id, **payload}
-        with AUDIT_PATH.open('a', encoding='utf-8') as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + '\n')
-    except Exception:
-        pass
+    AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    record = {'schema_version': 3, 'ts': now_ms(), 'event': event, 'session_id': STATE.demo_session_id, **payload}
+    event_id = record.get('event_id')
+    if event_id and AUDIT_PATH.exists():
+        # Repair incomplete final append after an interruption, then deduplicate
+        # the outbox retry by the transaction ID committed with account state.
+        with AUDIT_PATH.open('rb+') as handle:
+            content = handle.read()
+            if content and not content.endswith(b'\n'):
+                tail_start = content.rfind(b'\n') + 1
+                try:
+                    json.loads(content[tail_start:])
+                    handle.seek(0, 2); handle.write(b'\n'); handle.flush(); os.fsync(handle.fileno())
+                except (ValueError, UnicodeDecodeError):
+                    handle.truncate(tail_start); handle.flush(); os.fsync(handle.fileno())
+        for line in AUDIT_PATH.read_text(encoding='utf-8').splitlines():
+            if json.loads(line).get('event_id') == event_id: return
+    with AUDIT_PATH.open('a', encoding='utf-8') as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
+        handle.flush(); os.fsync(handle.fileno())
 
 
-def adaptive_profile(setup: dict[str, Any]) -> dict[str, Any]:
-    """Learn sizing from comparable EARLY paper entries without stopping trading."""
-    similar = []
-    mode = str(setup.get('entry_mode') or '')
-    target_score = num(setup.get('score'))
-    target_liq = max(num(setup.get('liquidity')), 1.0)
-    target_m5 = num(setup.get('change_m5'))
-    for trade in STATE.history[:LEARNING_WINDOW]:
-        if trade.get('strategy_id') != 'ORDER_FLOW_EARLY_ADAPTIVE':
-            continue
-        if str(trade.get('entry_mode') or '') != mode:
-            continue
-        snap = trade.get('coin_snapshot') or {}
-        score = num(trade.get('score') or snap.get('score'))
-        liq = num(trade.get('entry_liquidity_usd') or snap.get('liquidityUsd'))
-        m5 = num(
-            trade.get('entry_change_m5')
-            if trade.get('entry_change_m5') is not None
-            else (snap.get('priceChange') or {}).get('m5')
-        )
-        if abs(score - target_score) > 15 or abs(m5 - target_m5) > 18:
-            continue
-        liq_ratio = liq / target_liq
-        if not 0.25 <= liq_ratio <= 4.0:
-            continue
-        similar.append(trade)
+def trade_metrics(trades):
+    known = [t for t in trades if isinstance(t.get('pnl_usd'), (int, float)) and math.isfinite(t['pnl_usd'])]
+    wins = sum(t['pnl_usd'] > 0 for t in known)
+    loss = -sum(min(0., t['pnl_usd']) for t in known)
+    gain = sum(max(0., t['pnl_usd']) for t in known)
+    return {'closed_trades': len(known), 'wins': wins, 'losses': sum(t['pnl_usd'] < 0 for t in known),
+            'breakeven': sum(t['pnl_usd'] == 0 for t in known), 'unknown_results': len(trades)-len(known),
+            'win_rate': round(100*wins/len(known), 4) if known else None,
+            'net_pnl_usd': round(gain-loss, 8), 'profit_factor': gain/loss if loss else None,
+            'profit_factor_status': 'defined' if loss else ('infinite_no_losses' if gain else 'undefined_no_losses')}
 
-    n = len(similar)
-    wins = sum(1 for t in similar if num(t.get('pnl_usd')) > 0)
-    pnl_pcts = [num(t.get('pnl_pct')) for t in similar]
-    avg_pct = sum(pnl_pcts) / n if n else 0.0
-    win_rate = wins / n * 100 if n else 0.0
-    gross_win = sum(max(0.0, num(t.get('pnl_usd'))) for t in similar)
-    gross_loss = -sum(min(0.0, num(t.get('pnl_usd'))) for t in similar)
-    profit_factor = gross_win / gross_loss if gross_loss > 0 else (99.0 if gross_win > 0 else 0.0)
-    recent_losses = sum(1 for t in similar[:3] if num(t.get('pnl_usd')) <= 0)
 
-    # Never disable an entry family: learn by risking less after repeated mistakes.
-    size_multiplier = 1.0
-    if n >= 3 and recent_losses >= 3 and avg_pct < 0:
-        size_multiplier = 0.55
-    elif n >= 5 and win_rate < 35 and avg_pct < -1:
-        size_multiplier = 0.60
-    elif n >= 4 and avg_pct < 0:
-        size_multiplier = 0.80
-    elif n >= 5 and win_rate >= 60 and avg_pct > 1:
-        size_multiplier = 1.15
-
-    return {
-        'sample': n,
-        'wins': wins,
-        'win_rate': round(win_rate, 1),
-        'avg_pnl_pct': round(avg_pct, 3),
-        'profit_factor': round(profit_factor, 2),
-        'recent_losses': recent_losses,
-        'size_multiplier': round(size_multiplier, 2),
-        'bonus': round((size_multiplier - 1.0) * 100, 1),
-        'blocked': False,
-    }
+def effective_config_hash():
+    config = {'entry': EFFECTIVE_ENTRY_THRESHOLDS.as_dict(), 'entry_version': entry_policy.POLICY_VERSION,
+              'exit_version': exit_policy.VERSION, 'stop_pct': STOP_LOSS_PCT, 'take_profit_pct': TAKE_PROFIT_PCT,
+              'risk_buffer_pct': STOP_EXECUTION_BUFFER_PCT, 'daily_loss_usd': MAX_DAILY_LOSS_USD,
+              'max_positions': MAX_POSITIONS, 'notional_usd': TRADE_NOTIONAL_USD,
+              'max_position_full_loss_usd': MAX_POSITION_RISK_USD,'max_exposure_pct': MAX_TOTAL_EXPOSURE_PCT,'max_drawdown_pct':MAX_DRAWDOWN_PCT,
+              'max_impact_pct': STRICT_MAX_ENTRY_IMPACT_PCT, 'max_cost_pct': STRICT_MAX_ROUNDTRIP_COST_PCT,
+              'max_conservative_cost_pct': STRICT_MAX_WORST_CASE_COST_PCT,
+              'execution_evidence_version': 'QUOTE_EVIDENCE_V9',
+              'quote_adapter': paper_quotes.transport.ADAPTER_VERSION,
+              'slippage_tolerance_bps': paper_quotes.SLIPPAGE_BPS,
+              'assumed_execution_buffer_bps': paper_quotes.BUFFER_BPS,
+              'simulated_execution_delay_ms': paper_quotes.SIMULATED_DELAY_MS,
+              'max_signal_age_ms': paper_quotes.MAX_SIGNAL_AGE_MS}
+    return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
 
 
 def early_requested_notional(coin: dict[str, Any], learning: dict[str, Any]) -> float:
@@ -754,7 +842,7 @@ def gecko_new_pumpswap_pairs() -> list[dict[str, Any]]:
     return parsed
 
 
-STATE = State()
+STATE = State(load_state=False)
 
 
 def discover() -> tuple[list[str], dict[str, dict[str, Any]]]:
@@ -1025,8 +1113,8 @@ class Monitor:
 
     def market_context(self, coin: dict[str, Any], position: dict[str, Any] | None = None) -> dict[str, Any]:
         address = coin.get('address') or (position or {}).get('address')
-        fast = STATE.live_flow(address, 30)
-        slow = STATE.live_flow(address, 300)
+        fast = STATE.live_flow(address, 30, str(coin.get('pairAddress') or ''))
+        slow = STATE.live_flow(address, 300, str(coin.get('pairAddress') or ''))
         changes = coin.get('priceChange') or {}
         tx_m5 = (coin.get('txns') or {}).get('m5') or {}
         m5 = num(changes.get('m5'))
@@ -1141,157 +1229,191 @@ class Monitor:
             },
         }
 
+    def _quote_unavailable(self, position, session, reason, error='no_sell_route'):
+        with STATE.lock:
+            live = next((p for p in STATE.positions if p.get('id') == position.get('id')), None)
+            if live is None or STATE.demo_session_id != session: return
+            attempts = int(live.get('exit_retry_count') or 0) + 1
+            delay = min(60_000, 1000 * 2 ** min(attempts-1, 6))
+            quote_at = num(live.get('execution_quote_at'), num(live.get('updated_at')))
+            live.update(quote_status='unavailable', valuation_status='unavailable',
+                        exit_state='UNSELLABLE' if attempts >= 6 else ('PENDING_EXIT' if reason else 'VALUATION_UNAVAILABLE'),
+                        quote_error=error, quote_error_at=now_ms(), exit_retry_count=attempts,
+                        next_exit_retry_at=now_ms()+delay,
+                        last_known_pnl_usd=live.get('pnl_usd'), valuation_age_ms=max(0, now_ms()-quote_at),
+                        conservative_risk_usd=num(live.get('capital_committed_usd'), num(live.get('notional_usd'))))
+            if reason: live['pending_exit_reason'] = reason
+            if attempts == 1 or attempts == 6:
+                STATE.event('Unavailable sell route; PAPER exposure retained, bounded retries scheduled.')
+            STATE.save()
+
+    def book_paper_exit(self, position, quote, reason, coin=None):
+        """Book a simulated sale once; partial legs aggregate into one completed trade.
+
+        No submission/signing is reachable here. Net proceeds already include
+        quote AMM fees/impact and the exit network fee; entry costs are allocated
+        once to each disposed fraction of the original position.
+        """
+        coin = coin or {}
+        with STATE.lock:
+            live = next((p for p in STATE.positions if p.get('id') == position.get('id')), None)
+            if live is None or position.get('session_id', STATE.demo_session_id) != STATE.demo_session_id: return None
+            if any(t.get('id') == live.get('id') for t in STATE.history): return None
+            raw = int(live.get('jupiter_token_raw_amount') or 0)
+            sold_raw = int(quote.get('token_input_raw') or raw)
+            if raw and not 0 < sold_raw <= raw: raise ValueError('exit raw quantity exceeds position')
+            fraction = sold_raw/raw if raw else 1.0
+            notional = num(live.get('notional_usd'))
+            entry_cost = num(live.get('entry_network_fee_usd')) + num(live.get('entry_account_reserve_usd'))
+            allocated = (notional+entry_cost)*fraction
+            net = num(quote.get('net_proceeds_usd'), math.nan)
+            if not math.isfinite(net): raise ValueError('invalid exit net proceeds')
+            pnl = net-allocated
+            total_pnl = num(live.get('realized_partial_pnl_usd'))+pnl
+            original_notional = num(live.get('original_notional_usd'), notional)
+            before = STATE.demo_balance_usd
+            balance = round(before+pnl, 8)
+            leg = {'sold_token_raw': sold_raw, 'fraction_remaining_sold': fraction, 'net_proceeds_usd': net,
+                   'allocated_entry_cost_usd': allocated, 'pnl_usd': pnl, 'quoted_at': quote.get('quoted_at'),
+                   'execution_source': quote.get('execution_source'), 'exit_network_fee_usd': num(quote.get('network_fee_usd'))}
+            legs = list(live.get('partial_fills') or [])+[leg]
+            event_id = f"{live['id']}:{raw}:{sold_raw}:{quote.get('quoted_at',now_ms())}"
+            if fraction < 1:
+                remaining = dict(live, quantity=num(live.get('quantity'))*(1-fraction),
+                    jupiter_token_raw_amount=raw-sold_raw, notional_usd=notional*(1-fraction),
+                    entry_network_fee_usd=num(live.get('entry_network_fee_usd'))*(1-fraction),
+                    entry_account_reserve_usd=num(live.get('entry_account_reserve_usd'))*(1-fraction),
+                    capital_committed_usd=(notional+entry_cost)*(1-fraction), original_notional_usd=original_notional,
+                    realized_partial_pnl_usd=total_pnl, partial_fills=legs, pending_exit_reason=reason,
+                    pnl_usd=num(live.get('pnl_usd'))*(1-fraction), planned_risk_usd=num(live.get('planned_risk_usd'))*(1-fraction))
+                positions = [remaining if p.get('id') == live['id'] else p for p in STATE.positions]
+                STATE.commit('PARTIAL_EXIT', dict(leg, id=event_id, position_id=live['id']),
+                             positions=positions, demo_balance_usd=balance)
+                return remaining
+            closed = dict(position, id=live['id'], session_id=STATE.demo_session_id,
+                notional_usd=original_notional, pnl_usd=round(total_pnl, 8), pnl_pct=round(total_pnl/max(original_notional,1e-18)*100, 8),
+                closed_at=now_ms(), exit_price=coin.get('priceUsd'), execution_exit_price=quote.get('fill_price'),
+                exit_reason=reason, exit_net_proceeds_usd=net, exit_gross_proceeds_usd=quote.get('gross_proceeds_usd'),
+                exit_dex_fee_usd=num(quote.get('dex_fee_usd')), exit_network_fee_usd=num(quote.get('network_fee_usd')),
+                exit_price_impact_pct=num(quote.get('impact_pct')), exit_slippage_pct=num(quote.get('slippage_pct')),
+                exit_quote=quote.get('raw_quote'), exit_liquidity_usd=coin.get('liquidityUsd'), partial_fills=legs,
+                balance_before=before, balance_after=balance, paper_stop_capped=False, simulated_fill=True,
+                jupiter_exit_quote_at=quote.get('quoted_at'), exit_policy_version=position.get('exit_policy_version', exit_policy.VERSION),
+                exit_route_matches_entry_pool=quote.get('route_matches_entry_pool'), fees_included_in_quote=True,
+                execution_source=quote.get('execution_source', 'MODEL_V1'), exit_state='CLOSED')
+            STATE.commit('EXIT', closed, demo_balance_usd=balance,
+                         positions=[p for p in STATE.positions if p.get('id') != live['id']], history=[closed]+STATE.history)
+            STATE.event(f"PAPER EXIT #{closed.get('trade_no')} {closed.get('symbol')} · {reason} · {closed['pnl_pct']:+.2f}% net")
+            return closed
+
     def update_positions(self, by_address: dict[str, dict[str, Any]]) -> None:
-        # Called under position_lock, never while holding STATE.lock across HTTP.
+        # Called under position_lock; never hold STATE.lock across network calls.
         with STATE.lock:
             positions = [dict(p) for p in STATE.positions]
             session = STATE.demo_session_id
-        # One batched Solana reserve refresh for every open PumpSwap position.
-        # Normal guard iterations therefore need one RPC request total, not one
-        # Jupiter request per position.
-        pumpswap_stop.prime_positions(positions)
+            pinned = {k:dict(v) for k,v in STATE.position_market.items()}
         for position in positions:
-            address=position.get('address')
-            coin=by_address.get(address) or position.get('coin_snapshot') or {}
-            if coin.get('pairAddress') != position.get('pairAddress'):
-                coin=position.get('coin_snapshot') or {}
-            if not coin: continue
-            reason=position.get('pending_exit_reason')
-            market=num(coin.get('priceUsd'),num(position.get('current_price')))
-            entry=num(position.get('entry_price'))
-            signal_pct=((market-entry)/max(entry,1e-18))*100 if entry>0 else 0.0
-            signal_stop_trigger=num(
-                position.get('stop_signal_trigger_pct'),
-                -(STOP_LOSS_PCT-STOP_EXECUTION_BUFFER_PCT),
-            )
-            # Mandatory stop-market intent. The chart trigger is deliberately
-            # earlier so expected execution friction fits inside the 5% net budget.
-            if signal_pct<=signal_stop_trigger:
-                reason=reason or 'STOP_LOSS_5_NET_TARGET'
-            fresh_market=0<=now_ms()-num(coin.get('updatedAt'))<=entry_policy.MAX_FEED_AGE_MS
-            if fresh_market and num(coin.get('liquidityUsd'))<num(position.get('entry_liquidity_usd'))*.80:
-                reason=reason or 'LIQUIDITY_EMERGENCY'
-            if now_ms()-num(coin.get('updatedAt'))>60_000:
-                reason=reason or 'STALE_MARKET_EXIT'
-            is_quote=position.get('execution_mode') in {'JUPITER_QUOTE_V2','PUMPSWAP_RPC_ENTRY_V1'}
-            sol_usd=sol_usd_from_coin(coin) or sol_usd_market_price()
-            network=max(.03,NETWORK_FEE_SOL*sol_usd)
-            # Execution-only fast path: read the exact PumpSwap pool reserves
-            # directly from Solana RPC. This avoids the shared keyless Jupiter
-            # queue (2.1s between requests) while leaving entry/strategy logic intact.
-            dex_id=str(coin.get('dexId') or (position.get('coin_snapshot') or {}).get('dexId') or '').lower()
-            quote=None
-            if is_quote and dex_id=='pumpswap':
-                quote=pumpswap_stop.position_mark(position,coin,network,sol_usd)
-            if quote is None:
-                quote=(paper_quotes.position_mark(position,coin,network,force=bool(reason)) if is_quote
-                       else exit_execution(coin,num(position.get('quantity'))))
-            if quote is None:
+            address, pair = position.get('address'), position.get('pairAddress')
+            key = f'{address}:{pair}'
+            incoming = by_address.get((address,pair)) or by_address.get(address)
+            coin = incoming if incoming and incoming.get('pairAddress') == pair else pinned.get(key)
+            coin = coin or position.get('coin_snapshot') or {}
+            if coin.get('pairAddress') != pair: coin = {}
+            stamp = now_ms()
+            reason = position.get('pending_exit_reason')
+            quote_at = num(position.get('execution_quote_at'), num(position.get('updated_at')))
+            if stamp < num(position.get('next_exit_retry_at')):
                 with STATE.lock:
-                    live=next((p for p in STATE.positions if p.get('id')==position.get('id')),None)
-                    if live is not None and STATE.demo_session_id==session:
-                        if live.get('quote_status')!='unavailable':
-                            STATE.event('Липсва проверима котировка за продажба; позицията остава отворена и оценката е остаряла.')
-                        live.update(quote_status='unavailable',quote_error_at=now_ms())
-                        if reason: live['pending_exit_reason']=reason
+                    live = next((p for p in STATE.positions if p.get('id') == position.get('id')),None)
+                    if live is not None: live['valuation_age_ms'] = max(0, stamp-quote_at)
                 continue
-            notional=num(position.get('notional_usd'))
-            entry_cost=num(position.get('entry_network_fee_usd'))+num(position.get('entry_account_reserve_usd'))
-            pnl=quote['net_proceeds_usd']-notional-entry_cost
-            pct=pnl/max(notional,1e-18)*100
-            hold=(now_ms()-int(position.get('opened_at',now_ms())))/60000
-            exit_impact=num(quote.get('impact_pct'))
-            entry_impact=num(position.get('entry_price_impact_pct'))
-            impact_emergency=max(EXIT_IMPACT_EMERGENCY_PCT, entry_impact+0.50)
-            # Risk-only emergency: if a $200 liquidation route starts becoming
-            # materially thinner than it was at entry, get out before the 5% budget.
-            if exit_impact>=impact_emergency:
-                reason=reason or 'EXIT_IMPACT_EMERGENCY'
-            # Mandatory bracket. The executable mark pre-arms at -4% net,
-            # leaving one percentage point of room before the absolute -5% paper stop.
-            if pct<=-STOP_EXECUTION_ARM_NET_PCT:
-                reason=reason or 'STOP_LOSS_5_NET_TARGET'
-            elif pct>=TAKE_PROFIT_PCT:
-                reason=reason or 'TAKE_PROFIT_10_NET'
-            elif hold>=MAX_HOLD_MINUTES: reason=reason or 'MAX_HOLD_60'
+            fresh_market = 0 <= stamp-num(coin.get('updatedAt')) <= entry_policy.MAX_FEED_AGE_MS
+            if fresh_market and num(coin.get('liquidityUsd')) < num(position.get('entry_liquidity_usd'))*.80:
+                reason = reason or 'LIQUIDITY_EMERGENCY'
+            if not fresh_market and stamp-num(coin.get('updatedAt')) > 60_000:
+                reason = reason or 'STALE_MARKET_EXIT'
+            is_quote = position.get('execution_mode') in {'JUPITER_QUOTE_V2', 'PUMPSWAP_RPC_ENTRY_V1'}
+            sol_usd = sol_usd_from_coin(coin) or sol_usd_market_price()
+            network = max(.03, NETWORK_FEE_SOL*sol_usd)
+            # Every quote-backed position uses one full token->USDC route.
+            # Native token->SOL reserve marks remain diagnostics and cannot
+            # invent realized USDC or add a second request on route failure.
+            quote = (paper_quotes.position_mark(position,coin,network,force=bool(reason)) if is_quote
+                     else exit_execution(coin,num(position.get('quantity'))) if fresh_market else None)
+            mark_valid = quote is not None and math.isfinite(num(quote.get('net_proceeds_usd'),math.nan)) and (not is_quote or 0 <= now_ms()-num(quote.get('quoted_at')) <= entry_policy.MAX_ENTRY_QUOTE_AGE_MS)
+            if training_bridge.enabled():
+                training_bridge.observe(coin,STATE.live_flow(address,pair_address=pair),
+                    safety=rug_guard.check(coin),validation=price_integrity.check(coin),
+                    context=self.market_context(coin,position),
+                    quotes={'mark':quote} if mark_valid else None, reasons=['exit_quote'] if not mark_valid else None,
+                    now=now_ms())
+            if not mark_valid:
+                self._quote_unavailable(position,session,reason)
+                continue
+            notional = num(position.get('notional_usd'))
+            entry_cost = num(position.get('entry_network_fee_usd'))+num(position.get('entry_account_reserve_usd'))
+            pnl = num(quote.get('net_proceeds_usd'))-notional-entry_cost
+            pct = pnl/max(notional,1e-18)*100
+            peak_pct = max(pct,num(position.get('peak_net_pnl_pct'), pct))
+            hold = (now_ms()-int(position.get('opened_at',now_ms())))/60000
+            policy = str(position.get('exit_policy') or 'fixed')
+            context = self.market_context(coin,position) if policy == 'adaptive' else {}
+            reason = reason or exit_policy.exit_reason(position, context, net_pct=pct,peak_net_pct=peak_pct,
+                hold_minutes=hold,stop_pct=STOP_LOSS_PCT,take_profit_pct=TAKE_PROFIT_PCT,policy=policy)
+            if num(quote.get('impact_pct')) >= max(EXIT_IMPACT_EMERGENCY_PCT,num(position.get('entry_price_impact_pct'))+.50):
+                reason = reason or 'EXIT_IMPACT_EMERGENCY'
             if reason and is_quote and quote.get('from_cache'):
-                with STATE.lock:
-                    live=next((p for p in STATE.positions if p.get('id')==position.get('id')),None)
-                    if live is not None and reason!='TAKE_PROFIT_10_NET': live['pending_exit_reason']=reason
-                quote=paper_quotes.position_mark(position,coin,network,force=True)
-                if quote is None: continue
-                pnl=quote['net_proceeds_usd']-notional-entry_cost
-                pct=pnl/max(notional,1e-18)*100
-                if reason=='TAKE_PROFIT_10_NET' and pct<TAKE_PROFIT_PCT: reason=None
-
-            # If a sampled market jumps through the stop between checks, the live
-            # observed quote remains auditable, but PAPER accounting is never allowed
-            # to book worse than the user's absolute -5% stop.
-            observed_pnl=pnl
-            observed_pct=pct
-            paper_stop_capped=False
-            if pct<=-STOP_LOSS_PCT:
-                reason='STOP_LOSS_5_HARD_CAP'
-            if reason in (
-                'STOP_LOSS_5_NET_TARGET','STOP_LOSS_5_HARD_CAP',
-                'EXIT_IMPACT_EMERGENCY','LIQUIDITY_EMERGENCY','STALE_MARKET_EXIT'
-            ) and pct<-STOP_LOSS_PCT:
-                quote,pnl,pct,paper_stop_capped=enforce_paper_stop_cap(
-                    quote,notional,entry_cost,num(position.get('quantity'))
-                )
-            updated={**position,'current_price':market,'peak_price':max(market,num(position.get('peak_price'))),
-                     'pnl_usd':round(pnl,6),'pnl_pct':round(pct,6),
-                     'signal_pnl_pct':round(signal_pct,6),
-                     'active_stop_signal_trigger_pct':round(signal_stop_trigger,6),
-                     'current_execution_price':quote['fill_price'],'quote_status':'fresh',
-                     'execution_quote_source':quote.get('execution_source','MODEL_V1'),
-                     'execution_quote_at':quote.get('quoted_at',now_ms()),'updated_at':now_ms(),
-                     'last_sell_quote':quote.get('raw_quote'),
-                     'quote_queue_ms':quote.get('queue_ms'),'quote_http_ms':quote.get('http_ms'),
-                     'hard_stop_net_pct':-STOP_LOSS_PCT,'take_profit_net_pct':TAKE_PROFIT_PCT,
-                     'exit_policy_version':'NET_5_HARD_CAP_RPC_V8','pending_exit_reason':reason,
-                     'observed_exit_pnl_usd':round(observed_pnl,6) if paper_stop_capped else None,
-                     'observed_exit_pnl_pct':round(observed_pct,6) if paper_stop_capped else None,
-                     'paper_stop_capped':paper_stop_capped,
-                     'stop_execution_source':quote.get('execution_source','MODEL_V1'),
-                     'estimated_exit_dex_fee_usd':quote['dex_fee_usd'],
-                     'estimated_exit_network_fee_usd':quote['network_fee_usd'],
-                     'estimated_exit_price_impact_pct':quote['impact_pct'],
-                     'estimated_exit_slippage_pct':quote['slippage_pct']+quote['latency_pct']}
+                quote = paper_quotes.position_mark(position,coin,network,force=True)
+                if quote is None:
+                    self._quote_unavailable(position,session,reason)
+                    continue
+                if not math.isfinite(num(quote.get('net_proceeds_usd'),math.nan)):
+                    self._quote_unavailable(position,session,reason,'invalid_sell_quote')
+                    continue
+                if not 0 <= now_ms()-num(quote.get('quoted_at')) <= entry_policy.MAX_ENTRY_QUOTE_AGE_MS:
+                    self._quote_unavailable(position,session,reason,'stale_sell_quote')
+                    continue
+                pnl = num(quote.get('net_proceeds_usd'))-notional-entry_cost
+                pct = pnl/max(notional,1e-18)*100
+                peak_pct = max(peak_pct,pct)
+                # A profit signal must still hold at the actual simulated sale.
+                if reason.startswith(('TAKE_PROFIT', 'ADAPTIVE_TP', 'ADAPTIVE_TRAILING', 'CONVICTION_PROFIT')):
+                    reason = exit_policy.exit_reason(position,context,net_pct=pct,peak_net_pct=peak_pct,
+                        hold_minutes=hold,stop_pct=STOP_LOSS_PCT,take_profit_pct=TAKE_PROFIT_PCT,policy=policy)
+            market = num(coin.get('priceUsd'), num(position.get('current_price')))
+            entry = num(position.get('entry_price'))
+            updated = dict(position, current_price=market,peak_price=max(market,num(position.get('peak_price'))),
+                pnl_usd=round(pnl,8),pnl_pct=round(pct,8),peak_net_pnl_pct=peak_pct,
+                mfe_net_pct=max(peak_pct,num(position.get('mfe_net_pct'),pct)),
+                mae_net_pct=min(pct,num(position.get('mae_net_pct'),pct)),
+                signal_pnl_pct=(market-entry)/entry*100 if entry else None,
+                active_stop_signal_trigger_pct=None, legacy_chart_stop_ignored=position.get('stop_signal_trigger_pct'),
+                planned_stop_net_pct=-STOP_LOSS_PCT,hard_stop_net_pct=None,paper_stop_capped=False,
+                current_execution_price=quote.get('fill_price'), quote_status='fresh', valuation_status='available',
+                valuation_age_ms=max(0,now_ms()-num(quote.get('quoted_at'),now_ms())), last_known_pnl_usd=pnl,
+                conservative_risk_usd=notional+entry_cost, execution_quote_at=quote.get('quoted_at',now_ms()),
+                execution_quote_source=quote.get('execution_source','MODEL_V1'), updated_at=now_ms(),
+                pending_exit_reason=reason,exit_state='PENDING_EXIT' if reason else 'OPEN',exit_retry_count=0,next_exit_retry_at=0,
+                exit_policy_version=exit_policy.ADAPTIVE_VERSION if policy == 'adaptive' else exit_policy.VERSION,
+                market_context=context, estimated_exit_dex_fee_usd=num(quote.get('dex_fee_usd')),
+                estimated_exit_network_fee_usd=num(quote.get('network_fee_usd')),
+                estimated_exit_price_impact_pct=num(quote.get('impact_pct')),
+                estimated_exit_slippage_pct=num(quote.get('slippage_pct'))+num(quote.get('latency_pct')))
             with STATE.lock:
-                live=next((p for p in STATE.positions if p.get('id')==position.get('id')),None)
-                if live is None or STATE.demo_session_id!=session: continue
+                live = next((p for p in STATE.positions if p.get('id') == position.get('id')),None)
+                if live is None or STATE.demo_session_id != session: continue
                 if not reason:
                     live.update(updated)
                     continue
-                before=STATE.demo_balance_usd
-                STATE.demo_balance_usd=round(before+pnl,8)
-                closed={**updated,'closed_at':now_ms(),'exit_price':market,
-                        'execution_exit_price':quote['fill_price'],'exit_reason':reason,
-                        'exit_net_proceeds_usd':quote['net_proceeds_usd'],
-                        'exit_gross_proceeds_usd':quote['gross_proceeds_usd'],
-                        'exit_dex_fee_usd':quote['dex_fee_usd'],'exit_network_fee_usd':quote['network_fee_usd'],
-                        'exit_price_impact_pct':quote['impact_pct'],'exit_slippage_pct':quote['slippage_pct'],
-                        'jupiter_exit_route':quote.get('route',[]),'jupiter_exit_quote_at':quote.get('quoted_at'),
-                        'balance_before':before,'balance_after':STATE.demo_balance_usd,
-                        'exit_liquidity_usd':coin.get('liquidityUsd'),'fees_included_in_quote':is_quote,
-                        'exit_quote':quote.get('raw_quote'),'quote_queue_ms':quote.get('queue_ms'),
-                        'exit_route_matches_entry_pool':quote.get('route_matches_entry_pool'),
-                        'quote_http_ms':quote.get('http_ms'),
-                        'observed_exit_net_proceeds_usd':quote.get('observed_net_proceeds_usd'),
-                        'observed_exit_gross_proceeds_usd':quote.get('observed_gross_proceeds_usd'),
-                        'observed_execution_exit_price':quote.get('observed_fill_price')}
-                STATE.history.insert(0,closed); STATE.history=STATE.history[:300]
-                STATE.positions.remove(live)
-                append_audit('EXIT',closed)
-                STATE.event(f"ТЕСТОВ ИЗХОД #{closed.get('trade_no')} {closed.get('symbol')} · {reason} · {pct:+.2f}% нето")
-                STATE.save()
+            self.book_paper_exit(updated,quote,reason,coin)
 
     def fast_position_check(self) -> None:
-        if not STATE.running or not self.position_lock.acquire(blocking=False): return
+        if not self.position_lock.acquire(blocking=False): return
         try:
             with STATE.lock:
                 coins={c['address']:dict(c) for c in STATE.feed}
+                for key, coin in STATE.position_market.items():
+                    coins[(coin.get('address'),coin.get('pairAddress'))]=dict(coin)
             # Quote the held raw token amount directly; do not block a stop on a
             # slow DexScreener discovery request or select a different chart pool.
             self.update_positions(coins)
@@ -1303,18 +1425,17 @@ class Monitor:
 
     def run_position_guard(self) -> None:
         while not self.stop_event.is_set():
+            if STATE.positions: self.fast_position_check()
             if STATE.running:
-                if STATE.positions: self.fast_position_check()
-                else:
-                    with STATE.lock: feed=[dict(c) for c in STATE.feed]
-                    self.maybe_open(feed)
+                with STATE.lock: feed=[dict(c) for c in STATE.feed]
+                self.maybe_open(feed)
             self.stop_event.wait(POSITION_SCAN_SECONDS)
 
     def maybe_open(self, feed: list[dict[str, Any]]) -> None:
         if not STATE.running or not self.entry_lock.acquire(blocking=False): return
         report = {'policy_version': entry_policy.POLICY_VERSION, 'checked_at': now_ms(),
                   'candidates': len(feed), 'evaluated': 0, 'signal_passed': 0,
-                  'quoted': 0, 'opened': 0, 'rejections': {}, 'examples': []}
+                  'quoted': 0, 'opened': 0, 'rejections': {}, 'examples': [], 'max_positions': MAX_POSITIONS}
         try:
             self._maybe_open_checked(feed, report)
         except Exception as exc:
@@ -1325,16 +1446,32 @@ class Monitor:
             self.entry_lock.release()
 
     def _maybe_open_checked(self, feed: list[dict[str, Any]], report: dict[str, Any]) -> None:
+        def reject(report, reasons, coin=None, metrics=None):
+            entry_policy.record(report,reasons,coin,metrics)
+            if coin:
+                training_bridge.observe(coin,STATE.live_flow(coin.get('address'),pair_address=coin.get('pairAddress')),
+                    reasons=reasons,now=now_ms())
         session_at_check = STATE.demo_session_id
+        if STATE.pending_audit:
+            with STATE.lock: STATE.save()
+            if STATE.pending_audit:
+                reject(report, ['audit_pending'])
+                return
         STATE.refresh_risk_day()
         if MAX_DAILY_LOSS_USD > 0 and STATE.risk_day_pnl() <= -MAX_DAILY_LOSS_USD:
-            entry_policy.record(report, ['daily_limit'])
+            reject(report, ['daily_limit'])
+            return
+        if any(p.get('valuation_status') == 'unavailable' for p in STATE.positions):
+            reject(report,['liquidation_unavailable'])
+            return
+        if MAX_DRAWDOWN_PCT > 0 and (1-STATE.equity_usd()/max(STATE.equity_peak_usd,1))*100 >= MAX_DRAWDOWN_PCT:
+            reject(report,['drawdown_limit'])
             return
         if len(STATE.positions) >= MAX_POSITIONS:
-            entry_policy.record(report, ['position_open'])
+            reject(report, ['position_open'])
             return
         if STATE.available_balance_usd() < min(TRADE_NOTIONAL_USD, 10.0):
-            entry_policy.record(report, ['balance'])
+            reject(report, ['balance'])
             return
         open_addresses = {p.get('address') for p in STATE.positions}
         now = now_ms()
@@ -1345,7 +1482,7 @@ class Monitor:
                 break
             address = coin.get('address')
             if not address or address in open_addresses or address in recent:
-                entry_policy.record(report, ['cooldown'], coin)
+                reject(report, ['cooldown'], coin)
                 continue
             report['evaluated'] += 1
             score = num(coin.get('score'))
@@ -1359,26 +1496,27 @@ class Monitor:
             market_cap = num(coin.get('marketCap') or coin.get('fdv'))
             liquidity_mc_ratio = liquidity / max(market_cap, 1.0)
 
-            flow = STATE.live_flow(address, 30)
+            flow = STATE.live_flow(address, 30, str(coin.get('pairAddress') or ''))
             context = self.market_context(coin)
             rejected = entry_policy.signal_rejections(
-                coin, flow, context, min_score=STRICT_ENTRY_SCORE,
-                min_liquidity=STRICT_MIN_LIQUIDITY_USD,
-                min_conviction=STRICT_MIN_CONVICTION, now=now_ms(),
+                coin, flow, context, min_score=EFFECTIVE_ENTRY_THRESHOLDS.min_score,
+                min_liquidity=EFFECTIVE_ENTRY_THRESHOLDS.min_liquidity,
+                min_conviction=EFFECTIVE_ENTRY_THRESHOLDS.min_conviction, now=now_ms(),
             )
             if rejected:
-                entry_policy.record(report, rejected, coin)
+                reject(report, rejected, coin)
                 continue
             report['signal_passed'] += 1
-            entry_mode = order_flow.entry_mode(coin, flow, context)
+            entry_mode = order_flow.entry_mode(coin, flow, context, EFFECTIVE_ENTRY_THRESHOLDS)
             if not entry_mode:
-                entry_policy.record(report, ['gold_signal'], coin)
+                reject(report, ['gold_signal'], coin)
                 continue
             # Start independent price and rug checks together. Both helpers are
             # cached/asynchronous; running them concurrently avoids serial provider
             # latency without weakening known-risk vetoes.
             validation=price_integrity.check(coin)
             safety=rug_guard.check(coin)
+            training_bridge.observe(coin,flow,safety=safety,validation=validation,context=context,now=now_ms())
             price_review=(
                 validation.get('status')=='review'
                 and validation.get('reason') in {
@@ -1388,73 +1526,49 @@ class Monitor:
                 }
             )
             if validation.get('status')!='pass' and not price_review:
-                entry_policy.record(report,[validation.get('reason') or 'price_unavailable'],coin,validation)
+                reject(report,[validation.get('reason') or 'price_unavailable'],coin,validation)
                 continue
-            if safety.get('status')!='pass':
-                # PAPER-only provisional scout: if the full third-party report is
-                # merely pending/unavailable, ULTRA_EARLY may proceed only after a
-                # direct on-chain mint/freeze/extensions check. A real full-guard
-                # block is never overridden.
-                if (
-                    entry_mode == 'ULTRA_EARLY'
-                    and safety.get('status') in {'pending','unavailable'}
-                ):
-                    fast_safety = rug_guard.fast_chain_check(coin)
-                    if fast_safety.get('status') == 'pass':
-                        fast_safety = dict(fast_safety)
-                        fast_safety['full_guard_at_entry'] = safety
-                        safety = fast_safety
-                    else:
-                        entry_policy.record(
-                            report,
-                            fast_safety.get('reasons') or ['risk_check_pending'],
-                            coin,
-                        )
-                        continue
-                else:
-                    entry_policy.record(report, safety.get('reasons') or ['risk_check_pending'], coin)
-                    continue
+            if safety.get('status') != 'pass' or safety.get('provisional_early'):
+                reject(report, safety.get('reasons') or ['risk_check_pending'], coin)
+                continue
             if report['quoted'] >= entry_policy.MAX_QUOTED_CANDIDATES:
-                entry_policy.record(report, ['quote_budget'], coin)
+                reject(report, ['quote_budget'], coin)
                 continue
-            strategy_id = 'ORDER_FLOW_EARLY_ADAPTIVE'
-            learning = adaptive_profile({
-                'strategy_id': strategy_id, 'entry_mode': entry_mode,
-                'score': score, 'liquidity': liquidity, 'change_m5': change_m5,
-                'age': age, 'flow_ratio': num(flow.get('buy_sell_usd_ratio')),
-            })
+            strategy_id = 'ORDER_FLOW_EARLY_FIXED_PAPER_V9'
+            # Main policy stays fixed. Candidate training/promotions run in the
+            # separate training PAPER accounts with their own validation gates.
+            learning = {'sample': 0, 'win_rate': 0, 'profit_factor': None,
+                        'recent_losses': 0, 'bonus': 0, 'size_multiplier': 1.0}
             recovery = False
             price = num(coin.get('priceUsd'))
             if price <= 0:
                 continue
             positive = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'positive'][:4]
             risks = [s['title'] for s in coin.get('signals', []) if s.get('kind') == 'risk'][:4]
-            available_before = STATE.available_balance_usd()
+            exposure_available = max(0,STATE.equity_usd()*MAX_TOTAL_EXPOSURE_PCT/100-STATE.reserved_usd())
+            available_before = min(STATE.available_balance_usd(),exposure_available)
             sol_usd=num(safety.get('metrics',{}).get('sol_usd')) or sol_usd_from_coin(coin) or sol_usd_market_price()
             if sol_usd<=0:
-                entry_policy.record(report,['network_price_unknown'],coin); continue
+                reject(report,['network_price_unknown'],coin); continue
             pre_network_fee = max(.03, NETWORK_FEE_SOL * sol_usd)
             seen_before=any(t.get('address')==address for t in STATE.history)
             rent_lamports=num(safety.get('metrics',{}).get('token_account_rent_lamports'))
             if not seen_before and rent_lamports<=0:
-                entry_policy.record(report,['risk_data_unavailable'],coin); continue
+                reject(report,['risk_data_unavailable'],coin); continue
             entry_rent=0.0 if seen_before else rent_lamports/1e9*sol_usd
-            # Keep the user's $200 cap but fit the existing daily allowance.
-            # This never resets the day's loss or raises its $100 ceiling.
+            # Fit cash, full-loss exposure and the configured daily allowance.
             fixed_cost_budget=2*pre_network_fee+entry_rent
-            # With up to five concurrent positions, reserve each open
-            # position's planned loss before sizing another one.
+            # Reserve each open position's planned stop budget separately from
+            # the full-loss exposure used by the capital and position limits.
             open_planned_risk=sum(num(p.get('planned_risk_usd')) for p in STATE.positions)
-            requested_notional = early_requested_notional(coin, learning)
-            if safety.get('provisional_early'):
-                requested_notional = min(requested_notional, 25.0)
+            requested_notional = min(early_requested_notional(coin, learning),MAX_POSITION_RISK_USD-fixed_cost_budget)
             notional = runtime.plan_notional(
                 requested_notional,available_before,MAX_DAILY_LOSS_USD,
                 STATE.risk_day_pnl()-open_planned_risk,
                 STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
             )
             if notional < 10:
-                entry_policy.record(report,['risk_budget_unavailable'],coin); return
+                reject(report,['risk_budget_unavailable'],coin); return
             report['quoted'] += 1
             dex_id = str(coin.get('dexId') or '').lower()
             if dex_id == 'pumpswap':
@@ -1468,7 +1582,7 @@ class Monitor:
                     address, str(coin.get('pairAddress') or ''), notional
                 )
             if not prepared:
-                entry_policy.record(report,['quote_inconsistent'],coin)
+                reject(report,['quote_inconsistent'],coin)
                 continue
             live_quote,initial_exit=prepared
             entry_network_fee=pre_network_fee
@@ -1489,16 +1603,13 @@ class Monitor:
                 max_conservative_cost=STRICT_MAX_WORST_CASE_COST_PCT, now=now_ms(),
             )
             if quote_rejected:
-                entry_policy.record(report, quote_rejected, coin, {
+                reject(report, quote_rejected, coin, {
                     'expected_roundtrip_pct': round(immediate_roundtrip_pct, 4),
                     'conservative_roundtrip_pct': round(worst_case_roundtrip_pct, 4),
                     'entry_impact_pct': round(impact_pct, 4),
                 })
                 continue
-            stop_signal_trigger_pct = -max(
-                0.50,
-                STOP_LOSS_PCT - abs(min(0.0, immediate_roundtrip_pct)) - STOP_EXECUTION_BUFFER_PCT,
-            )
+            stop_signal_trigger_pct = None
             quote_slippage_pct = paper_quotes.BUFFER_BPS / 100.0
             quote_network_fee = entry_network_fee
             decimals=int(safety['metrics']['decimals'])
@@ -1507,7 +1618,7 @@ class Monitor:
             if price_review:
                 validation=price_integrity.jupiter_tiebreak(validation,quote_fill_price)
                 if validation.get('status')!='pass':
-                    entry_policy.record(
+                    reject(
                         report,[validation.get('reason') or 'price_tiebreak_failed'],coin,validation
                     )
                     continue
@@ -1524,33 +1635,51 @@ class Monitor:
             }
             if quantity <= 0:
                 continue
+            training_bridge.observe(coin,flow,safety=safety,validation=validation,
+                quotes={'entry':dict(live_quote,entry_network_fee_usd=entry_network_fee,
+                                     entry_account_reserve_usd=entry_rent),
+                        'exit':dict(initial_exit,exit_network_fee_usd=entry_network_fee)},
+                context=context,now=now_ms())
             with STATE.lock:
                 if STATE.demo_session_id!=session_at_check or not STATE.running or len(STATE.positions)>=MAX_POSITIONS:
                     return
+                current_coin = next((c for c in STATE.feed if c.get('address') == address and c.get('pairAddress') == coin.get('pairAddress')), coin)
+                final_flow = STATE.live_flow(address, 30, str(coin.get('pairAddress') or ''))
+                final_context = self.market_context(current_coin)
+                final_rejections = entry_policy.signal_rejections(current_coin,final_flow,final_context,
+                    min_score=EFFECTIVE_ENTRY_THRESHOLDS.min_score,min_liquidity=EFFECTIVE_ENTRY_THRESHOLDS.min_liquidity,
+                    min_conviction=EFFECTIVE_ENTRY_THRESHOLDS.min_conviction,now=now_ms())
+                if final_rejections:
+                    reject(report,final_rejections,coin)
+                    continue
                 if STATE.available_balance_usd()<entry_quote['capital_committed_usd'] or (MAX_DAILY_LOSS_USD > 0 and STATE.risk_day_pnl()<=-MAX_DAILY_LOSS_USD):
-                    entry_policy.record(report,['balance'],coin); return
+                    reject(report,['balance'],coin); return
                 live_open_risk=sum(num(p.get('planned_risk_usd')) for p in STATE.positions)
+                current_exposure_available=max(0,STATE.equity_usd()*MAX_TOTAL_EXPOSURE_PCT/100-STATE.reserved_usd())
                 permitted = runtime.plan_notional(
-                    requested_notional,STATE.available_balance_usd(),MAX_DAILY_LOSS_USD,
+                    requested_notional,min(STATE.available_balance_usd(),current_exposure_available),MAX_DAILY_LOSS_USD,
                     STATE.risk_day_pnl()-live_open_risk,
                     STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
                 )
                 if notional>permitted:
-                    entry_policy.record(report,['risk_budget_unavailable'],coin); return
-                if now_ms()-int(live_quote['quoted_at'])>750:
-                    entry_policy.record(report,['quote_age'],coin); return
-                STATE.trade_seq += 1
+                    reject(report,['risk_budget_unavailable'],coin); return
+                if not 0 <= now_ms()-int(live_quote['quoted_at']) <= entry_policy.MAX_ENTRY_QUOTE_AGE_MS:
+                    reject(report,['quote_age'],coin); return
+                if not paper_quotes.signal_fresh_at_commit(num(current_coin.get('updatedAt')),live_quote,now=now_ms()):
+                    reject(report,['stale_signal'],coin)
+                    continue
+                next_trade_no = STATE.trade_seq + 1
                 position = {
-                    'id': f'{address}:{now_ms()}', 'address': address,
+                    'id': f'{STATE.demo_session_id}:{address}:{next_trade_no}', 'address': address,
                     'pairAddress': coin.get('pairAddress'), 'name': coin.get('name'),
                     'symbol': coin.get('symbol'), 'imageUrl': coin.get('imageUrl'),
                     'entry_price': price, 'market_entry_price': price,
                     'execution_entry_price': round(entry_quote['fill_price'], 12),
                     'current_price': price, 'peak_price': price,
-                    'trade_no': STATE.trade_seq, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
+                    'trade_no': next_trade_no, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
                     'entry_mode': entry_mode,
                     'provisional_early_safety': bool(safety.get('provisional_early')),
-                    'learning_mode': 'EARLY_SIZE_LEARNING+ADAPTIVE_CONTEXT_HOLD', 'entry_flow': flow,
+                    'learning_mode': 'FIXED_MAIN_SEPARATE_VALIDATED_TRAINING', 'entry_flow': final_flow,
                     'entry_context': context, 'entry_conviction': context.get('conviction'),
                     'entry_hold_mode': context.get('mode'), 'learning_sample': learning['sample'],
                     'learning_win_rate': learning['win_rate'], 'learning_profit_factor': learning['profit_factor'],
@@ -1561,12 +1690,18 @@ class Monitor:
                     'notional_usd': round(notional, 8),
                     'size_limited_by_daily_budget': notional<min(TRADE_NOTIONAL_USD,available_before-fixed_cost_budget),
                     'planned_risk_usd': notional*(STOP_LOSS_PCT+STOP_EXECUTION_BUFFER_PCT)/100+fixed_cost_budget,
+                    'conservative_risk_usd': notional+quote_network_fee+entry_rent,
+                    'original_notional_usd': notional,
                     'capital_committed_usd': round(entry_quote['capital_committed_usd'], 8),
                     'quantity': quantity, 'score': coin.get('score'),
                     'current_score': coin.get('score'), 'opened_at': now_ms(),
+                    'signal_observed_at': num(current_coin.get('updatedAt')),
+                    'signal_age_at_entry_ms': now_ms()-num(current_coin.get('updatedAt')),
+                    'simulated_fill_at': live_quote.get('simulated_fill_at',live_quote.get('quoted_at')),
+                    'execution_queue_ms': live_quote.get('queue_ms'), 'execution_http_ms': live_quote.get('http_ms'),
                     'updated_at': now_ms(), 'signal_pnl_pct': 0,
                     'pnl_pct': immediate_roundtrip_pct, 'pnl_usd': immediate_roundtrip_pct*notional/100,
-                    'execution_mode': 'JUPITER_QUOTE_V2',
+                    'execution_mode': live_quote.get('execution_source') or 'JUPITER_QUOTE_V2',
                     'jupiter_usdc_in_raw': int(live_quote.get('input_usdc_raw') or 0),
                     'jupiter_token_raw_expected': int(live_quote.get('token_raw_expected') or 0),
                     'jupiter_token_raw_amount': expected_token_raw,
@@ -1576,20 +1711,19 @@ class Monitor:
                     'jupiter_slippage_bps': int(live_quote.get('slippage_bps') or paper_quotes.SLIPPAGE_BPS),
                     'entry_roundtrip_pnl_pct': round(immediate_roundtrip_pct, 4),
                     'entry_policy_version': entry_policy.POLICY_VERSION,
-                    'signal_source_commit': 'EARLY_ORDER_FLOW_2026_10_05',
-                    'execution_verification_version': (
-                        'PUMPSWAP_RPC_ENTRY_V1'
-                        if live_quote.get('execution_source') == 'PUMPSWAP_RPC_ENTRY_V1'
-                        else 'QUOTE_EVIDENCE_V6'
-                    ),
+                    'exit_policy': 'fixed', 'exit_policy_version': exit_policy.VERSION,
+                    'effective_config_hash': effective_config_hash(),
+                    'effective_entry_thresholds': EFFECTIVE_ENTRY_THRESHOLDS.as_dict(),
+                    'signal_source_commit': order_flow.SOURCE_COMMIT,
+                    'execution_verification_version': 'QUOTE_EVIDENCE_V9',
                     'entry_quote': live_quote.get('raw_quote'),
                     'preflight_buy_quote': live_quote.get('preflight_buy_quote'),
                     'preflight_sell_quote': live_quote.get('preflight_sell_quote'),
                     'price_crosscheck': validation,
                     'preflight_is_cost_estimate_not_same_time_fill': True,
                     'entry_worst_case_roundtrip_pnl_pct': round(worst_case_roundtrip_pct, 4),
-                    'stop_signal_trigger_pct': round(stop_signal_trigger_pct, 4),
-                    'hard_stop_net_pct': -STOP_LOSS_PCT,
+                    'stop_signal_trigger_pct': None,
+                    'hard_stop_net_pct': None, 'planned_stop_net_pct': -STOP_LOSS_PCT,
                     'entry_dex_fee_bps': round(entry_quote['dex_fee_bps'], 4),
                     'entry_dex_fee_usd': round(entry_quote['dex_fee_usd'], 8),
                     'entry_network_fee_usd': round(entry_quote['network_fee_usd'], 8),
@@ -1611,9 +1745,8 @@ class Monitor:
                     'entry_scan_count': STATE.scan_count, 'dex_url': coin.get('dexUrl'),
                     'coin_snapshot': coin,
                 }
-                STATE.positions.append(position)
+                STATE.commit('ENTRY', position, positions=STATE.positions+[position], trade_seq=next_trade_no)
                 report['opened'] += 1
-                append_audit('ENTRY', position)
                 open_addresses.add(address)
                 STATE.event(
                     f"PAPER ENTRY #{position['trade_no']} ${coin.get('symbol')} market ${price:.10g} "
@@ -1622,7 +1755,7 @@ class Monitor:
                 )
 
     def scan_once(self) -> None:
-        if not STATE.running or not self.scan_lock.acquire(blocking=False):
+        if not self.scan_lock.acquire(blocking=False):
             return
         try:
             addresses, metadata = self.discovery.get()
@@ -1699,6 +1832,10 @@ class Monitor:
                 }
                 by_address[address] = make_coin(address, pair, meta)
             with STATE.lock:
+                for position in STATE.positions:
+                    held = by_address.get(position.get('address'))
+                    if held and held.get('pairAddress') == position.get('pairAddress'):
+                        STATE.position_market[f"{position.get('address')}:{position.get('pairAddress')}"] = dict(held)
                 STATE.feed = feed
                 STATE.last_scan_at = now_ms()
                 STATE.scan_count += 1
@@ -1709,6 +1846,10 @@ class Monitor:
                 STATE.message = STATE.entry_diagnostics.get('message') or f'Проверени {len(feed)} token-а; отворени позиции: {len(STATE.positions)}.'
                 STATE.save()
             # Prewarm provider checks before the short EARLY flow window fires.
+            if training_bridge.enabled():
+                for coin in feed:
+                    training_bridge.observe(coin,STATE.live_flow(coin['address'],pair_address=coin.get('pairAddress')),
+                        context=self.market_context(coin,{}),now=now_ms())
             self.prewarm_entry_checks(feed)
             # Entry preparation and quotes must not hold the account/UI lock.
             self.maybe_open(feed)
@@ -1783,6 +1924,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 STATE.running = True
                 STATE.status = 'starting'
                 STATE.event('Monitoring enabled.')
+                STATE.save()
             threading.Thread(target=MONITOR.scan_once, daemon=True).start()
             self.send_json(STATE.snapshot())
             return
@@ -1791,6 +1933,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 STATE.running = False
                 STATE.status = 'paused'
                 STATE.event('Monitoring paused.')
+                STATE.save()
             self.send_json(STATE.snapshot())
             return
         if path == '/control/rescan':
@@ -1798,25 +1941,24 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_json({'ok': True})
             return
         if path == '/control/reset':
-            with STATE.lock:
-                STATE.positions = []
-                STATE.history = []
-                STATE.events = []
-                STATE.price_history = {}
-                STATE.demo_starting_balance_usd = STARTING_BALANCE_USD
-                STATE.demo_balance_usd = STARTING_BALANCE_USD
-                STATE.demo_started_at = now_ms()
-                STATE.demo_session_id = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
-                STATE.trade_seq = 0
-                append_audit('RESET', {'starting_balance_usd': STARTING_BALANCE_USD})
-                STATE.event(f'New demo session started with ${STARTING_BALANCE_USD:.2f}.')
-                STATE.save()
-            self.send_json(STATE.snapshot())
+            try:
+                with MONITOR.position_lock, MONITOR.entry_lock:
+                    STATE.reset_with_archive()
+                    training_bridge.request_reset()
+                self.send_json(STATE.snapshot())
+            except Exception as exc:
+                self.send_json({'error': 'reset_archive_or_persist_failed', 'type': type(exc).__name__}, 500)
             return
         self.send_json({'error': 'not_found'}, 404)
 
 
 def main() -> None:
+    mode = os.getenv('NEO_ENGINE_MODE', 'PAPER').upper()
+    if mode not in {'PAPER', 'REPLAY', 'SHADOW'}:
+        raise ValueError('Only PAPER/REPLAY/SHADOW modes are supported')
+    STATE.load()
+    STATE.save()
+    training_bridge.start(STATE_PATH.parent / 'training')
     thread = threading.Thread(target=MONITOR.run, name='neo-market-monitor', daemon=True)
     thread.start()
     guard = threading.Thread(target=MONITOR.run_position_guard, name='neo-position-guard', daemon=True)
@@ -1829,6 +1971,7 @@ def main() -> None:
         pass
     finally:
         MONITOR.stop()
+        training_bridge.stop()
         server.shutdown()
 
 

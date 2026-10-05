@@ -6,7 +6,7 @@ from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 import json,math,os,tempfile,threading,time
 
-VERSION='RUNTIME_REPAIR_V1'
+VERSION='RUNTIME_DURABLE_PAPER_V2'
 
 def _number(value):
     x=float(value)
@@ -37,10 +37,23 @@ def atomic_json(path,data):
     text=json.dumps(data,ensure_ascii=False,allow_nan=False)
     fd,name=tempfile.mkstemp(prefix='.'+path.name+'.',suffix='.tmp',dir=path.parent)
     try:
-        if path.exists():os.fchmod(fd,path.stat().st_mode & 0o777)
+        if path.exists() and hasattr(os,'fchmod'):os.fchmod(fd,path.stat().st_mode & 0o777)
         with os.fdopen(fd,'w',encoding='utf-8') as f:
             f.write(text);f.flush();os.fsync(f.fileno())
-        os.replace(name,path)
+        # Windows readers can temporarily deny replacement of an open file.
+        # Retry only permission/share races; disk/full/schema failures still fail.
+        for attempt in range(6):
+            try:
+                os.replace(name,path)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(.01*(attempt+1))
+        if os.name == 'posix':
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try: os.fsync(directory_fd)
+            finally: os.close(directory_fd)
     finally:
         try:os.unlink(name)
         except FileNotFoundError:pass

@@ -25,12 +25,12 @@ class EngineEntryTests(unittest.TestCase):
         m.STATE = m.State()
         self.monitor = m.Monitor()
         self.coin = {'address': 'A'*44, 'pairAddress': 'B'*44, 'symbol': 'FIXTURE',
-                     'name': 'Offline fixture', 'score': 90, 'liquidityUsd': 60000,
+                     'name': 'Offline fixture', 'score': 90, 'liquidityUsd': 200000,
                      'marketCap': 1000000, 'priceUsd': .001, 'priceNative': .00001,
-                     'ageMinutes': 45, 'priceChange': {'m5': 6, 'h1': -15},
+                     'ageMinutes': 60, 'priceChange': {'m5': 6, 'h1': -15},
                      'txns': {'m5': {'buys': 20, 'sells': 18}}, 'volume': {'h1': 50000},
                      'signals': [], 'updatedAt': m.now_ms()}
-        self.flow = {'trades': 4, 'buys': 3, 'sells': 1, 'buy_sell_usd_ratio': 2.0,
+        self.flow = {'quality': 'COMPLETE', 'trades': 4, 'buys': 3, 'sells': 1, 'buy_sell_usd_ratio': 2.0,
                      'unique_wallets': 4, 'buyer_wallets': 3, 'wallet_buy_sell_ratio': 3,
                      'max_sell_usd': 50, 'buy_usd': 300}
         self.context = {'conviction': 80, 'mode': 'STRONG'}
@@ -47,6 +47,7 @@ class EngineEntryTests(unittest.TestCase):
                         patch.object(m.price_integrity,'check',return_value={'status':'pass','version':'TEST'})]
         self.mocks = [p.start() for p in self.patches]
         self.addCleanup(lambda: [p.stop() for p in reversed(self.patches)])
+        self.addCleanup(self.monitor.stop)
 
     def test_critical_rug_blocks_before_quote(self):
         self.mocks[5].return_value={'status':'blocked','reasons':['rugcheck_critical']}
@@ -63,7 +64,7 @@ class EngineEntryTests(unittest.TestCase):
     def test_remaining_daily_risk_budget_sizes_down_before_request(self):
         m.STATE.demo_balance_usd=905
         m.STATE.risk_day_start_balance_usd=1000
-        with patch.object(m.paper_quotes,'prepare_entry',return_value=None) as quote:
+        with patch.object(m,'MAX_DAILY_LOSS_USD',100), patch.object(m.paper_quotes,'prepare_entry',return_value=None) as quote:
             self.monitor.maybe_open([self.coin])
         self.assertTrue(quote.called)
         size=quote.call_args.args[2]
@@ -74,9 +75,9 @@ class EngineEntryTests(unittest.TestCase):
 
     def test_preserve_user_risk_settings(self):
         self.assertEqual(m.TRADE_NOTIONAL_USD, 200)
-        self.assertEqual(m.MAX_DAILY_LOSS_USD, 100)
+        self.assertEqual(m.MAX_DAILY_LOSS_USD, 0)
         self.assertEqual(m.STOP_LOSS_PCT, 5)
-        self.assertEqual(m.MAX_POSITIONS, 5)
+        self.assertEqual(m.MAX_POSITIONS, 8)
         self.assertEqual(m.TAKE_PROFIT_PCT, 10)
 
     def test_valid_formerly_overfiltered_entry_reaches_quote_and_opens(self):
@@ -87,7 +88,8 @@ class EngineEntryTests(unittest.TestCase):
         self.assertEqual(pos['entry_policy_version'], policy.POLICY_VERSION)
         self.assertEqual(m.STATE.entry_diagnostics['status'], 'opened')
         self.assertLess(pos['entry_roundtrip_pnl_pct'], 0)
-        self.assertEqual(pos['hard_stop_net_pct'], -5)
+        self.assertIsNone(pos['hard_stop_net_pct'])
+        self.assertEqual(pos['planned_stop_net_pct'], -5)
 
     def test_no_balance_session_history_reset(self):
         m.STATE.demo_balance_usd = 975
@@ -102,7 +104,8 @@ class EngineEntryTests(unittest.TestCase):
     def test_daily_loss_blocks_new_entry(self):
         m.STATE.demo_balance_usd = 900
         m.STATE.risk_day_start_balance_usd = 1000
-        self.monitor.maybe_open([self.coin])
+        with patch.object(m,'MAX_DAILY_LOSS_USD',100):
+            self.monitor.maybe_open([self.coin])
         self.assertFalse(m.STATE.positions)
         self.mocks[2].assert_not_called()
         self.assertEqual(m.STATE.entry_diagnostics['status'], 'daily_limit')
@@ -145,8 +148,8 @@ class EngineEntryTests(unittest.TestCase):
         self.assertFalse(m.STATE.positions)
         self.assertIn('quote_inconsistent', m.STATE.entry_diagnostics['rejections'])
 
-    def test_user_tuned_gold_signal_rejects_below_10k_liquidity_and_low_score(self):
-        for key,val in [('liquidityUsd',9999),('score',84.9)]:
+    def test_effective_early_signal_rejects_below_configured_liquidity_and_score(self):
+        for key,val in [('liquidityUsd',3999),('score',57.9)]:
             self.monitor.maybe_open([{**self.coin,key:val}])
             self.assertFalse(m.STATE.positions)
             self.assertIn('gold_signal',m.STATE.entry_diagnostics['rejections'])
@@ -172,14 +175,14 @@ class EngineEntryTests(unittest.TestCase):
 
     def test_quote_attempts_are_bounded(self):
         self.mocks[2].return_value = None
-        self.monitor.maybe_open([dict(self.coin, address=x*44) for x in 'ACDEF'])
+        self.monitor.maybe_open([dict(self.coin, address=x*44) for x in 'ACDEFGH'])
         self.assertEqual(self.mocks[2].call_count, policy.MAX_QUOTED_CANDIDATES)
-        self.assertEqual(m.STATE.entry_diagnostics['signal_passed'], 5)
+        self.assertEqual(m.STATE.entry_diagnostics['signal_passed'], 7)
 
     def test_reported_thresholds_match_real_policy(self):
         snapshot = m.STATE.snapshot()
-        self.assertEqual(snapshot['config']['entry_score'], 85)
-        self.assertEqual(snapshot['config']['min_liquidity_usd'], 10000)
+        self.assertEqual(snapshot['config']['entry_score'], 58)
+        self.assertEqual(snapshot['config']['min_liquidity_usd'], 4000)
         self.assertEqual(snapshot['config']['entry_policy_version'], policy.POLICY_VERSION)
         self.assertIn('entry_diagnostics', snapshot)
 

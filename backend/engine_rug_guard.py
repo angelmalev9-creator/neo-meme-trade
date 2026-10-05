@@ -3,7 +3,7 @@ No claim of complete rug detection: holder/LP findings are third-party reports;
 full funding graphs and wallet-age analysis are not fabricated when unavailable.
 """
 import concurrent.futures as cf
-import fcntl
+import compat_file_lock as fcntl
 import json
 import math
 import os

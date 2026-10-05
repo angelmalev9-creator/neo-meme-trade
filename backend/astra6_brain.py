@@ -8,7 +8,7 @@ Existing engine and Strategy Lab books are read-only inputs.
 """
 from __future__ import annotations
 import concurrent.futures as cf
-import fcntl
+import compat_file_lock as fcntl
 import json
 import math
 import os
@@ -21,6 +21,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 import requests
+import honest_quote_transport as quote_transport
 
 ID = 'ASTRA_6_BRAIN'
 NAME = 'Astra 6 Brain'
@@ -72,7 +73,7 @@ def n(v: Any, d: float = 0.0) -> float:
 
 def read(path: Path, default: Any = None) -> Any:
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return default
 
@@ -80,7 +81,7 @@ def read(path: Path, default: Any = None) -> Any:
 def write(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name+'.tmp')
-    with tmp.open('w') as f:
+    with tmp.open('w',encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, allow_nan=False)
         f.flush()
         os.fsync(f.fileno())
@@ -113,7 +114,8 @@ def stats(book: dict) -> dict:
     eq=equity(book); start=n(book['starting_balance'])
     return dict(trades=len(h), wins=len(wins), losses=len(h)-len(wins),
         win_rate=round(100*len(wins)/len(h),1) if h else 0,
-        profit_factor=round(gp/gl,3) if gl else (99 if gp else 0),
+        profit_factor=round(gp/gl,3) if gl else None,
+        profit_factor_status='finite' if gl else ('infinite_no_losses' if gp else 'undefined_no_results'),
         realized_pnl=round(n(book['balance'])-start,4), equity=round(eq,4),
         return_pct=round((eq/start-1)*100,3), open=bool(book['positions']),
         open_positions=len(book['positions']), reserved_usd=round(reserved(book),4),
@@ -196,10 +198,9 @@ class Client:
     def __init__(self):
         self.http=requests.Session()
         self.http.headers.update({'User-Agent':'NEO-Astra6-Paper/1.0'})
-        self.key=os.getenv('JUPITER_API_KEY','').strip()
-        self.next_at=0.; self.meta={}; self.sol_usd=0.; self.sol_at=0
+        self.meta={}; self.sol_usd=0.; self.sol_at=0
         self.fee_sol=.0001; self.rpc_at=0; self.rent={}
-        self.requests=0; self.errors=0
+        self.requests=0; self.errors=0; self.last_quote_error={}
 
     def rpc(self, method: str, params: list):
         r=self.http.post(RPC,json={'jsonrpc':'2.0','id':1,'method':method,'params':params},timeout=5)
@@ -229,40 +230,38 @@ class Client:
         self.meta[mint]=m
         return m
 
-    def quote(self, inp: str, out: str, raw: int) -> dict:
-        if raw<=0: raise QuoteError('Нулева сума')
-        if time.time()<self.next_at: raise Busy()
-        lock=ROOT/'jupiter_quote.lock'; stamp=ROOT/'jupiter_quote_last.txt'
-        ROOT.mkdir(parents=True,exist_ok=True)
-        with lock.open('a+') as handle:
-            try: fcntl.flock(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
-            except BlockingIOError: raise Busy()
-            try:
-                try: last=float(stamp.read_text())
-                except (ValueError,OSError): last=0.
-                if time.time()-last<2.1: raise Busy()
+    def quote(self, inp: str, out: str, raw: int, *, purpose: str='entry', force: bool=False) -> dict:
+        # ASTRA's data directory only selects its ledger. Every account shares
+        # the same transport, exit queue, cache and provider backoff files.
+        started=now_ms()
+        q=quote_transport.quote(inp,out,raw,purpose=purpose,
+            slippage_bps=SLIPPAGE_BPS,min_received_at=started if force else None)
+        if q is None:
+            self.last_quote_error=quote_transport.last_error() or {'code':'QUOTE_UNAVAILABLE','at':now_ms()}
+            self.errors+=1
+            code=self.last_quote_error['code']
+            if self.last_quote_error.get('http_ms') is not None or self.last_quote_error.get('http_status') or code in ('HTTP_ERROR','TIMEOUT','SCHEMA_MISMATCH'):
                 self.requests+=1
-                headers={'x-api-key':self.key} if self.key else {}
-                started=time.time()
-                try:
-                    r=self.http.get('https://api.jup.ag/swap/v1/quote',params=dict(
-                        inputMint=inp,outputMint=out,amount=str(raw),swapMode='ExactIn',
-                        slippageBps=SLIPPAGE_BPS,instructionVersion='V2',restrictIntermediateTokens='true'),headers=headers,timeout=5)
-                    if r.status_code==429:
-                        reset=n(r.headers.get('x-ratelimit-reset'),time.time()+15)
-                        self.next_at=max(time.time()+5,reset)
-                        raise QuoteError('Лимит на котировките; изчакване')
-                    r.raise_for_status(); q=r.json()
-                    q['_at']=now_ms(); q['_request_ms']=round((time.time()-started)*1000)
-                    if q.get('inputMint')!=inp or q.get('outputMint')!=out or int(q.get('inAmount') or 0)!=raw:
-                        raise QuoteError('Несъответстваща котировка')
-                    if not usable_quote(q,now_ms()) or q['_request_ms']>QUOTE_MAX_MS:
-                        raise QuoteError('Невалидна или закъсняла котировка')
-                    return q
-                finally:
-                    stamp.write_text(str(time.time()))
-                    self.next_at=max(self.next_at,time.time()+2.4)
-            finally: fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
+            if code=='QUOTE_BUDGET_TIMEOUT': raise Busy(code)
+            raise QuoteError(code)
+        if not q.get('_cache_hit'): self.requests+=1
+        q=dict(q)
+        try:
+            received=int(q['_received_at'])
+            q['_at']=received # Never refresh the age of a reused observation.
+            q['_request_ms']=int(q.get('_http_ms') or 0)
+            q['_end_to_end_ms']=max(0,now_ms()-started)
+            if q.get('inputMint')!=inp or q.get('outputMint')!=out or int(q.get('inAmount') or 0)!=raw:
+                raise ValueError('QUOTE_IDENTITY_MISMATCH')
+            if force and received<started: raise ValueError('STALE_EXIT_QUOTE')
+            if not usable_quote(q,now_ms()) or q['_request_ms']>QUOTE_MAX_MS:
+                raise ValueError('STALE_OR_INVALID_QUOTE')
+        except (ValueError,TypeError,KeyError) as exc:
+            self.errors+=1
+            self.last_quote_error={'code':str(exc),'at':now_ms(),'purpose':purpose}
+            raise QuoteError(self.last_quote_error['code']) from exc
+        self.last_quote_error={}
+        return q
 
     def warm(self):
         if not self.rpc_at or now_ms()-self.rpc_at>120_000:
@@ -273,19 +272,19 @@ class Client:
             unit=values[min(len(values)-1,int(.9*len(values)))] if values else 0
             self.fee_sol=max(100_000,5000+math.ceil(unit*1_400_000/1e6))/1e9
             self.rpc_at=now_ms()
-        q=self.quote(SOL,USDC,1_000_000_000)
+        q=self.quote(SOL,USDC,1_000_000_000,purpose='background')
         self.sol_usd=int(q['outAmount'])/1e6
-        self.sol_at=now_ms()
+        self.sol_at=q['_at']
         if not 1<self.sol_usd<100000: raise QuoteError('Невалидна цена на SOL')
 
     def buy(self, coin: dict, amount: float):
         meta=self.mint(coin['address'])
-        q=self.quote(USDC,coin['address'],int(Decimal(str(amount))*1_000_000))
+        q=self.quote(USDC,coin['address'],int(Decimal(str(amount))*1_000_000),purpose='entry')
         if not valid_route(q,coin['address'],coin['pairAddress'],True): raise QuoteError('Входният route използва различен pool')
         return q,meta
 
-    def sell(self, mint: str, pair: str, raw: int):
-        q=self.quote(mint,USDC,raw)
+    def sell(self, mint: str, pair: str, raw: int, purpose: str='exit'):
+        q=self.quote(mint,USDC,raw,purpose=purpose,force=purpose=='exit')
         if not valid_route(q,mint,pair,False): raise QuoteError('Изходният route използва различен pool')
         return q
 
@@ -369,7 +368,7 @@ class Brain:
     def __init__(self, path: Path = PATH, client=None):
         self.path=path
         if path.exists():
-            stored=json.loads(path.read_text()) # Corrupt state MUST NOT silently reset.
+            stored=json.loads(path.read_text(encoding='utf-8')) # Corrupt state MUST NOT silently reset.
             self.book=stored['book']
         else: self.book=empty_book()
         self.client=client or Client(); self.executor=cf.ThreadPoolExecutor(max_workers=1)
@@ -423,8 +422,8 @@ class Brain:
                 if pos:
                     reason=apply_mark(self.book,pos,result,fee,stamp)
                     if reason: self.event(f'Тестов изход {pos["symbol"]}: {pos["pnl_pct"]:+.2f}% нето; {reason}')
-        except Busy:
-            pass # Shared rate limiter gives the existing engine priority.
+        except Busy as exc:
+            self.diag['message']=str(exc) # Preserve the shared budget failure.
         except Exception as exc:
             text=str(exc) if isinstance(exc,QuoteError) else type(exc).__name__
             self.reject(text)
@@ -462,7 +461,7 @@ class Brain:
                 self.pending=None; self.reject('Изтекла входна котировка'); return
             if stamp-self.last_attempt.get('check',0)<1500: return
             p=self.pending; self.last_attempt['check']=stamp
-            self.submit('check',p,self.client.sell,p['coin']['address'],p['coin']['pairAddress'],p['raw'])
+            self.submit('check',p,self.client.sell,p['coin']['address'],p['coin']['pairAddress'],p['raw'],'entry')
             return
         if any(stamp-int(p.get('quote_at',0))>QUOTE_MAX_MS for p in positions):
             self.diag['message']='Първо се обновяват отворените позиции'; return
@@ -505,6 +504,7 @@ class Brain:
         out=dict(book=self.book,stats=stats(self.book),config=CONFIG,updated_at=stamp,
             status='online' if not self.stop_requested else 'stopped',diagnostics=self.diag,events=self.events,
             quote_requests=self.client.requests,sol_usd=self.client.sol_usd,
+            quote_errors=self.client.errors,last_quote_error=self.client.last_quote_error,
             network_fee_budget_sol=self.client.fee_sol)
         write(self.path,out); self.last_save=stamp
 

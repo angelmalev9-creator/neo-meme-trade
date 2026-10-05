@@ -92,6 +92,11 @@ Every heuristic must be validated against real historical tokens before becoming
 
 ## Web app
 
+The PAPER backend audit, independent training books and causal replay are documented in
+[PAPER runbook](docs/PAPER_RUNBOOK.md), [root-cause audit](docs/TRADING_ROOT_CAUSE.md),
+[execution model](docs/EXECUTION_MODEL.md) and [strategy validation](docs/STRATEGY_VALIDATION.md).
+Learning promotion is confined to separate PAPER portfolios; no live execution is enabled.
+
 ```bash
 npm install
 npm run dev

@@ -14,12 +14,17 @@ import time
 from typing import Any
 
 import requests
+import engine_execution as jupiter
 
 RPC_URL = os.getenv("NEO_STOP_RPC_URL", "https://api.mainnet-beta.solana.com")
 RPC_FALLBACK_URL = os.getenv("NEO_STOP_RPC_FALLBACK_URL", "https://rpc.solanatracker.io/public")
 PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 PUMP_AMM_PROGRAM_ID = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
 PUMP_FEE_CONFIG_PDA = "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"
+PUMP_FEE_PROGRAM_ID = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
+GLOBAL_CONFIG = "ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw"
+TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 WSOL = "So11111111111111111111111111111111111111112"
 POOL_DISCRIMINATOR = bytes([241, 154, 109, 4, 17, 177, 109, 188])
 CONVERSION_BUFFER_BPS = int(os.getenv("NEO_STOP_SOL_USD_BUFFER_BPS", "10"))
@@ -161,8 +166,10 @@ def _decode_pool(data: bytes) -> dict[str, Any]:
         "quote_vault": _b58_encode(data[171:203]),
         "coin_creator_present": any(data[211:243]),
         "is_mayhem_mode": bool(data[243]),
+        "is_cashback_coin": bool(data[244]),
         "virtual_quote_reserves": int.from_bytes(data[245:261], "little", signed=True),
         "creator_fee_bps": int.from_bytes(data[261:269], "little"),
+        "is_holder_reward": bool(data[270]) if len(data)>270 else False,
     }
 
 
@@ -170,6 +177,29 @@ def _token_account_amount(data: bytes) -> int:
     if len(data) < 72:
         raise ValueError("token account too short")
     return int.from_bytes(data[64:72], "little")
+
+
+def _validate_token_account(value, mint, authority):
+    if (value or {}).get('owner') not in (TOKEN_PROGRAM,TOKEN_2022_PROGRAM):
+        raise ValueError('vault owner is not a supported token program')
+    data = _account_bytes(value)
+    if len(data)<165 or _b58_encode(data[:32])!=mint or _b58_encode(data[32:64])!=authority or data[108]!=1:
+        raise ValueError('vault mint, authority or initialization mismatch')
+    # Extensions can change executable quantities (transfer fees/hooks). Use
+    # the aggregate quote adapter until a specific extension is modeled.
+    if len(data)>165 or value.get('owner')==TOKEN_2022_PROGRAM:
+        raise ValueError('token extensions require validated aggregate route')
+    return _token_account_amount(data)
+
+
+def _decode_global(value):
+    if (value or {}).get('owner')!=PUMP_AMM_PROGRAM_ID:
+        raise ValueError('global config owner mismatch')
+    data = _account_bytes(value)
+    if len(data)<907 or data[:8]!=hashlib.sha256(b'account:GlobalConfig').digest()[:8]:
+        raise ValueError('unsupported global config schema')
+    return {'disable_flags':data[56],'cashback_enabled':bool(data[642]),
+            'buyback_bps':int.from_bytes(data[899:907],'little')}
 
 
 def _mint_supply(data: bytes) -> int:
@@ -182,6 +212,16 @@ def _mint_decimals(data: bytes) -> int:
     if len(data) < 45:
         raise ValueError("mint account too short")
     return int(data[44])
+
+
+def _validate_mint(value,expected_decimals=None):
+    data=_account_bytes(value)
+    if (value or {}).get('owner')!=TOKEN_PROGRAM or len(data)!=82 or data[45]!=1:
+        raise ValueError('unsupported or uninitialized mint account')
+    decimals=_mint_decimals(data)
+    if not 0<=decimals<=18 or (expected_decimals is not None and decimals!=expected_decimals):
+        raise ValueError('mint decimals mismatch')
+    return _mint_supply(data),decimals
 
 
 def _fees(data: bytes, offset: int) -> tuple[dict[str, int], int]:
@@ -197,15 +237,20 @@ def _fee_config() -> dict[str, Any]:
     current = now_ms()
     with _LOCK:
         cached = _FEE_CACHE
-    if cached and current - cached[0] < 300_000:
+    if cached and 0 <= current - cached[0] < 5000 and not cached[1].get('fallback'):
         return cached[1]
     parsed = {"flat": dict(_KNOWN_FLAT), "tiers": [(t, dict(f)) for t, f in _KNOWN_TIERS], "fallback": True}
     try:
         result, _, _, _ = _rpc(
             "getAccountInfo",
-            [PUMP_FEE_CONFIG_PDA, {"encoding": "base64", "commitment": "processed"}],
+            [PUMP_FEE_CONFIG_PDA, {"encoding": "base64", "commitment": "confirmed"}],
         )
-        data = _account_bytes((result or {}).get("value"))
+        value=(result or {}).get('value') or {}
+        if value.get('owner')!=PUMP_FEE_PROGRAM_ID:
+            raise ValueError('fee config owner mismatch')
+        data = _account_bytes(value)
+        if data[:8]!=bytes([143,52,146,187,219,123,76,155]):
+            raise ValueError('fee config discriminator mismatch')
         if len(data) >= 69:
             flat, _ = _fees(data, 41)
             offset = 65
@@ -219,8 +264,9 @@ def _fee_config() -> dict[str, Any]:
                 schedule, _ = _fees(data, offset + 16)
                 tiers.append((threshold, schedule))
                 offset += 40
-            if tiers:
-                parsed = {"flat": flat, "tiers": tiers, "fallback": False}
+            if tiers and all(0<=f<=10000 for f in flat.values()) and all(0<=f<=10000 for _,fees in tiers for f in fees.values()):
+                parsed = {"flat": flat, "tiers": tiers, "fallback": False,
+                          'slot':int(((result or {}).get('context') or {}).get('slot') or 0)}
     except (requests.RequestException, ValueError, TypeError, KeyError, RuntimeError):
         pass
     with _LOCK:
@@ -234,12 +280,14 @@ def _get_multiple(pubkeys: list[str]) -> tuple[dict[str, dict[str, Any]], int, i
     unique = list(dict.fromkeys(pubkeys))
     result, http_ms, received, source = _rpc(
         "getMultipleAccounts",
-        [unique, {"encoding": "base64", "commitment": "processed"}],
+        [unique, {"encoding": "base64", "commitment": "confirmed"}],
     )
     values = (result or {}).get("value") or []
     if len(values) != len(unique):
         raise ValueError("incomplete multiple-account response")
     slot = int(((result or {}).get("context") or {}).get("slot") or 0)
+    if slot<=0:
+        raise ValueError('RPC context slot missing')
     return dict(zip(unique, values)), http_ms, received, slot, source
 
 
@@ -286,7 +334,11 @@ def prime_positions(positions: list[dict[str, Any]]) -> bool:
             addresses.extend([pair, layout["base_vault"], layout["quote_vault"], mint])
         if not valid:
             return False
+        addresses.extend([WSOL,GLOBAL_CONFIG])
         account_map, http_ms, received, slot, source = _get_multiple(addresses)
+        global_config = _decode_global(account_map.get(GLOBAL_CONFIG))
+        quote_mint_value=account_map.get(WSOL) or {}
+        _validate_mint(quote_mint_value,9)
         fresh: dict[str, dict[str, Any]] = {}
         for pair, mint, layout in valid:
             pool_value = account_map.get(pair)
@@ -305,16 +357,22 @@ def prime_positions(positions: list[dict[str, Any]]) -> bool:
                 or pool["quote_vault"] != layout["quote_vault"]
             ):
                 continue
+            base_supply,base_decimals=_validate_mint(mint_value)
+            base_reserve = _validate_token_account(base_value,mint,pair)
+            quote_reserve = _validate_token_account(quote_value,WSOL,pair)
             fresh[pair] = {
                 "pool": pool,
-                "base_reserve": _token_account_amount(_account_bytes(base_value)),
-                "quote_reserve": _token_account_amount(_account_bytes(quote_value)),
-                "base_supply": _mint_supply(_account_bytes(mint_value)),
-                "base_decimals": _mint_decimals(_account_bytes(mint_value)),
+                "base_reserve": base_reserve,
+                "quote_reserve": quote_reserve,
+                "base_supply": base_supply,
+                "base_decimals": base_decimals,
                 "quoted_at": received,
                 "slot": slot,
                 "http_ms": http_ms,
                 "rpc_source": source,
+                "global_config":global_config,
+                "commitment":"confirmed",
+                "validated_accounts":True,
             }
         with _LOCK:
             _SNAPSHOT_CACHE.update(fresh)
@@ -359,6 +417,8 @@ def quote_from_reserves(
     base_amount: int,
     fee_schedule: dict[str, int],
 ) -> dict[str, Any]:
+    if any(type(v) is not int for v in (base_reserve,quote_reserve,virtual_quote_reserve,base_amount)):
+        raise ValueError('integer raw amounts required')
     if min(base_reserve, quote_reserve, base_amount) <= 0:
         raise ValueError("invalid reserves")
     effective_quote = quote_reserve + int(virtual_quote_reserve)
@@ -366,9 +426,11 @@ def quote_from_reserves(
         raise ValueError("effective quote reserve is non-positive")
     no_impact = effective_quote * base_amount // base_reserve
     raw_out = effective_quote * base_amount // (base_reserve + base_amount)
-    lp_fee = math.ceil(raw_out * fee_schedule.get("lp", 0) / 10_000)
-    protocol_fee = math.ceil(raw_out * fee_schedule.get("protocol", 0) / 10_000)
-    creator_fee = math.ceil(raw_out * fee_schedule.get("creator", 0) / 10_000)
+    if any(type(v) is not int or not 0<=v<=10000 for v in fee_schedule.values()):
+        raise ValueError('invalid fee basis points')
+    lp_fee = (raw_out * fee_schedule.get("lp", 0)+9999)//10_000
+    protocol_fee = (raw_out * fee_schedule.get("protocol", 0)+9999)//10_000
+    creator_fee = (raw_out * fee_schedule.get("creator", 0)+9999)//10_000
     if quote_reserve < raw_out - lp_fee:
         raise ValueError("insufficient real quote reserve")
     final_out = raw_out - lp_fee - protocol_fee - creator_fee
@@ -395,6 +457,8 @@ def buy_quote_from_reserves(
     fee_schedule: dict[str, int],
 ) -> dict[str, Any]:
     """Exact-quote-in PumpSwap buy math mirrored from the official SDK."""
+    if any(type(v) is not int for v in (base_reserve,quote_reserve,virtual_quote_reserve,quote_amount)):
+        raise ValueError('integer raw amounts required')
     if min(base_reserve, quote_reserve, quote_amount) <= 0:
         raise ValueError("invalid reserves")
     effective_quote_reserve = quote_reserve + int(virtual_quote_reserve)
@@ -407,9 +471,11 @@ def buy_quote_from_reserves(
         + int(fee_schedule.get("creator", 0))
     )
     effective_quote = quote_amount * 10_000 // (10_000 + total_fee_bps)
-    lp_fee = math.ceil(effective_quote * fee_schedule.get("lp", 0) / 10_000)
-    protocol_fee = math.ceil(effective_quote * fee_schedule.get("protocol", 0) / 10_000)
-    creator_fee = math.ceil(effective_quote * fee_schedule.get("creator", 0) / 10_000)
+    if any(type(v) is not int or not 0<=v<=10000 for v in fee_schedule.values()):
+        raise ValueError('invalid fee basis points')
+    lp_fee = (effective_quote * fee_schedule.get("lp", 0)+9999)//10_000
+    protocol_fee = (effective_quote * fee_schedule.get("protocol", 0)+9999)//10_000
+    creator_fee = (effective_quote * fee_schedule.get("creator", 0)+9999)//10_000
     total_with_fees = effective_quote + lp_fee + protocol_fee + creator_fee
     if total_with_fees > quote_amount:
         effective_quote -= total_with_fees - quote_amount
@@ -435,218 +501,91 @@ def buy_quote_from_reserves(
     }
 
 
-def prepare_entry(
-    coin: dict[str, Any],
-    notional_usd: float,
-    sol_usd: float,
-    buffer_bps: int = 10,
-    slippage_bps: int = 100,
-) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """Fast PAPER PumpSwap entry + immediate-exit estimate from one RPC snapshot."""
-    pair = str(coin.get("pairAddress") or "")
-    mint = str(coin.get("address") or "")
-    if not pair or not mint or notional_usd <= 0 or sol_usd <= 0:
+def cached_snapshot(pair: str, mint: str, *, max_age_ms: int = SNAPSHOT_TTL_MS):
+    """Return a validated read-only reserve observation without any API calls.
+
+    The training recorder can share this observation. A reserve estimate in
+    SOL is not a sale for USDC; callers must retain the settlement asset.
+    """
+    with _LOCK:
+        snapshot = dict(_SNAPSHOT_CACHE.get(pair) or {})
+        fee_cache = _FEE_CACHE
+    if not snapshot or not snapshot.get('validated_accounts'):
         return None
-    probe = {"pairAddress": pair, "address": mint, "coin_snapshot": coin}
-    try:
-        if not prime_positions([probe]):
-            with _LOCK:
-                snapshot = dict(_SNAPSHOT_CACHE.get(pair) or {})
-        else:
-            with _LOCK:
-                snapshot = dict(_SNAPSHOT_CACHE.get(pair) or {})
-        if not snapshot or now_ms() - int(snapshot.get("quoted_at") or 0) > SNAPSHOT_TTL_MS:
-            return None
-
-        pool = snapshot["pool"]
-        if pool.get("base_mint") != mint or pool.get("quote_mint") != WSOL:
-            return None
-        base_reserve = int(snapshot["base_reserve"])
-        quote_reserve = int(snapshot["quote_reserve"])
-        effective_quote_reserve = quote_reserve + int(pool["virtual_quote_reserves"])
-        if effective_quote_reserve <= 0:
-            return None
-        schedule, canonical, market_cap_sol, fee_fallback = _fee_schedule(
-            pool, base_reserve, effective_quote_reserve, int(snapshot["base_supply"])
-        )
-
-        # Account is USD-denominated; model conversion into SOL conservatively.
-        conversion_factor = max(0.0, 1.0 - max(0, int(buffer_bps)) / 10_000.0)
-        sol_budget = (notional_usd / sol_usd) * conversion_factor
-        quote_raw = int(sol_budget * 1_000_000_000)
-        if quote_raw <= 0:
-            return None
-
-        buy = buy_quote_from_reserves(
-            base_reserve,
-            quote_reserve,
-            int(pool["virtual_quote_reserves"]),
-            quote_raw,
-            schedule,
-        )
-        expected_raw = int(buy["base_out_raw"])
-        assumed_raw = expected_raw * (10_000 - max(0, int(buffer_bps))) // 10_000
-        if assumed_raw <= 0:
-            return None
-
-        # Conservative immediate-exit estimate. This intentionally applies the
-        # same USD/SOL conversion buffer on the way back.
-        sale = quote_from_reserves(
-            base_reserve,
-            quote_reserve,
-            int(pool["virtual_quote_reserves"]),
-            assumed_raw,
-            schedule,
-        )
-        expected_usd = (
-            sale["final_quote_out"] / 1_000_000_000 * sol_usd * conversion_factor
-        )
-        floor_usd = expected_usd * (1.0 - max(0, int(slippage_bps)) / 10_000.0)
-        decimals = int(snapshot.get("base_decimals") or 0)
-        route = [{"ammKey": pair, "label": "Pump.fun Amm", "percent": 100}]
-        raw_quote = {
-            "source": "PUMPSWAP_RPC_ENTRY_V1",
-            "rpc_source": snapshot.get("rpc_source"),
-            "slot": snapshot.get("slot"),
-            "pair": pair,
-            "quote_input_lamports": quote_raw,
-            "token_raw_expected": expected_raw,
-            "token_raw_assumed": assumed_raw,
-            "base_reserve_raw": base_reserve,
-            "quote_reserve_raw": quote_reserve,
-            "virtual_quote_reserve_raw": pool["virtual_quote_reserves"],
-            "fee_bps": schedule,
-            "canonical_pool": canonical,
-            "market_cap_sol": market_cap_sol,
-            "fee_config_fallback": fee_fallback,
-        }
-        entry = {
-            "input_usdc_raw": int(notional_usd * 1_000_000),
-            "token_raw_expected": expected_raw,
-            "token_raw_amount": assumed_raw,
-            "token_raw_floor": assumed_raw,
-            "price_impact_pct": float(buy["impact_pct"]),
-            "slippage_bps": int(slippage_bps),
-            "route": route,
-            "quoted_at": int(snapshot.get("quoted_at") or now_ms()),
-            "context_slot": snapshot.get("slot"),
-            "assumed_buffer_bps": int(buffer_bps),
-            "raw_quote": raw_quote,
-            "preflight_buy_quote": raw_quote,
-            "preflight_sell_quote": {
-                "source": "PUMPSWAP_RPC_ROUNDTRIP_V1",
-                "expected_usd": expected_usd,
-                "floor_usd": floor_usd,
-                "token_input_raw": assumed_raw,
-            },
-            "preflight_quantity_adjustment": assumed_raw / max(expected_raw, 1),
-            "execution_source": "PUMPSWAP_RPC_ENTRY_V1",
-            "token_decimals": decimals,
-            "queue_ms": 0,
-            "http_ms": snapshot.get("http_ms"),
-        }
-        exit_preview = {
-            "expected_usdc": expected_usd,
-            "provider_expected_usdc": expected_usd,
-            "floor_usdc": floor_usd,
-            "price_impact_pct": float(sale["impact_pct"]),
-            "slippage_bps": int(slippage_bps),
-            "route": route,
-            "quoted_at": int(snapshot.get("quoted_at") or now_ms()),
-            "context_slot": snapshot.get("slot"),
-            "token_input_raw": assumed_raw,
-            "route_matches_entry_pool": True,
-            "assumed_buffer_bps": int(buffer_bps),
-            "raw_quote": entry["preflight_sell_quote"],
-        }
-        return entry, exit_preview
-    except (requests.RequestException, ValueError, TypeError, KeyError, RuntimeError, OverflowError):
+    age = now_ms()-int(snapshot.get('quoted_at') or 0)
+    pool = snapshot.get('pool') or {}
+    if not 0<=age<=max_age_ms or pool.get('base_mint')!=mint or pool.get('quote_mint')!=WSOL:
         return None
+    snapshot['pool'] = dict(pool)
+    snapshot['available_at'] = snapshot['quoted_at']
+    snapshot['settlement_asset'] = WSOL
+    snapshot['fee_config_known'] = bool(fee_cache and not fee_cache[1].get('fallback')
+                                       and 0<=now_ms()-fee_cache[0]<=5000)
+    return snapshot
 
 
-def position_mark(
-    position: dict[str, Any],
-    coin: dict[str, Any],
-    network_fee_usd: float,
-    sol_usd: float,
-) -> dict[str, Any] | None:
-    pair = str(position.get("pairAddress") or "")
-    mint = str(position.get("address") or "")
-    raw_amount = int(position.get("jupiter_token_raw_amount") or 0)
-    quantity = float(position.get("quantity") or 0)
-    if not pair or not mint or raw_amount <= 0 or quantity <= 0 or sol_usd <= 0:
+def reserve_inventory_mark(position: dict[str, Any]):
+    """SOL inventory estimate only, never booked as realized USD proceeds."""
+    pair,mint = str(position.get('pairAddress') or ''),str(position.get('address') or '')
+    snapshot = cached_snapshot(pair,mint)
+    if not snapshot:
+        return None
+    pool,global_config = snapshot['pool'],snapshot.get('global_config') or {}
+    # Current official IDL contains buyback, cashback and holder reward modes.
+    # Until every component is modeled, reject rather than reuse old fee tiers.
+    if pool.get('is_cashback_coin') or pool.get('is_holder_reward') or global_config.get('buyback_bps'):
+        return None
+    if global_config.get('disable_flags',0)&16 or not snapshot['fee_config_known']:
+        return None
+    base_reserve,quote_reserve = int(snapshot['base_reserve']),int(snapshot['quote_reserve'])
+    schedule,canonical,market_cap_sol,fallback = _fee_schedule(
+        pool,base_reserve,quote_reserve+int(pool['virtual_quote_reserves']),int(snapshot['base_supply']))
+    if fallback:
+        return None
+    with _LOCK:
+        config = _FEE_CACHE[1] if _FEE_CACHE else {}
+    config_slot = int(config.get('slot') or 0)
+    if not config_slot or abs(config_slot-int(snapshot['slot']))>25:
+        return None
+    calculated = quote_from_reserves(base_reserve,quote_reserve,int(pool['virtual_quote_reserves']),
+                                     int(position.get('jupiter_token_raw_amount') or 0),schedule)
+    return {**calculated,'settlement_asset':WSOL,'settlement_decimals':9,
+            'expected_sol_raw':calculated['final_quote_out'],'realized_usdc':None,
+            'quoted_at':snapshot['quoted_at'],'available_at':snapshot['available_at'],
+            'slot':snapshot['slot'],'pairAddress':pair,'address':mint,
+            'fee_bps':schedule,'canonical_pool':canonical,'market_cap_sol':market_cap_sol,
+            'source':'VALIDATED_RESERVE_SOL_INVENTORY_ESTIMATE','is_simulated_fill':False}
+
+
+def prepare_entry(coin: dict[str, Any],notional_usd: float,sol_usd: float,
+                  buffer_bps: int=10,slippage_bps: int=100):
+    """Use a validated full USDC route for USD-denominated PAPER accounts.
+
+    Previously this divided USD by a scanner SOL price and pretended the SOL
+    conversion executed. Reserve math remains available as native inventory
+    evidence; only the aggregate quote can model both actual conversion legs.
+    """
+    pair,mint = str(coin.get('pairAddress') or ''),str(coin.get('address') or '')
+    if not pair or not mint:
+        return None
+    return jupiter.prepare_entry(mint,pair,notional_usd)
+
+
+def position_mark(position: dict[str, Any],coin: dict[str, Any],network_fee_usd: float,sol_usd: float):
+    """Liquidation uses a full token-to-USDC route, with no fictitious SOL FX.
+
+    A missing conversion keeps the position unavailable and in risk. Validated
+    native reserve estimates are attached only as diagnostics, not USDC fills.
+    """
+    result = jupiter.position_mark(position,coin,network_fee_usd,force=False)
+    if not result:
         return None
     try:
-        with _LOCK:
-            snapshot = dict(_SNAPSHOT_CACHE.get(pair) or {})
-        if not snapshot or now_ms() - int(snapshot.get("quoted_at") or 0) > SNAPSHOT_TTL_MS:
-            if not prime_positions([position]):
-                return None
-            with _LOCK:
-                snapshot = dict(_SNAPSHOT_CACHE.get(pair) or {})
-        if not snapshot:
-            return None
-        pool = snapshot["pool"]
-        base_reserve = int(snapshot["base_reserve"])
-        quote_reserve = int(snapshot["quote_reserve"])
-        effective_quote = quote_reserve + int(pool["virtual_quote_reserves"])
-        if effective_quote <= 0:
-            return None
-        schedule, canonical, market_cap_sol, fee_fallback = _fee_schedule(
-            pool, base_reserve, effective_quote, int(snapshot["base_supply"])
-        )
-        calc = quote_from_reserves(
-            base_reserve,
-            quote_reserve,
-            int(pool["virtual_quote_reserves"]),
-            raw_amount,
-            schedule,
-        )
-        pump_fee_raw = calc["lp_fee_raw"] + calc["protocol_fee_raw"] + calc["creator_fee_raw"]
-        pump_fee_usd = pump_fee_raw / 1_000_000_000 * sol_usd
-        pre_conversion_usd = calc["final_quote_out"] / 1_000_000_000 * sol_usd
-        gross_usd = pre_conversion_usd * (1.0 - CONVERSION_BUFFER_BPS / 10_000.0)
-        network = max(0.0, float(network_fee_usd))
-        net_usd = max(0.0, gross_usd - network)
-        fill_price = gross_usd / quantity
-        raw_quote = {
-            "source": "PUMPSWAP_RPC_RESERVES_V2",
-            "rpc_source": snapshot.get("rpc_source"),
-            "slot": snapshot.get("slot"),
-            "pair": pair,
-            "base_reserve_raw": base_reserve,
-            "quote_reserve_raw": quote_reserve,
-            "virtual_quote_reserve_raw": pool["virtual_quote_reserves"],
-            "token_input_raw": raw_amount,
-            "raw_quote_out": calc["raw_quote_out"],
-            "final_quote_out": calc["final_quote_out"],
-            "fee_bps": schedule,
-            "fee_config_fallback": fee_fallback,
-            "canonical_pool": canonical,
-            "market_cap_sol": market_cap_sol,
-        }
-        return {
-            "execution_source": "PUMPSWAP_RPC_RESERVES_V2",
-            "market_price": float(coin.get("priceUsd") or 0),
-            "fill_price": fill_price,
-            "market_value_usd": gross_usd,
-            "gross_proceeds_usd": gross_usd,
-            "dex_fee_usd": pump_fee_usd,
-            "network_fee_usd": network,
-            "net_proceeds_usd": net_usd,
-            "impact_pct": calc["impact_pct"],
-            "slippage_pct": CONVERSION_BUFFER_BPS / 100.0,
-            "latency_pct": 0.0,
-            "quoted_at": int(snapshot.get("quoted_at") or now_ms()),
-            "route": [{"ammKey": pair, "label": "Pump.fun Amm", "percent": 100}],
-            "context_slot": snapshot.get("slot"),
-            "token_input_raw": raw_amount,
-            "from_cache": False,
-            "fees_included_in_quote": True,
-            "raw_quote": raw_quote,
-            "queue_ms": 0,
-            "http_ms": snapshot.get("http_ms"),
-            "route_matches_entry_pool": True,
-        }
-    except (requests.RequestException, ValueError, TypeError, KeyError, RuntimeError, OverflowError):
-        return None
+        native = reserve_inventory_mark(position)
+    except (ValueError,TypeError,KeyError,RuntimeError,OverflowError):
+        native = None
+    if native:
+        result['native_inventory_estimate'] = native
+    result['settlement_asset'] = jupiter.USDC
+    result['conversion_route_validated'] = True
+    return result

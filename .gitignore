@@ -6,6 +6,9 @@ dist/
 .DS_Store
 __pycache__/
 *.pyc
+.venv/
+.runtime/
+artifacts/
 
 .venv-tape/
 *.bak-*
