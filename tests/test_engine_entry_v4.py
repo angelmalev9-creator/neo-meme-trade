@@ -77,14 +77,14 @@ class EngineEntryTests(unittest.TestCase):
         self.assertEqual(m.TRADE_NOTIONAL_USD, 200)
         self.assertEqual(m.MAX_DAILY_LOSS_USD, 0)
         self.assertEqual(m.STOP_LOSS_PCT, 5)
-        self.assertEqual(m.MAX_POSITIONS, 8)
+        self.assertEqual(m.MAX_POSITIONS, 16)
         self.assertEqual(m.TAKE_PROFIT_PCT, 10)
 
     def test_valid_formerly_overfiltered_entry_reaches_quote_and_opens(self):
         self.monitor.maybe_open([self.coin])
         self.assertEqual(len(m.STATE.positions), 1)
         pos = m.STATE.positions[0]
-        self.assertEqual(pos['notional_usd'], 200)
+        self.assertEqual(pos['notional_usd'], 90)
         self.assertEqual(pos['entry_policy_version'], policy.POLICY_VERSION)
         self.assertEqual(m.STATE.entry_diagnostics['status'], 'opened')
         self.assertLess(pos['entry_roundtrip_pnl_pct'], 0)
@@ -149,7 +149,7 @@ class EngineEntryTests(unittest.TestCase):
         self.assertIn('quote_inconsistent', m.STATE.entry_diagnostics['rejections'])
 
     def test_effective_early_signal_rejects_below_configured_liquidity_and_score(self):
-        for key,val in [('liquidityUsd',3999),('score',57.9)]:
+        for key,val in [('liquidityUsd',2999),('score',39.9)]:
             self.monitor.maybe_open([{**self.coin,key:val}])
             self.assertFalse(m.STATE.positions)
             self.assertIn('gold_signal',m.STATE.entry_diagnostics['rejections'])
@@ -181,8 +181,8 @@ class EngineEntryTests(unittest.TestCase):
 
     def test_reported_thresholds_match_real_policy(self):
         snapshot = m.STATE.snapshot()
-        self.assertEqual(snapshot['config']['entry_score'], 58)
-        self.assertEqual(snapshot['config']['min_liquidity_usd'], 4000)
+        self.assertEqual(snapshot['config']['entry_score'], 40)
+        self.assertEqual(snapshot['config']['min_liquidity_usd'], 3000)
         self.assertEqual(snapshot['config']['entry_policy_version'], policy.POLICY_VERSION)
         self.assertIn('entry_diagnostics', snapshot)
 
