@@ -8,7 +8,7 @@ import math
 import re
 from typing import Any
 
-POLICY_VERSION = 'ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V6'
+POLICY_VERSION = 'ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V7'
 import gold_order_flow
 MAX_FEED_AGE_MS = 30_000
 MAX_ENTRY_QUOTE_AGE_MS = 10_000
@@ -19,7 +19,9 @@ LABELS = {
     'gold_signal': 'не покрива оригиналния Order Flow сигнал',
     'price_crosscheck_pending': 'проверка на цената от втори източник',
     'price_reference_expired': 'ценовата проверка е остаряла',
-    'price_source_disagreement': 'несъответствие между ценовите източници',
+    'price_source_disagreement': 'силно несъответствие между ценовите източници',
+    'price_source_disagreement_needs_jupiter': 'умерено ценово разминаване — чака Jupiter потвърждение',
+    'price_tiebreak_failed': 'Jupiter не потвърди наблюдаваната цена',
     'price_unavailable': 'липсва независимо потвърждение на цената',
     'quote_inconsistent': 'котировките се промениха по време на проверката',
     'price_identity_mismatch': 'несъответстващ token или pool',
