@@ -1,13 +1,13 @@
 {
-  "name": "NEO verified PAPER execution and isolated learning",
+  "name": "NEO high-frequency early-scout PAPER execution and isolated learning",
   "locked_at_utc": "2026-10-05",
-  "source_commit": "USER_AUTHORIZED_PAPER_AUDIT_REPAIR_20261005",
+  "source_commit": "USER_HIGH_FREQ_EARLY_SCOUT_20261005",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "2cf961b8349afaebcc31074d7146fc3e5c105f1d357ff030f72d34c157c916df",
-  "production_strategy_id": "ORDER_FLOW_EARLY_FIXED_PAPER_V9",
+  "sha256": "840154aba9bde979d75cbb2ef59ab9a824b2d9f70bf705424db2e1c173d20659",
+  "production_strategy_id": "ORDER_FLOW_EARLY_SCOUT_PAPER_V10",
   "rules": {
-    "entry_score": 58,
-    "max_positions": 8,
+    "entry_score": 40,
+    "max_positions": 16,
     "stop_loss_pct": 5,
     "take_profit_pct": 10,
     "trailing_pct": 4,
@@ -15,60 +15,72 @@
     "starting_balance_usd": 1000,
     "trade_notional_usd_max": 200,
     "early_trade_notional_usd_range": [
-      25,
-      200
+      10,
+      100
     ],
     "max_daily_loss_usd": 0,
-    "min_liquidity_usd": 4000,
+    "min_liquidity_usd": 3000,
     "max_position_full_loss_usd": 250,
     "max_total_exposure_pct": 100,
     "max_drawdown_pct": 0,
     "stop_execution_buffer_pct": 0.5,
     "primary_daily_and_drawdown_caps_enabled": false
   },
-  "policy": "User authorized audit, simulator repairs, parallel PAPER experimentation and reset of all PAPER accounts. No live execution or automatic production strategy promotion.",
+  "policy": "User authorized high-frequency EARLY PAPER scouting and learning from accumulated results. Existing PAPER account history is preserved; no reset, no live execution and no automatic live-money promotion.",
   "integrity_note": "Mandatory validated flow coverage, exact pool/mint checks, complete safety checks, one effective threshold object, bounded recorded quote latency and uncapped actual modeled losses.",
   "execution_mode": "PAPER_QUOTE_OR_OBSERVED_POOL_MODEL",
-  "entry_policy_version": "ORDER_FLOW_VALIDATED_THRESHOLDS_V9",
+  "entry_policy_version": "ORDER_FLOW_HIGH_FREQ_SCOUT_V10",
   "entry_policy_limits": {
+    "micro_scout": {
+      "max_age_minutes": 15,
+      "min_score": 40,
+      "min_liquidity_usd": 3000,
+      "min_flow_trades": 1,
+      "min_flow_ratio": 1,
+      "min_conviction": 22
+    },
     "ultra_early": {
       "max_age_minutes": 45,
-      "min_score": 58,
-      "min_liquidity_usd": 4000,
+      "min_score": 46,
+      "min_liquidity_usd": 3500,
       "min_flow_trades": 1,
-      "min_flow_ratio": 1.05,
-      "min_conviction": 30
+      "min_flow_ratio": 1.03,
+      "min_conviction": 27
     },
     "early": {
       "max_age_minutes": 180,
-      "min_score": 70,
-      "min_liquidity_usd": 5000,
+      "min_score": 55,
+      "min_liquidity_usd": 4500,
       "min_flow_trades": 2,
-      "min_flow_ratio": 1.1,
-      "min_conviction": 45
+      "min_flow_ratio": 1.08,
+      "min_conviction": 35
     },
     "momentum": {
-      "min_score": 78,
-      "min_liquidity_usd": 7500,
+      "min_score": 70,
+      "min_liquidity_usd": 7000,
       "min_flow_trades": 3,
-      "min_flow_ratio": 1.2,
-      "min_conviction": 55
+      "min_flow_ratio": 1.15,
+      "min_conviction": 47
     },
+    "micro_flow_window_seconds": 10,
+    "ultra_flow_window_seconds": 20,
     "max_entry_impact_pct": 1.75,
     "max_roundtrip_cost_pct": 2.75,
     "max_worst_case_cost_pct": 4,
-    "reentry_cooldown_seconds": 1200,
+    "max_quoted_candidates_per_scan": 12,
+    "win_reentry_cooldown_seconds": 120,
+    "loss_reentry_cooldown_seconds": 300,
     "risk_overlay": "PLANNED_NET_STOP_NO_FILL_GUARANTEE"
   },
   "support_files_sha256": {
     "backend/astra6_brain.py": "2b5ec59be59a93122ce6c08bedd1205c6330d12af75211c60336f616f17390de",
     "backend/compat_file_lock.py": "8ba79d6e53250fba0a3f0dc2f997ed89094210d170d84c4b66c200f5ab9d64df",
-    "backend/engine_entry_policy.py": "93447d5b0cb5541a35e94835ca6c4ae823bc576bb12cd8eb51f2c87d45ffbc8b",
+    "backend/engine_entry_policy.py": "4d182e677e0c3cf3fd6ce1b197850468c3331fe904610b8586016a3a11c0d669",
     "backend/engine_execution.py": "2a4f68ef51327a1fbc5cb1a80c2de2ddbae2a52a39ac7dcdc495fa686dabb20a",
     "backend/engine_exit_policy.py": "667010bcc5e047996d90a9bcecb7b9eaf9baeee10864aeb2dfa9b23a8dbd0e3c",
     "backend/engine_rug_guard.py": "5c732df903fdfcb692a8b2d64afd1276f1350658471d17c4c8363cefd58ae7e3",
     "backend/engine_runtime.py": "1a4bfef255d8ffe5de44f1553266683a04a7a55044987c897469c7936516efb9",
-    "backend/gold_order_flow.py": "f6f75a52af72a3163a0a453f8384b5ce6b9c6cfc08712c6c6a371b7f2260fe0a",
+    "backend/gold_order_flow.py": "850a5afdbb907da50a68cb9b965743053c866cc7aed9d49509ff365aedf6efb8",
     "backend/honest_quote_transport.py": "660b991ba342dc34a2d5cf3a58c05a05621c7290babf893ffb6cc1919eacbc50",
     "backend/lab_paired_runner.py": "9d58e368a833cb28a6734c8e4f4ca6b260ec481249971ad776db49f01104be86",
     "backend/live_tape.py": "f3f15e0f6e3f6239a3378f19abaadd8af441a4f54365cd2ebdf1242b093d6bea",
@@ -84,7 +96,7 @@
     "backend/user_gateway.py": "85b0c359ef4e9ce38039872ae11c91256e5a93ff027cca239e66ca76f032feb6"
   },
   "runtime_version": "RUNTIME_DURABLE_PAPER_V2",
-  "runtime_note": "Primary engine remains a fixed control with main defaults explicitly disclosed; learner runs in a separate process and separate independently funded books.",
+  "runtime_note": "Primary PAPER engine now prioritizes many small early scouts. Its own closed-trade journal adapts scout size after repeated mistakes; threshold/exit experiments still run in isolated learner books.",
   "stop_execution_mode": "JUPITER_USDC_QUOTE_LATENCY_BUFFER_V6",
   "stop_execution_note": "Planned net stop -5%; all observed gap losses and unavailable liquidation risk retained. Never clamps a loss or realizes native SOL as USDC.",
   "entry_data_fallbacks": {
@@ -110,11 +122,14 @@
     "min_validation_calendar_days": 5,
     "embargo_ms": 60000,
     "recording_drop_blocks_promotion": true,
-    "automatic_main_or_live_promotion": false
+    "automatic_main_or_live_promotion": false,
+    "main_scout_size_learning": true,
+    "main_signal_auto_promotion": false,
+    "main_loss_response": "SHRINK_NEXT_SCOUT_SIZE_WITHOUT_BLOCKING_ENTRY_FAMILY"
   },
   "discovery": {
     "primary_early": "GECKOTERMINAL_SOLANA_NEW_POOLS_PUMPSWAP",
-    "cache_seconds": 15,
+    "cache_seconds": 5,
     "dexscreener_profiles_and_boosts": true,
     "exact_new_pool_pinned_minutes": 15,
     "safety_checks_unchanged": true
@@ -124,9 +139,9 @@
   "hash_basis": "UTF8_LF",
   "exit_policy_version": "HONEST_NET_EXIT_V1",
   "hash_change_reasons": {
-    "backend/market_monitor.py": "Uncapped fixed PAPER decisions, durable complete history, pinned positions, full safety and shared learner bridge",
-    "backend/engine_entry_policy.py": "One validated effective threshold object and explicit data quality and age vetoes",
-    "backend/gold_order_flow.py": "User threshold values reach every branch; preserve baseline entry hypothesis",
+    "backend/market_monitor.py": "High-frequency newborn scoring, 10/20s validated early flow windows, 16 concurrent PAPER scouts, 10-100 USD scout sizing, outcome-aware re-entry cooldown and journal-based size learning.",
+    "backend/engine_entry_policy.py": "Raised validated quote throughput to 12 candidates per scan and versioned V10 high-frequency scout policy.",
+    "backend/gold_order_flow.py": "Added MICRO_SCOUT before ULTRA_EARLY with lower early thresholds while leaving safety/price/execution vetoes outside and mandatory.",
     "backend/engine_exit_policy.py": "Versioned net fixed policy and original adaptive candidate, no chart stop",
     "backend/engine_execution.py": "Fresh exact-quantity quote path, landing delay, final signal age and forced refresh",
     "backend/honest_quote_transport.py": "Shared cross-platform budget with exit priority and explicit API errors",
