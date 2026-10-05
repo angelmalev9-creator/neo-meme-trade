@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-05T05:31:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "91e1ba6c9b77e853dd437f74dd591709f8c247c7dd1895a91495cc82df9024c8",
+  "sha256": "4a5aa1c94a8b6c4fbfbb5a66cebef69d4a68434784a11aaa55be530996a3c67c",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 85,
@@ -18,7 +18,7 @@
     "min_liquidity_usd": 10000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "ORDER FLOW and adaptive hold unchanged. Missing GeckoTerminal prices now require existing exact-pool Jupiter confirmation; SOL/USD network costs use a cached live DexScreener SOL price fallback. Rug, impact and round-trip safety vetoes remain mandatory. Stop execution remains direct PumpSwap reserve marks with absolute -5% PAPER accounting cap. No reset/history rewrite.",
+  "integrity_note": "ORDER FLOW and adaptive hold unchanged. Entry data checks now start concurrently to avoid serial provider latency. Missing GeckoTerminal prices still require exact-pool Jupiter confirmation; SOL/USD network costs use cached live DexScreener SOL pricing. Rug, impact and round-trip safety vetoes remain mandatory. Stop execution remains direct PumpSwap reserve marks with absolute -5% PAPER accounting cap. No reset/history rewrite.",
   "execution_mode": "JUPITER_QUOTE_V2_EXPECTED",
   "entry_policy_version": "ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V7",
   "entry_policy_limits": {
