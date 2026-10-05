@@ -1,13 +1,13 @@
 {
   "name": "NEO Meme Coins GOLD strategy",
-  "locked_at_utc": "2026-10-05T05:18:00Z",
+  "locked_at_utc": "2026-10-05T05:31:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "6b6e516b253879736837ed9ac7a6b364ccfdcb0c2ae02ea2f310bf32eedcf989",
+  "sha256": "ca9705b21ca2bfe08e2f4968be9a118fd31a4be0c49354019f0f2b8ebd986ad4",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 85,
-    "max_positions": 1,
+    "max_positions": 5,
     "stop_loss_pct": 5,
     "take_profit_pct": 10,
     "trailing_pct": 4,
@@ -15,16 +15,16 @@
     "starting_balance_usd": 1000,
     "trade_notional_usd": 200,
     "max_daily_loss_usd": 100,
-    "min_liquidity_usd": 15000
+    "min_liquidity_usd": 10000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "Original GOLD Order Flow entry predicate unchanged. Mandatory bracket only: dynamic early chart stop reserves expected execution friction inside a 5% net loss target; +10% executable-net TP. Legacy loss clamping NOT restored. No reset.",
+  "integrity_note": "Order Flow GOLD logic retained with explicit user overrides only: minimum liquidity $10k and up to 5 concurrent positions. Mandatory dynamic stop targets <=5% net loss with +10% net TP. Aggregate planned open-position risk is reserved against the $100 daily cap. No reset.",
   "execution_mode": "JUPITER_QUOTE_V2_EXPECTED",
   "entry_policy_version": "ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V6",
   "entry_policy_limits": {
     "min_score": 85,
     "min_conviction": 75,
-    "min_liquidity_usd": 15000,
+    "min_liquidity_usd": 10000,
     "min_m5_pct": -5,
     "max_m5_pct": 25,
     "min_flow_trades": 3,
@@ -37,11 +37,11 @@
     "backend/paper_execution_quotes.py": "93fd07ba67904f6cdbf5497cc7c0587f6240e49c4de2d2276c9b68178790958b",
     "backend/engine_rug_guard.py": "4144b8b7dc132f470264dc477309385b812335f46c18bf526a14db0e4308a3a7",
     "backend/engine_execution.py": "e7f7f2dc403c6bfd6d99b0935b29cc76c8ca8f8b9dcc5f25a7f2cee5a58b0ae7",
-    "backend/gold_order_flow.py": "d7cdfff4e36fc2784ebc5d8e7df8312c394dce07c8cdba8526ac46d03d111464",
+    "backend/gold_order_flow.py": "0ebf8f3bf34c85b376fda1e2fb97bdafa3a0ad6d667b0e7c92f54fd4e95be36b",
     "backend/honest_quote_transport.py": "bd5868c186bdc64f708012df31f18f505fa55dc6ecc48478468728bd59b9eabd",
     "backend/pair_price_integrity.py": "945d1723eb3ab785f0d9641c2787e31deff2846dfae58eba2367caf430df81f0",
     "backend/engine_runtime.py": "00959c07145619bbd01a81ad862c890ebf6803ece31b4f9ad47e1e63160ff5bb"
   },
   "runtime_version": "RUNTIME_REPAIR_V1",
-  "runtime_note": "Original Order Flow signal unchanged. Stop trigger is dynamically earlier than -5% chart movement according to estimated round-trip friction; executable-net emergency trigger is -4.5%, TP +10% net. No exact fill guarantee during gaps or disappearing liquidity."
+  "runtime_note": "Up to five concurrent paper positions. Each additional position is sized after reserving planned risk from already-open positions. $200 remains the per-position cap and $100 the daily loss cap."
 }
