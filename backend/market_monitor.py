@@ -2,6 +2,7 @@
 import json, math, os, re, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 import requests
@@ -71,6 +72,10 @@ SESSION.headers.update({'User-Agent': 'NEO-Meme-Market-Monitor/2.0', 'Accept': '
 SOL_MINT = 'So11111111111111111111111111111111111111112'
 _SOL_USD_CACHE = {'price': 0.0, 'ts': 0}
 _SOL_USD_LOCK = threading.Lock()
+GECKO_NEW_POOLS_URL = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1'
+GECKO_NEW_POOLS_TTL_MS = 15_000
+_GECKO_NEW_POOLS_CACHE = {'ts': 0, 'pairs': []}
+_GECKO_NEW_POOLS_LOCK = threading.Lock()
 
 def now_ms() -> int:
     return int(time.time() * 1000)
@@ -648,6 +653,106 @@ def early_requested_notional(coin: dict[str, Any], learning: dict[str, Any]) -> 
 
     base *= num(learning.get('size_multiplier'), 1.0)
     return round(max(25.0, min(TRADE_NOTIONAL_USD, base)), 2)
+
+def _iso_ms(value: Any) -> int:
+    try:
+        text = str(value or '').strip()
+        if not text:
+            return 0
+        return int(datetime.fromisoformat(text.replace('Z', '+00:00')).timestamp() * 1000)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def gecko_new_pumpswap_pairs() -> list[dict[str, Any]]:
+    """Discover brand-new PumpSwap pools without waiting for profile/boost indexing.
+
+    Cached for 15s (~4 public requests/minute). These rows still pass the same
+    rug, exact-pool Jupiter, impact and stop checks before any PAPER entry.
+    """
+    current = now_ms()
+    with _GECKO_NEW_POOLS_LOCK:
+        cached_at = int(_GECKO_NEW_POOLS_CACHE.get('ts') or 0)
+        cached_pairs = list(_GECKO_NEW_POOLS_CACHE.get('pairs') or [])
+    if cached_pairs and 0 <= current - cached_at <= GECKO_NEW_POOLS_TTL_MS:
+        return cached_pairs
+
+    parsed: list[dict[str, Any]] = []
+    try:
+        response = SESSION.get(
+            GECKO_NEW_POOLS_URL,
+            headers={'Accept': 'application/json;version=20230203'},
+            timeout=(1.0, 3.0),
+        )
+        response.raise_for_status()
+        rows = response.json().get('data') or []
+        for row in rows:
+            attrs = row.get('attributes') or {}
+            rel = row.get('relationships') or {}
+            dex_id = str((((rel.get('dex') or {}).get('data') or {}).get('id')) or '').lower()
+            if dex_id != 'pumpswap':
+                continue
+            base_id = str((((rel.get('base_token') or {}).get('data') or {}).get('id')) or '')
+            quote_id = str((((rel.get('quote_token') or {}).get('data') or {}).get('id')) or '')
+            mint = base_id.removeprefix('solana_')
+            quote_mint = quote_id.removeprefix('solana_')
+            pair = str(attrs.get('address') or '')
+            if quote_mint != SOL_MINT or not is_valid_solana_address(mint) or not is_valid_solana_address(pair):
+                continue
+
+            price_usd = num(attrs.get('base_token_price_usd'))
+            sol_usd = num(attrs.get('quote_token_price_usd'))
+            price_native = num(attrs.get('base_token_price_native_currency'))
+            if price_native <= 0 and price_usd > 0 and sol_usd > 0:
+                price_native = price_usd / sol_usd
+            liquidity = num(attrs.get('reserve_in_usd'))
+            if price_usd <= 0 or liquidity <= 0:
+                continue
+
+            name = str(attrs.get('name') or 'TOKEN / SOL')
+            symbol = (name.split('/')[0].strip() or 'TOKEN')[:32]
+            changes = attrs.get('price_change_percentage') or {}
+            volumes = attrs.get('volume_usd') or {}
+            transactions = attrs.get('transactions') or {}
+            created = _iso_ms(attrs.get('pool_created_at'))
+            txns = {}
+            for window in ('m5', 'h1', 'h6', 'h24'):
+                src = transactions.get(window) or transactions.get('m5') or {}
+                txns[window] = {
+                    'buys': int(num(src.get('buys'))),
+                    'sells': int(num(src.get('sells'))),
+                }
+            volume = {window: num(volumes.get(window) or volumes.get('m5')) for window in ('m5','h1','h6','h24')}
+            change = {window: num(changes.get(window) or changes.get('m5')) for window in ('m5','h1','h6','h24')}
+            fdv = num(attrs.get('fdv_usd'))
+            market_cap = num(attrs.get('market_cap_usd')) or fdv
+
+            parsed.append({
+                'chainId': 'solana',
+                'pairAddress': pair,
+                'dexId': 'pumpswap',
+                'url': f'https://www.geckoterminal.com/solana/pools/{pair}',
+                'baseToken': {'address': mint, 'name': symbol, 'symbol': symbol},
+                'quoteToken': {'address': SOL_MINT, 'name': 'Wrapped SOL', 'symbol': 'SOL'},
+                'priceUsd': price_usd,
+                'priceNative': price_native,
+                'marketCap': market_cap,
+                'fdv': fdv,
+                'liquidity': {'usd': liquidity},
+                'volume': volume,
+                'priceChange': change,
+                'txns': txns,
+                'pairCreatedAt': created,
+                'info': {},
+                '_early_source': 'gecko-new-pools',
+            })
+    except (requests.RequestException, ValueError, TypeError, AttributeError):
+        return cached_pairs
+
+    with _GECKO_NEW_POOLS_LOCK:
+        _GECKO_NEW_POOLS_CACHE.update(ts=current, pairs=list(parsed))
+    return parsed
+
 
 STATE = State()
 
@@ -1480,6 +1585,19 @@ class Monitor:
             return
         try:
             addresses, metadata = self.discovery.get()
+            early_pairs = gecko_new_pumpswap_pairs()
+            for early_pair in early_pairs:
+                address = str((early_pair.get('baseToken') or {}).get('address') or '')
+                if not address:
+                    continue
+                if address not in addresses:
+                    addresses.append(address)
+                info = metadata.setdefault(address, {
+                    'sources': [], 'icon': '', 'header': '', 'description': '',
+                    'links': [], 'boost_amount': 0,
+                })
+                if 'gecko-new-pools' not in info['sources']:
+                    info['sources'].append('gecko-new-pools')
             for position in STATE.positions:
                 address = position.get('address')
                 if address and address not in addresses:
@@ -1493,8 +1611,23 @@ class Monitor:
                     STATE.status = 'discovering'
                     STATE.message = 'Проверява пазарните източници.'
                 return
-            pairs = fetch_pairs(addresses)
+            dex_pairs = fetch_pairs(addresses)
+            pairs = list(early_pairs) + dex_pairs
             chosen = best_pairs(pairs)
+
+            # For the first 15 minutes, preserve the newly-created exact PumpSwap
+            # pool instead of silently switching to an older/higher-liquidity pair.
+            newest_early: dict[str, dict[str, Any]] = {}
+            for early_pair in early_pairs:
+                address = str((early_pair.get('baseToken') or {}).get('address') or '')
+                created = int(early_pair.get('pairCreatedAt') or 0)
+                if not address or not created or now_ms() - created > 15 * 60 * 1000:
+                    continue
+                previous = newest_early.get(address)
+                if previous is None or created > int(previous.get('pairCreatedAt') or 0):
+                    newest_early[address] = early_pair
+            chosen.update(newest_early)
+
             feed = []
             for address in addresses:
                 pair = chosen.get(address)
