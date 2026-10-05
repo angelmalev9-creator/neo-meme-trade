@@ -26,7 +26,7 @@ STRATEGY_LAB_COMPACT_PATH = Path(os.getenv('NEO_STRATEGY_LAB_COMPACT_PATH', str(
 POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '0.5'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 90
-ENTRY_SCORE = 70.0
+ENTRY_SCORE = 60.0
 MAX_POSITIONS = 8
 STOP_LOSS_PCT = 5.0
 STOP_EXECUTION_BUFFER_PCT = 4.5
@@ -50,8 +50,8 @@ MIN_LIQUIDITY_USD = 10000.0
 
 # BALANCED_V4: observable, bounded paper-entry checks. The prior AND-gate
 # rejected every observed candidate. Stops, position size and daily cap stay fixed.
-STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '65'))
-STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '35'))
+STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '58'))
+STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '30'))
 STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '4000'))
 STRICT_MAX_ENTRY_IMPACT_PCT = float(os.getenv('NEO_STRICT_MAX_ENTRY_IMPACT_PCT', '1.75'))
 STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '2.75'))
@@ -806,10 +806,10 @@ def score_pair(pair: dict[str, Any], meta: dict[str, Any]):
     elif change_m5 < -20:
         score -= 12; signals.append(signal('risk', 'Силен спад', f'{change_m5:+.1f}% / 5m'))
 
-    if 3 <= age <= 360:
-        score += 8; signals.append(signal('positive', 'Ранен етап', f'{age:.0f} мин.'))
-    elif age < 2:
-        score -= 7; signals.append(signal('risk', 'Твърде нов pair', f'{age:.1f} мин.'))
+    if 0.25 <= age <= 360:
+        score += 8; signals.append(signal('positive', 'Ранен етап', f'{age:.1f} мин.'))
+    elif age < 0.25:
+        score -= 5; signals.append(signal('risk', 'Pair под 15 секунди', f'{age:.2f} мин.'))
     elif age > 4320:
         score -= 4
     if mc > 0:
