@@ -23,6 +23,7 @@ LABELS = {
     'price_source_disagreement_needs_jupiter': 'умерено ценово разминаване — чака Jupiter потвърждение',
     'price_tiebreak_failed': 'Jupiter не потвърди наблюдаваната цена',
     'price_unavailable': 'липсва независимо потвърждение на цената',
+    'price_unavailable_needs_jupiter': 'GeckoTerminal няма цена — изисква exact-pool Jupiter потвърждение',
     'quote_inconsistent': 'котировките се промениха по време на проверката',
     'price_identity_mismatch': 'несъответстващ token или pool',
     'entry_error': 'проверката на входа не е завършена',
