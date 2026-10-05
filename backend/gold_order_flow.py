@@ -6,14 +6,14 @@ execution vetoes remain outside this module and are still mandatory.
 import math
 from dataclasses import dataclass, asdict
 
-SOURCE_COMMIT='EARLY_ORDER_FLOW_REPAIR_2026_10_05'
-CORE_AST_SHA256='VERSIONED_REPAIR_MANIFEST'
+SOURCE_COMMIT='HIGH_FREQ_EARLY_SCOUT_2026_10_05'
+CORE_AST_SHA256='VERSIONED_HIGH_FREQ_SCOUT_V10'
 
 @dataclass(frozen=True)
 class EntryThresholds:
-    min_score: float = 58.0
-    min_liquidity: float = 4000.0
-    min_conviction: float = 30.0
+    min_score: float = 40.0
+    min_liquidity: float = 3000.0
+    min_conviction: float = 22.0
 
     def __post_init__(self):
         for name, value in asdict(self).items():
@@ -51,29 +51,42 @@ def entry_mode(coin, flow, context, thresholds=None):
     if max_sell >= max(900.0, buy_usd * 1.25):
         return None
 
-    # First real buying impulse. Small scouts are sized later by liquidity and
-    # learned performance, so this gate can deliberately fire early.
+    # Earliest validated scout: one real wallet + one real swap is enough to
+    # collect a PAPER sample. Rug, independent price, exact-pool route and cost
+    # vetoes are enforced later by the engine and are never bypassed here.
+    micro_scout=(
+        age <= 15 and score >= thresholds.min_score and -10 <= change_m5 <= 18
+        and trades >= 1 and ratio >= 1.00 and buy_usd >= 4
+        and buy_usd >= sell_usd * 0.95 and conviction >= thresholds.min_conviction
+    )
+    if micro_scout:
+        return 'MICRO_SCOUT'
+
     ultra_early=(
-        age <= 45 and score >= thresholds.min_score and -8 <= change_m5 <= 25
-        and trades >= 1 and ratio >= 1.05 and buy_usd >= 8
-        and buy_usd >= sell_usd * 1.02 and conviction >= thresholds.min_conviction
+        age <= 45 and score >= thresholds.min_score + 6
+        and liquidity >= thresholds.min_liquidity + 500
+        and -8 <= change_m5 <= 25 and trades >= 1 and ratio >= 1.03
+        and buy_usd >= 6 and buy_usd >= sell_usd
+        and conviction >= thresholds.min_conviction + 5
     )
     if ultra_early:
         return 'ULTRA_EARLY'
 
     early=(
-        age <= 180 and score >= thresholds.min_score + 12 and liquidity >= thresholds.min_liquidity + 1000
-        and -8 <= change_m5 <= 30 and trades >= 2 and ratio >= 1.10
-        and buy_usd >= 15 and buy_usd >= sell_usd * 1.05
-        and conviction >= thresholds.min_conviction + 15
+        age <= 180 and score >= thresholds.min_score + 15
+        and liquidity >= thresholds.min_liquidity + 1500
+        and -8 <= change_m5 <= 30 and trades >= 2 and ratio >= 1.08
+        and buy_usd >= 12 and buy_usd >= sell_usd * 1.03
+        and conviction >= thresholds.min_conviction + 13
     )
     if early:
         return 'EARLY'
 
     # Still allow a strong flow setup if discovery saw it later.
     momentum=(
-        score >= thresholds.min_score + 20 and liquidity >= thresholds.min_liquidity + 3500 and -5 <= change_m5 <= 30
-        and trades >= 3 and ratio >= 1.20 and buy_usd >= 25
+        score >= thresholds.min_score + 30
+        and liquidity >= thresholds.min_liquidity + 4000 and -5 <= change_m5 <= 30
+        and trades >= 3 and ratio >= 1.15 and buy_usd >= 20
         and conviction >= thresholds.min_conviction + 25
     )
     if momentum:
