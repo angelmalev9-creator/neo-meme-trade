@@ -1,14 +1,14 @@
 {
   "name": "NEO Meme Coins GOLD strategy",
-  "locked_at_utc": "2026-10-05T05:05:33Z",
+  "locked_at_utc": "2026-10-05T05:18:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "856b018f66e910a0e61edae1db1f9d0e3c3df07ed54051fe58fbc984650926f9",
+  "sha256": "6b6e516b253879736837ed9ac7a6b364ccfdcb0c2ae02ea2f310bf32eedcf989",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 85,
     "max_positions": 1,
-    "stop_loss_pct": 3,
+    "stop_loss_pct": 5,
     "take_profit_pct": 10,
     "trailing_pct": 4,
     "max_hold_minutes": 60,
@@ -18,7 +18,7 @@
     "min_liquidity_usd": 15000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "Original GOLD entry predicate restored with AST parity tests. Original market_context unchanged. Legacy stop clamping and pool switching NOT restored. Latest requested 3/10 risk overlay and $200/$100 preserved. No reset.",
+  "integrity_note": "Original GOLD Order Flow entry predicate unchanged. Mandatory bracket only: dynamic early chart stop reserves expected execution friction inside a 5% net loss target; +10% executable-net TP. Legacy loss clamping NOT restored. No reset.",
   "execution_mode": "JUPITER_QUOTE_V2_EXPECTED",
   "entry_policy_version": "ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V6",
   "entry_policy_limits": {
@@ -30,7 +30,7 @@
     "min_flow_trades": 3,
     "flow_ratio": 1.3,
     "original_cooldown_seconds": 1200,
-    "risk_overlay": "USER_NET_3_10"
+    "risk_overlay": "USER_NET_5_10_DYNAMIC_STOP"
   },
   "support_files_sha256": {
     "backend/engine_entry_policy.py": "58d698d78ac236e712beef911aa24d435f7853b33f6b8ec66d57a93c295c4a7a",
@@ -43,5 +43,5 @@
     "backend/engine_runtime.py": "00959c07145619bbd01a81ad862c890ebf6803ece31b4f9ad47e1e63160ff5bb"
   },
   "runtime_version": "RUNTIME_REPAIR_V1",
-  "runtime_note": "Original Order Flow signal unchanged. Respect remaining daily risk with size reduction, nonblocking discovery, atomic state, valid same-mint sale routing. No reset."
+  "runtime_note": "Original Order Flow signal unchanged. Stop trigger is dynamically earlier than -5% chart movement according to estimated round-trip friction; executable-net emergency trigger is -4.5%, TP +10% net. No exact fill guarantee during gaps or disappearing liquidity."
 }
