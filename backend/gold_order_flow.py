@@ -1,9 +1,9 @@
 """Order Flow GOLD entry predicate with explicit user liquidity override from $15k to $10k.
-Safety/execution vetoes and the user's later net 3/10 exit overlay are separate.
+Safety/execution vetoes and the current mandatory risk bracket are separate.
 No legacy stop clamping or automatic change of pool is restored.
 """
 SOURCE_COMMIT='44a7a09b019f068a97c2165068a556cadcc6bfc4'
-CORE_AST_SHA256='ef252e00380c264b2f0d389c48d53c102d2b3219946cc60cbdf8b9b7efdf222a'
+CORE_AST_SHA256='e71bf5406c0a7b31396dd8d1e51bd73d79b46fd96cc9540b7e2ad9b58ea9e906'
 
 def qualifies(coin,flow,context):
     score=float(coin.get('score') or 0)
