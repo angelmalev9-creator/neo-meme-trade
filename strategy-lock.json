@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-05T16:35:00Z",
   "source_commit": "USER_UNLOCKED_EARLY_ORDER_FLOW_20261005",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "73b5498584ef831f4d9dc4598aead752b3111c2f9b28241a03ca5de00c0ba35e",
+  "sha256": "b5e1289036992080ee099fd9d7a03cb4ecae4310cc9d8bc6369046d5bb75887d",
   "production_strategy_id": "ORDER_FLOW_EARLY_ADAPTIVE",
   "rules": {
     "entry_score": 58,
@@ -22,7 +22,7 @@
     "min_liquidity_usd": 4000
   },
   "policy": "User explicitly unlocked the strategy on 2026-10-05 to favor many early PAPER entries and learning from outcomes. Do not switch this PAPER strategy to real-money execution without a separate explicit request.",
-  "integrity_note": "High-frequency PAPER mode: sub-minute ULTRA_EARLY entries can trigger from score 58 / conviction 30 after the first real buy-flow impulse; EARLY and MOMENTUM tiers remain available. Up to 8 positions, $25-$200 liquidity-aware scout sizing, history-based size reduction after repeated losing setups, 30-second order flow, faster discovery/tape polling, prewarmed safety checks, exact-pool Jupiter confirmation, mandatory rug vetoes, and absolute -5% PAPER stop accounting. No state/history reset.",
+  "integrity_note": "High-frequency PAPER mode with direct early discovery: GeckoTerminal new PumpSwap pools are sampled on a 15s cache and merged before DexScreener profile/boost indexing, preserving the exact new pool for its first 15 minutes. Sub-minute ULTRA_EARLY entries can trigger from score 58 / conviction 30 after the first real buy-flow impulse. Up to 8 positions, $25-$200 liquidity-aware scout sizing, history-based size reduction after repeated losing setups, 30-second order flow, faster tape polling, prewarmed safety checks, exact-pool Jupiter confirmation, mandatory rug vetoes, and absolute -5% PAPER stop accounting. No state/history reset.",
   "execution_mode": "JUPITER_QUOTE_V2_EXPECTED",
   "entry_policy_version": "ORDER_FLOW_EARLY_LEARNER_V8",
   "entry_policy_limits": {
@@ -81,5 +81,12 @@
     "mode": "SIZE_NOT_ENTRY_VETO",
     "window_trades": 60,
     "behavior": "Repeated losing comparable setups continue trading at smaller size instead of being disabled."
+  },
+  "discovery": {
+    "primary_early": "GECKOTERMINAL_SOLANA_NEW_POOLS_PUMPSWAP",
+    "cache_seconds": 15,
+    "dexscreener_profiles_and_boosts": true,
+    "exact_new_pool_pinned_minutes": 15,
+    "safety_checks_unchanged": true
   }
 }
