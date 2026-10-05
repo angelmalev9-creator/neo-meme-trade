@@ -8,6 +8,7 @@ import requests
 import engine_execution as paper_quotes
 import engine_rug_guard as rug_guard
 import engine_entry_policy as entry_policy
+import pair_price_integrity as price_integrity
 
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
@@ -39,9 +40,9 @@ MIN_LIQUIDITY_USD = 10000.0
 
 # BALANCED_V4: observable, bounded paper-entry checks. The prior AND-gate
 # rejected every observed candidate. Stops, position size and daily cap stay fixed.
-STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '78'))
-STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '50'))
-STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '20000'))
+STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '85'))
+STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '75'))
+STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '15000'))
 STRICT_MAX_ENTRY_IMPACT_PCT = float(os.getenv('NEO_STRICT_MAX_ENTRY_IMPACT_PCT', '2.0'))
 STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '2.20'))
 STRICT_MAX_WORST_CASE_COST_PCT = float(os.getenv('NEO_STRICT_MAX_WORST_CASE_COST_PCT', '2.90'))
@@ -392,7 +393,11 @@ class State:
                     'stop_loss_basis': 'EXECUTABLE_NET_PNL',
                     'stop_trigger_net_pct': -(STOP_LOSS_PCT-STOP_EXECUTION_BUFFER_PCT),
                     'take_profit_basis': 'EXECUTABLE_NET_PNL',
-                    'reentry_seconds': 30, 'loss_reentry_seconds': 120,
+                    'reentry_seconds': 1200, 'loss_reentry_seconds': 1200,
+                    'signal_strategy': 'ORDER_FLOW_ADAPTIVE',
+                    'signal_source_commit': '44a7a09b019f068a97c2165068a556cadcc6bfc4',
+                    'risk_overlay': 'USER_NET_3_10',
+                    'execution_verification_version': 'QUOTE_EVIDENCE_V6',
                     'rug_guard': rug_guard.VERSION,
                     'paper_only': True,
                     'stop_execution_buffer_pct': STOP_EXECUTION_BUFFER_PCT,
@@ -404,8 +409,10 @@ class State:
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
                     'starting_balance_usd': STARTING_BALANCE_USD,
                     'execution_mode': 'JUPITER_QUOTE_V2',
-                    'execution_note': 'ACTIVE_V5 paper: fixed net 3/10, rug checks, explicit quote buffers, no fill guarantee',
+                    'execution_note': 'Original GOLD entry signal; separate user net 3/10 risk overlay; independently checked prices and recorded quotes, not actual fills',
                     'entry_policy_version': entry_policy.POLICY_VERSION,
+                    'signal_source_commit': '44a7a09b019f068a97c2165068a556cadcc6bfc4',
+                    'execution_verification_version': 'QUOTE_EVIDENCE_V6',
                     'max_quoted_candidates_per_scan': entry_policy.MAX_QUOTED_CANDIDATES,
                     'strict_entry_score': STRICT_ENTRY_SCORE,
                     'strict_min_conviction': STRICT_MIN_CONVICTION,
@@ -909,6 +916,8 @@ class Monitor:
                      'current_execution_price':quote['fill_price'],'quote_status':'fresh',
                      'execution_quote_source':quote.get('execution_source','MODEL_V1'),
                      'execution_quote_at':quote.get('quoted_at',now_ms()),'updated_at':now_ms(),
+                     'last_sell_quote':quote.get('raw_quote'),
+                     'quote_queue_ms':quote.get('queue_ms'),'quote_http_ms':quote.get('http_ms'),
                      'hard_stop_net_pct':-STOP_LOSS_PCT,'take_profit_net_pct':TAKE_PROFIT_PCT,
                      'exit_policy_version':'NET_3_10_V5','pending_exit_reason':reason,
                      'estimated_exit_dex_fee_usd':quote['dex_fee_usd'],
@@ -931,7 +940,9 @@ class Monitor:
                         'exit_price_impact_pct':quote['impact_pct'],'exit_slippage_pct':quote['slippage_pct'],
                         'jupiter_exit_route':quote.get('route',[]),'jupiter_exit_quote_at':quote.get('quoted_at'),
                         'balance_before':before,'balance_after':STATE.demo_balance_usd,
-                        'exit_liquidity_usd':coin.get('liquidityUsd'),'fees_included_in_quote':is_quote}
+                        'exit_liquidity_usd':coin.get('liquidityUsd'),'fees_included_in_quote':is_quote,
+                        'exit_quote':quote.get('raw_quote'),'quote_queue_ms':quote.get('queue_ms'),
+                        'quote_http_ms':quote.get('http_ms')}
                 STATE.history.insert(0,closed); STATE.history=STATE.history[:300]
                 STATE.positions.remove(live)
                 append_audit('EXIT',closed)
@@ -989,8 +1000,8 @@ class Monitor:
             return
         open_addresses = {p.get('address') for p in STATE.positions}
         now = now_ms()
-        recent = {t.get('address') for t in STATE.history if now-int(t.get('closed_at',0)) <
-                  (120_000 if num(t.get('pnl_usd'))<0 else 30_000)}
+        # Original GOLD re-entry cooldown. No rapid revenge re-entry.
+        recent = {t.get('address') for t in STATE.history if now-int(t.get('closed_at',0))<20*60*1000}
         for coin in feed:
             if len(STATE.positions) >= MAX_POSITIONS:
                 break
@@ -1021,6 +1032,10 @@ class Monitor:
                 entry_policy.record(report, rejected, coin)
                 continue
             report['signal_passed'] += 1
+            validation=price_integrity.check(coin)
+            if validation.get('status')!='pass':
+                entry_policy.record(report,[validation.get('reason') or 'price_unavailable'],coin,validation)
+                continue
             safety=rug_guard.check(coin)
             if safety.get('status')!='pass':
                 entry_policy.record(report, safety.get('reasons') or ['risk_check_pending'], coin)
@@ -1028,7 +1043,7 @@ class Monitor:
             if report['quoted'] >= entry_policy.MAX_QUOTED_CANDIDATES:
                 entry_policy.record(report, ['quote_budget'], coin)
                 continue
-            strategy_id = 'ORDER_FLOW_FAST_3_10_V5'
+            strategy_id = 'ORDER_FLOW_ADAPTIVE'
             learning = {'sample': 0, 'win_rate': 0, 'profit_factor': 0, 'recent_losses': 0, 'bonus': 0, 'blocked': False}
             recovery = False
             price = num(coin.get('priceUsd'))
@@ -1052,16 +1067,13 @@ class Monitor:
             if STATE.risk_day_pnl()-notional*STOP_LOSS_PCT/100 < -MAX_DAILY_LOSS_USD:
                 entry_policy.record(report,['daily_limit'],coin); return
             report['quoted'] += 1
-            live_quote = paper_quotes.entry_quote(address, str(coin.get('pairAddress') or ''), notional)
-            if not live_quote:
-                entry_policy.record(report, ['entry_quote'], coin)
+            prepared=paper_quotes.prepare_entry(address,str(coin.get('pairAddress') or ''),notional)
+            if not prepared:
+                entry_policy.record(report,['quote_inconsistent'],coin)
                 continue
-            entry_network_fee = pre_network_fee
-            expected_token_raw = int(live_quote.get('token_raw_amount') or live_quote.get('token_raw_expected') or 0)
-            initial_exit = paper_quotes.exit_quote(address, expected_token_raw, str(coin.get('pairAddress') or ''))
-            if not initial_exit:
-                entry_policy.record(report, ['exit_quote'], coin)
-                continue
+            live_quote,initial_exit=prepared
+            entry_network_fee=pre_network_fee
+            expected_token_raw=int(live_quote['token_raw_amount'])
             immediate_exit_net = max(0.0, num(initial_exit.get('expected_usdc')) - entry_network_fee)
             worst_case_exit_net = max(0.0, num(initial_exit.get('floor_usdc')) - entry_network_fee)
             immediate_roundtrip_pct = (
@@ -1111,6 +1123,8 @@ class Monitor:
                     return
                 if STATE.available_balance_usd()<entry_quote['capital_committed_usd'] or STATE.risk_day_pnl()<=-MAX_DAILY_LOSS_USD:
                     entry_policy.record(report,['balance'],coin); return
+                if now_ms()-int(live_quote['quoted_at'])>750:
+                    entry_policy.record(report,['quote_age'],coin); return
                 STATE.trade_seq += 1
                 position = {
                     'id': f'{address}:{now_ms()}', 'address': address,
@@ -1141,6 +1155,13 @@ class Monitor:
                     'jupiter_slippage_bps': int(live_quote.get('slippage_bps') or paper_quotes.SLIPPAGE_BPS),
                     'entry_roundtrip_pnl_pct': round(immediate_roundtrip_pct, 4),
                     'entry_policy_version': entry_policy.POLICY_VERSION,
+                    'signal_source_commit': '44a7a09b019f068a97c2165068a556cadcc6bfc4',
+                    'execution_verification_version': 'QUOTE_EVIDENCE_V6',
+                    'entry_quote': live_quote.get('raw_quote'),
+                    'preflight_buy_quote': live_quote.get('preflight_buy_quote'),
+                    'preflight_sell_quote': live_quote.get('preflight_sell_quote'),
+                    'price_crosscheck': validation,
+                    'preflight_is_cost_estimate_not_same_time_fill': True,
                     'entry_worst_case_roundtrip_pnl_pct': round(worst_case_roundtrip_pct, 4),
                     'stop_signal_trigger_pct': round(stop_signal_trigger_pct, 4),
                     'hard_stop_net_pct': -STOP_LOSS_PCT,

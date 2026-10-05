@@ -8,10 +8,11 @@ import threading
 import time
 from decimal import Decimal
 import paper_execution_quotes as provider
+import honest_quote_transport as transport
 
 SLIPPAGE_BPS=provider.SLIPPAGE_BPS
 USDC=provider.USDC_MINT
-MAX_AGE_MS=8_000
+MAX_AGE_MS=2_000
 MARK_TTL_MS=1_500
 BUFFER_BPS=10
 _CACHE={}
@@ -31,7 +32,8 @@ def valid(data,input_mint,output_mint,amount,start):
         floor=_int(data.get('otherAmountThreshold'))
         if not 0<floor<=_int(data['outAmount']): return False
         if data.get('swapMode')!='ExactIn' or not data.get('routePlan'): return False
-        if not 0<=stamp()-start<=MAX_AGE_MS: return False
+        received=int(data.get('_received_at') or start)
+        if not 0<=stamp()-received<=MAX_AGE_MS: return False
         if not math.isfinite(float(data['priceImpactPct'])): return False
         return True
     except (ValueError,TypeError,KeyError): return False
@@ -41,11 +43,12 @@ def same_token_pool(data,mint,pair):
           (leg.get('swapInfo',{}).get('inputMint'),leg.get('swapInfo',{}).get('outputMint'))]
     return bool(pair) and bool(legs) and all(x.get('ammKey')==pair for x in legs)
 
-def _request(a,b,amount,pair=None,token=None):
-    began=stamp(); q=provider.quote(a,b,int(amount))
+def _request(a,b,amount,pair=None,token=None,purpose='entry'):
+    began=stamp(); q=transport.quote(a,b,int(amount),purpose=purpose,slippage_bps=SLIPPAGE_BPS)
     if not valid(q,a,b,amount,began): return None
     if pair and not same_token_pool(q,token,pair): return None
-    q['_observed_at']=began
+    # Timestamp the received quote; queueing time is recorded separately.
+    q['_observed_at']=int(q.get('_received_at') or stamp())
     return q
 
 def entry_quote(token_mint,pair_address,notional_usd):
@@ -58,11 +61,11 @@ def entry_quote(token_mint,pair_address,notional_usd):
             'price_impact_pct':float(d['priceImpactPct'])*100,
             'slippage_bps':int(d.get('slippageBps',SLIPPAGE_BPS)),
             'route':provider._compact_route(d),'quoted_at':d['_observed_at'],
-            'context_slot':d.get('contextSlot'),'assumed_buffer_bps':BUFFER_BPS}
+            'context_slot':d.get('contextSlot'),'assumed_buffer_bps':BUFFER_BPS,'raw_quote':d}
 
-def exit_quote(token_mint,token_raw_amount,pair_address=None):
+def exit_quote(token_mint,token_raw_amount,pair_address=None,purpose='exit'):
     raw=int(token_raw_amount)
-    d=_request(token_mint,USDC,raw,pair_address,token_mint)
+    d=_request(token_mint,USDC,raw,pair_address,token_mint,purpose)
     if not d: return None
     expected=_int(d['outAmount'])/1_000_000
     assumed=expected*(1-BUFFER_BPS/10000)
@@ -72,7 +75,7 @@ def exit_quote(token_mint,token_raw_amount,pair_address=None):
             'slippage_bps':int(d.get('slippageBps',SLIPPAGE_BPS)),
             'route':provider._compact_route(d),'quoted_at':d['_observed_at'],
             'context_slot':d.get('contextSlot'),'token_input_raw':raw,
-            'assumed_buffer_bps':BUFFER_BPS}
+            'assumed_buffer_bps':BUFFER_BPS,'raw_quote':d}
 
 def position_mark(position,coin,network_fee_usd,force=False):
     mint=position.get('address'); pair=position.get('pairAddress')
@@ -96,9 +99,47 @@ def position_mark(position,coin,network_fee_usd,force=False):
             'slippage_tolerance_pct':fresh['slippage_bps']/100,
             'quoted_at':fresh['quoted_at'],'route':fresh['route'],'context_slot':fresh['context_slot'],
             'token_input_raw':raw,'from_cache':False,'fees_included_in_quote':True,
-            'execution_buffer_estimated':True}
+            'execution_buffer_estimated':True,'raw_quote':fresh.get('raw_quote'),
+            'queue_ms':(fresh.get('raw_quote') or {}).get('_queue_ms'),
+            'http_ms':(fresh.get('raw_quote') or {}).get('_http_ms')}
     with _LOCK:
         for k,v in list(_CACHE.items()):
             if stamp()-v['quoted_at']>MAX_AGE_MS: _CACHE.pop(k,None)
         _CACHE[key]=dict(result)
     return result
+
+
+def consistent_preflight(first,sell,final,now=None):
+    now=stamp() if now is None else now
+    try:
+        old=int(first['token_raw_amount']);new=int(final['token_raw_amount'])
+        if old<=0 or new<=0:return False
+        if abs(new/old-1)>.005:return False
+        if not 0<=now-int(final['quoted_at'])<=750:return False
+        if not 0<=int(final['quoted_at'])-int(sell['quoted_at'])<=4000:return False
+        slot1=int(first.get('context_slot') or 0);slot2=int(final.get('context_slot') or 0)
+        if slot1 and slot2 and not 0<=slot2-slot1<=25:return False
+        # A positive preflight can be price movement, not negative trading costs.
+        initial=int(first['input_usdc_raw'])/1e6
+        if float(sell['provider_expected_usdc'])>initial*1.001:return False
+        return True
+    except (KeyError,ValueError,TypeError,ZeroDivisionError):return False
+
+
+def prepare_entry(mint,pair,notional):
+    first=entry_quote(mint,pair,notional)
+    if not first:return None
+    sale=exit_quote(mint,first['token_raw_amount'],pair,purpose='entry')
+    if not sale:return None
+    # The simulated buy uses a newly received quote AFTER preflight, never an
+    # old cheap quote selected by observing a later favourable sell quote.
+    final=entry_quote(mint,pair,notional)
+    if not final or not consistent_preflight(first,sale,final):return None
+    adjustment=min(1.,final['token_raw_amount']/first['token_raw_amount'])
+    preview=dict(sale)
+    for k in ['expected_usdc','floor_usdc']:preview[k]*=adjustment
+    preview['is_preflight_estimate']=True
+    final['preflight_buy_quote']=first['raw_quote']
+    final['preflight_sell_quote']=sale['raw_quote']
+    final['preflight_quantity_adjustment']=adjustment
+    return final,preview

@@ -5,6 +5,7 @@ from typing import Any, Callable
 import requests
 from astra_lab_bridge import merge_astra_snapshot
 import lab_activity as activity
+import pair_price_integrity as price_integrity
 
 API_URL=os.getenv('NEO_LOCAL_API','http://127.0.0.1:8788/state')
 DEX='https://api.dexscreener.com'
@@ -206,9 +207,11 @@ def dex_position_prices(positions):
     out={}
     for i in range(0,len(addresses),30):
         batch=addresses[i:i+30]
-        r=SESSION.get(DEX+'/tokens/v1/solana/'+','.join(batch),timeout=10)
-        r.raise_for_status()
-        rows=r.json() if isinstance(r.json(),list) else []
+        try:
+            r=SESSION.get(DEX+'/tokens/v1/solana/'+','.join(batch),timeout=(1,3))
+            r.raise_for_status();payload=r.json()
+            rows=payload if isinstance(payload,list) else []
+        except (requests.RequestException,ValueError):continue
         for p in rows:
             a=(p.get('baseToken') or {}).get('address')
             pair=p.get('pairAddress')
@@ -311,10 +314,14 @@ def maybe_open(feed,flows):
         eligible=[]
         checked=0
         blocked_cost=0
+        blocked_price=0
         blocked_cooldown=0
         for coin,features in candidates:
             if not activity.RULES[strategy['id']].matches(features):
                 continue
+            validation=price_integrity.check(coin)
+            if validation.get('status')!='pass':
+                blocked_price+=1; continue
             address=coin['address']
             if activity.cooldown_remaining_ms(book,address,now)>0:
                 blocked_cooldown+=1
@@ -331,6 +338,7 @@ def maybe_open(feed,flows):
         book['entry_diagnostics']={
             'at':now,'matched_candidates':checked,'cost_rejected':blocked_cost,
             'cooldown_rejected':blocked_cooldown,'affordable_candidates':len(eligible),
+            'price_verification_rejected':blocked_price,
         }
         if not eligible:
             continue
@@ -357,6 +365,7 @@ def maybe_open(feed,flows):
             'entry_price_impact_pct':round(opening['impact_pct'],4),
             'entry_slippage_pct':round(opening['slippage_pct']+opening['latency_pct'],4),
             'execution_mode':'REALISTIC_COSTS_V1',
+            'price_crosscheck':price_integrity.check(coin),
             'entry_policy_version':activity.POLICY_VERSION,
             'entry_roundtrip_pnl_pct':round(proposed['initial_pnl_pct'],6),
             'entry_size_reduced':notional+0.02<min(TRADE_NOTIONAL,num(book['balance'])),
@@ -389,6 +398,7 @@ def stats(book):
 def persist(status='online',error=None):
     STATE['status']=status; STATE['updated_at']=now_ms()
     STATE['stats']={k:stats(v) for k,v in STATE['books'].items()}
+    STATE['data_integrity_note']='Историята съдържа непотвърдени цени, включително XFUN. Не е доказателство за реална доходност. Новите входове минават независима проверка.'
     STATE['activity_config']={**activity.policy_config(),'stop_loss_net_pct':STOP_LOSS,
                               'take_profit_net_pct':TAKE_PROFIT,'trade_limit_usd':TRADE_NOTIONAL}
     if error: STATE['error']=str(error)[:200]

@@ -28,6 +28,8 @@ def flows():
 
 class ActivityTests(unittest.TestCase):
     def setUp(self):
+        guard=patch.object(lab.price_integrity,'check',return_value={'status':'pass','version':'OFFLINE_FIXTURE'})
+        guard.start();self.addCleanup(guard.stop)
         lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
 
     def test_all_33_rules_exist(self):

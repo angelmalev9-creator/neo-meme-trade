@@ -8,12 +8,20 @@ import math
 import re
 from typing import Any
 
-POLICY_VERSION = 'ORDER_FLOW_FAST_3_10_V5'
+POLICY_VERSION = 'ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V6'
+import gold_order_flow
 MAX_FEED_AGE_MS = 30_000
 MAX_ENTRY_QUOTE_AGE_MS = 10_000
 MAX_QUOTED_CANDIDATES = 2
 _ADDRESS = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 LABELS = {
+    'gold_signal': 'не покрива оригиналния Order Flow сигнал',
+    'price_crosscheck_pending': 'проверка на цената от втори източник',
+    'price_reference_expired': 'ценовата проверка е остаряла',
+    'price_source_disagreement': 'несъответствие между ценовите източници',
+    'price_unavailable': 'липсва независимо потвърждение на цената',
+    'quote_inconsistent': 'котировките се промениха по време на проверката',
+    'price_identity_mismatch': 'несъответстващ token или pool',
     'entry_error': 'проверката на входа не е завършена',
     'token_blocklisted': 'токен в забранителния списък',
     'blocklist_unavailable': 'забранителният списък не може да се провери',
@@ -78,33 +86,14 @@ def number(value: Any, default: float = 0.0) -> float:
 
 def signal_rejections(coin, flow, context, *, min_score, min_liquidity,
                       min_conviction, now):
-    changes = coin.get('priceChange') or {}
-    tx = (coin.get('txns') or {}).get('m5') or {}
-    liq = number(coin.get('liquidityUsd'))
-    mc = number(coin.get('marketCap') or coin.get('fdv'))
-    observed = number(coin.get('updatedAt'))
-    market_ratio = number(tx.get('buys')) / max(number(tx.get('sells')), 1)
-    checks = {
-        'invalid_pair': bool(_ADDRESS.fullmatch(str(coin.get('address') or '')))
-                        and bool(_ADDRESS.fullmatch(str(coin.get('pairAddress') or ''))),
-        'invalid_price': number(coin.get('priceUsd')) > 0,
-        'stale_feed': observed > 0 and 0 <= now - observed <= MAX_FEED_AGE_MS,
-        'score': number(coin.get('score')) >= min_score,
-        'liquidity': liq >= min_liquidity,
-        'momentum': -3.0 <= number(changes.get('m5'), -999) <= 40.0,
-        'hour_trend': -40.0 <= number(changes.get('h1'), -999) <= 250.0,
-        'market_buyers': market_ratio >= 1.0,
-        'liquidity_ratio': mc > 0 and liq / mc >= 0.02,
-        'flow_count': number(flow.get('trades')) >= 3,
-        'flow_ratio': number(flow.get('buy_sell_usd_ratio')) >= 1.20,
-        'buy_volume': number(flow.get('buy_usd')) >= 75.0,
-        'wallet_count': number(flow.get('unique_wallets')) >= 3,
-        'buyer_count': number(flow.get('buyer_wallets')) >= 2,
-        'wallet_ratio': number(flow.get('wallet_buy_sell_ratio')) >= 1.0,
-        'large_sells': number(flow.get('max_sell_usd')) < max(250.0, number(flow.get('buy_usd')) * 0.8),
-        'conviction': number(context.get('conviction')) >= min_conviction,
-    }
-    return [key for key, passed in checks.items() if not passed]
+    reasons=[]
+    if not _ADDRESS.fullmatch(str(coin.get('address') or '')) or not _ADDRESS.fullmatch(str(coin.get('pairAddress') or '')):
+        reasons.append('invalid_pair')
+    if number(coin.get('priceUsd'))<=0: reasons.append('invalid_price')
+    observed=number(coin.get('updatedAt'))
+    if not observed or not 0<=now-observed<=MAX_FEED_AGE_MS:reasons.append('stale_feed')
+    if not gold_order_flow.qualifies(coin,flow,context):reasons.append('gold_signal')
+    return reasons
 
 
 def quote_rejections(entry, expected_roundtrip_pct, conservative_roundtrip_pct,

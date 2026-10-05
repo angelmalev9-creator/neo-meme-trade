@@ -1,12 +1,12 @@
 {
   "name": "NEO Meme Coins GOLD strategy",
-  "locked_at_utc": "2026-10-04T21:23:19Z",
+  "locked_at_utc": "2026-10-05T04:45:38Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "913048956ef2ca16c9e55586efbbf2de3255cc28b1673541da039c066b0a7f54",
-  "production_strategy_id": "ORDER_FLOW_FAST_3_10_V5",
+  "sha256": "4d53c4140404b1a9778cdd3eab1f7ee890a2c33154be02329b32bf6f2f43dc86",
+  "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
-    "entry_score": 78,
+    "entry_score": 85,
     "max_positions": 1,
     "stop_loss_pct": 3,
     "take_profit_pct": 10,
@@ -15,27 +15,30 @@
     "starting_balance_usd": 1000,
     "trade_notional_usd": 200,
     "max_daily_loss_usd": 100,
-    "min_liquidity_usd": 20000
+    "min_liquidity_usd": 15000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "Explicit user request: active main paper engine; 3% net risk target, 10% net TP, cached rug gate, no reset, no changes to Lab/Astra.",
+  "integrity_note": "Original GOLD entry predicate restored with AST parity tests. Original market_context unchanged. Legacy stop clamping and pool switching NOT restored. Latest requested 3/10 risk overlay and $200/$100 preserved. No reset.",
   "execution_mode": "JUPITER_QUOTE_V2_EXPECTED",
-  "entry_policy_version": "ORDER_FLOW_FAST_3_10_V5",
+  "entry_policy_version": "ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V6",
   "entry_policy_limits": {
-    "min_score": 78,
-    "min_conviction": 50,
-    "min_liquidity_usd": 20000,
+    "min_score": 85,
+    "min_conviction": 75,
+    "min_liquidity_usd": 15000,
+    "min_m5_pct": -5,
+    "max_m5_pct": 25,
     "min_flow_trades": 3,
-    "min_buyer_wallets": 2,
-    "min_buy_usd": 75,
-    "max_expected_roundtrip_cost_pct": 2.2,
-    "max_conservative_roundtrip_cost_pct": 2.9,
-    "max_entry_impact_pct": 2
+    "flow_ratio": 1.3,
+    "original_cooldown_seconds": 1200,
+    "risk_overlay": "USER_NET_3_10"
   },
   "support_files_sha256": {
-    "backend/engine_entry_policy.py": "4d8b0982fe39ca5f42e16ae2930f410b70d4169b83af9b2884e557e85ef1d90d",
+    "backend/engine_entry_policy.py": "925401b910a16c74ad6b518311d3ca88a4de1ec25f7184db0d3d2ec43a08a25c",
     "backend/paper_execution_quotes.py": "93fd07ba67904f6cdbf5497cc7c0587f6240e49c4de2d2276c9b68178790958b",
     "backend/engine_rug_guard.py": "4144b8b7dc132f470264dc477309385b812335f46c18bf526a14db0e4308a3a7",
-    "backend/engine_execution.py": "b3e5ab22e210baca8ff04eee88775fc9da73eb30ac445e746d20a44928e48f30"
+    "backend/engine_execution.py": "61bde9dbdd05c4d3c2adfb8587af08a9c07e359539876311954d2a2b8475e727",
+    "backend/gold_order_flow.py": "d7cdfff4e36fc2784ebc5d8e7df8312c394dce07c8cdba8526ac46d03d111464",
+    "backend/honest_quote_transport.py": "bd5868c186bdc64f708012df31f18f505fa55dc6ecc48478468728bd59b9eabd",
+    "backend/pair_price_integrity.py": "945d1723eb3ab785f0d9641c2787e31deff2846dfae58eba2367caf430df81f0"
   }
 }

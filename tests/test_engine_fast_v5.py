@@ -90,7 +90,7 @@ class QuoteTests(unittest.TestCase):
  def test_stale_quote_rejected(self):
   self.assertFalse(ex.valid(self.q(),ex.USDC,A,200000000,ex.stamp()-15000))
  def test_buffer_not_slippage_floor(self):
-  with patch.object(ex.provider,'quote',return_value=self.q()):
+  with patch.object(ex.transport,'quote',return_value=self.q()):
    q=ex.entry_quote(A,B,200)
   self.assertEqual(q['token_raw_amount'],99900000);self.assertEqual(q['token_raw_expected'],100000000);self.assertEqual(q['token_raw_floor'],99000000)
  def test_no_stale_cache_on_failure(self):

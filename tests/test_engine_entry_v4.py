@@ -21,6 +21,7 @@ import engine_entry_policy as policy
 
 class EngineEntryTests(unittest.TestCase):
     def setUp(self):
+        m.STATE_PATH.unlink(missing_ok=True)
         m.STATE = m.State()
         self.monitor = m.Monitor()
         self.coin = {'address': 'A'*44, 'pairAddress': 'B'*44, 'symbol': 'FIXTURE',
@@ -34,15 +35,16 @@ class EngineEntryTests(unittest.TestCase):
                      'max_sell_usd': 50, 'buy_usd': 300}
         self.context = {'conviction': 80, 'mode': 'STRONG'}
         self.entry = {'token_raw_expected': 100000000, 'token_raw_floor': 99000000,
-                      'input_usdc_raw': 200000000, 'price_impact_pct': 1.0,
+                      'input_usdc_raw': 200000000,'token_raw_amount': 100000000,'raw_quote': {'fixture': True}, 'price_impact_pct': 1.0,
                       'slippage_bps': 100, 'route': [], 'quoted_at': m.now_ms()}
-        self.exit = {'expected_usdc': 198.0, 'floor_usdc': 196.8}
+        self.exit = {'expected_usdc': 198.0, 'floor_usdc': 196.8, 'provider_expected_usdc':198.0, 'quoted_at':m.now_ms(), 'raw_quote':{'fixture':True}}
         self.patches = [patch.object(m.STATE, 'live_flow', return_value=self.flow),
                         patch.object(self.monitor, 'market_context', return_value=self.context),
                         patch.object(m.paper_quotes, 'entry_quote', return_value=self.entry),
                         patch.object(m.paper_quotes, 'exit_quote', return_value=self.exit),
                         patch.object(m, 'append_audit'),
-                        patch.object(m.rug_guard,'check',return_value={'status':'pass','metrics':{'decimals':6,'token_account_rent_lamports':1650000}})]
+                        patch.object(m.rug_guard,'check',return_value={'status':'pass','metrics':{'decimals':6,'token_account_rent_lamports':1650000}}),
+                        patch.object(m.price_integrity,'check',return_value={'status':'pass','version':'TEST'})]
         self.mocks = [p.start() for p in self.patches]
         self.addCleanup(lambda: [p.stop() for p in reversed(self.patches)])
 
@@ -110,13 +112,13 @@ class EngineEntryTests(unittest.TestCase):
         self.mocks[2].return_value = None
         self.monitor.maybe_open([self.coin])
         self.assertFalse(m.STATE.positions)
-        self.assertEqual(m.STATE.entry_diagnostics['rejections']['entry_quote'], 1)
+        self.assertEqual(m.STATE.entry_diagnostics['rejections']['quote_inconsistent'], 1)
 
     def test_no_sell_route_does_not_open(self):
         self.mocks[3].return_value = None
         self.monitor.maybe_open([self.coin])
         self.assertFalse(m.STATE.positions)
-        self.assertEqual(m.STATE.entry_diagnostics['rejections']['exit_quote'], 1)
+        self.assertEqual(m.STATE.entry_diagnostics['rejections']['quote_inconsistent'], 1)
 
     def test_costs_above_cap_are_still_rejected(self):
         self.exit.update(expected_usdc=190.0, floor_usdc=188.0)
@@ -134,28 +136,25 @@ class EngineEntryTests(unittest.TestCase):
         self.entry['quoted_at'] -= 20000
         self.monitor.maybe_open([self.coin])
         self.assertFalse(m.STATE.positions)
-        self.assertIn('quote_age', m.STATE.entry_diagnostics['rejections'])
+        self.assertIn('quote_inconsistent', m.STATE.entry_diagnostics['rejections'])
 
-    def test_liquidity_dust_and_dump_protections_remain(self):
-        cases = [('liquidityUsd', 10000, 'liquidity'), ('score', 60, 'score')]
-        for field, value, reason in cases:
-            c = dict(self.coin, **{field: value})
-            self.monitor.maybe_open([c])
+    def test_original_gold_signal_rejects_low_liquidity_and_score(self):
+        for key,val in [('liquidityUsd',10000),('score',84.9)]:
+            self.monitor.maybe_open([{**self.coin,key:val}])
             self.assertFalse(m.STATE.positions)
-            self.assertIn(reason, m.STATE.entry_diagnostics['rejections'])
-        self.flow['buy_usd'] = 1
-        self.monitor.maybe_open([self.coin])
-        self.assertIn('buy_volume', m.STATE.entry_diagnostics['rejections'])
-        self.flow['buy_usd'] = 300
-        c = copy.deepcopy(self.coin); c['priceChange']['h1'] = -60
-        self.monitor.maybe_open([c])
-        self.assertIn('hour_trend', m.STATE.entry_diagnostics['rejections'])
+            self.assertIn('gold_signal',m.STATE.entry_diagnostics['rejections'])
 
-    def test_single_buyer_is_not_sufficient(self):
-        self.flow['buyer_wallets'] = 1
+    def test_original_gold_requires_observed_wallet(self):
+        self.flow['unique_wallets']=0
         self.monitor.maybe_open([self.coin])
         self.assertFalse(m.STATE.positions)
-        self.assertIn('buyer_count', m.STATE.entry_diagnostics['rejections'])
+        self.assertIn('gold_signal',m.STATE.entry_diagnostics['rejections'])
+
+    def test_independent_price_failure_blocks_before_quote(self):
+        self.mocks[6].return_value={'status':'blocked','reason':'price_source_disagreement'}
+        self.monitor.maybe_open([self.coin])
+        self.mocks[2].assert_not_called()
+        self.assertFalse(m.STATE.positions)
 
     def test_stale_feed_is_explained(self):
         self.coin['updatedAt'] -= 60000
@@ -172,8 +171,8 @@ class EngineEntryTests(unittest.TestCase):
 
     def test_reported_thresholds_match_real_policy(self):
         snapshot = m.STATE.snapshot()
-        self.assertEqual(snapshot['config']['entry_score'], 78)
-        self.assertEqual(snapshot['config']['min_liquidity_usd'], 20000)
+        self.assertEqual(snapshot['config']['entry_score'], 85)
+        self.assertEqual(snapshot['config']['min_liquidity_usd'], 15000)
         self.assertEqual(snapshot['config']['entry_policy_version'], policy.POLICY_VERSION)
         self.assertIn('entry_diagnostics', snapshot)
 
