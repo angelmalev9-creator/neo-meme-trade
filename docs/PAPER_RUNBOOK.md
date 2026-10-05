@@ -107,5 +107,9 @@ Final verification on 2026-10-05:
 | Authorized public remote `POST /control/reset`, then `GET /state` | PASS for shared primary only: HTTP 200, $1,000, zero history/positions; pre-reset public snapshot archived |
 | Remote all-account reset | PENDING: Lab/Astra/private accounts require administrative host access |
 | Financial edge comparison on adequate real future holdout | SKIPPED: missing sufficient recorded time-local evidence and independent subsequent dataset |
+| GitHub Actions run 37350816343 | FAIL at platform startup: account locked due to billing; runner_id 0, zero steps executed. Linux regression result is unavailable, not a code-test failure. |
+| Vercel PR preview | FAIL at provider build quota (`build-rate-limit`); no successful preview deployment claimed. |
 
 A first frontend build correctly failed the old strategy hash guard before manifest update; it was an expected authorized-change guard failure. The final guard passed without deleting verification. The synthetic comparison dataset SHA256 is `5c1609a5768aff2bf4c06e7a9cdd5df529be67e5bd18407915c6d6f8095db363`. Raw archives and private runtime data remain local and excluded from Git.
+
+The reviewed repair is published on `codex/repair-paper-learning` in PR #2. The remote tree hash was verified equal to the locally tested source. Production backend installation has not happened because no host login is available; merging a web build alone cannot restart or update its Python services.
