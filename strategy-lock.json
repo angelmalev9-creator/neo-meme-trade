@@ -3,10 +3,10 @@
   "locked_at_utc": "2026-10-05T16:35:00Z",
   "source_commit": "USER_UNLOCKED_EARLY_ORDER_FLOW_20261005",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "181d53bdeee04bbdb09a10db506095ff1d250890aaebc41b191f7f915eb8ccea",
+  "sha256": "73b5498584ef831f4d9dc4598aead752b3111c2f9b28241a03ca5de00c0ba35e",
   "production_strategy_id": "ORDER_FLOW_EARLY_ADAPTIVE",
   "rules": {
-    "entry_score": 65,
+    "entry_score": 58,
     "max_positions": 8,
     "stop_loss_pct": 5,
     "take_profit_pct": 10,
@@ -22,17 +22,17 @@
     "min_liquidity_usd": 4000
   },
   "policy": "User explicitly unlocked the strategy on 2026-10-05 to favor many early PAPER entries and learning from outcomes. Do not switch this PAPER strategy to real-money execution without a separate explicit request.",
-  "integrity_note": "High-frequency PAPER mode: 30-second flow, ULTRA_EARLY/EARLY/MOMENTUM entry tiers, up to 8 positions, liquidity-aware $25-$200 scout sizing, history-based size reduction after repeated losing setups, faster discovery/tape polling, prewarmed safety checks, exact-pool Jupiter price confirmation, mandatory rug vetoes, and absolute -5% PAPER stop accounting. Existing state/history must not be reset.",
+  "integrity_note": "High-frequency PAPER mode: sub-minute ULTRA_EARLY entries can trigger from score 58 / conviction 30 after the first real buy-flow impulse; EARLY and MOMENTUM tiers remain available. Up to 8 positions, $25-$200 liquidity-aware scout sizing, history-based size reduction after repeated losing setups, 30-second order flow, faster discovery/tape polling, prewarmed safety checks, exact-pool Jupiter confirmation, mandatory rug vetoes, and absolute -5% PAPER stop accounting. No state/history reset.",
   "execution_mode": "JUPITER_QUOTE_V2_EXPECTED",
   "entry_policy_version": "ORDER_FLOW_EARLY_LEARNER_V8",
   "entry_policy_limits": {
     "ultra_early": {
       "max_age_minutes": 45,
-      "min_score": 65,
+      "min_score": 58,
       "min_liquidity_usd": 4000,
       "min_flow_trades": 1,
       "min_flow_ratio": 1.05,
-      "min_conviction": 35
+      "min_conviction": 30
     },
     "early": {
       "max_age_minutes": 180,
@@ -60,7 +60,7 @@
     "backend/paper_execution_quotes.py": "93fd07ba67904f6cdbf5497cc7c0587f6240e49c4de2d2276c9b68178790958b",
     "backend/engine_rug_guard.py": "871d62ea0769d3d6d34eb0f4d1032dc822bae0134c5fb5506ceec60591e9cc0e",
     "backend/engine_execution.py": "e7f7f2dc403c6bfd6d99b0935b29cc76c8ca8f8b9dcc5f25a7f2cee5a58b0ae7",
-    "backend/gold_order_flow.py": "08ec912fcd808bcb93c84e87b015dc41526b705879d331b005b336b49ea46fce",
+    "backend/gold_order_flow.py": "00fabcefe73e4c30b70ec53cf9d9051c45a35f3189cd080626f2a3c62f9d87ff",
     "backend/honest_quote_transport.py": "bd5868c186bdc64f708012df31f18f505fa55dc6ecc48478468728bd59b9eabd",
     "backend/pair_price_integrity.py": "a92e8fffb95949982321dc1f67d77484415cc037cadd9e1d318a6f0ed444463b",
     "backend/engine_runtime.py": "7aaf03b854d032a4a6b5e840c95d1a7eaae9239007d03e15e90f1d59d55e2c66",
