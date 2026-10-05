@@ -880,6 +880,19 @@ class Monitor:
         self.entry_lock = threading.Lock()
         self.discovery = runtime.DiscoveryCache(discover, refresh_seconds=8, max_age_seconds=90)
 
+    def prewarm_entry_checks(self, feed: list[dict[str, Any]]) -> None:
+        """Start slow safety/reference fetches before the first buy-flow trigger."""
+        warmed = 0
+        for coin in feed:
+            if warmed >= 10:
+                break
+            age = num(coin.get('ageMinutes'), 999999)
+            if num(coin.get('score')) < 60 or num(coin.get('liquidityUsd')) < 4000 or age > 360:
+                continue
+            price_integrity.check(coin)
+            rug_guard.check(coin)
+            warmed += 1
+
     def update_price_history(self, feed: list[dict[str, Any]]) -> None:
         stamp = now_ms()
         for coin in feed[:50]:
@@ -1513,6 +1526,8 @@ class Monitor:
                 setups = sum(1 for c in feed if c.get('posture') == 'SETUP')
                 STATE.message = STATE.entry_diagnostics.get('message') or f'Проверени {len(feed)} token-а; отворени позиции: {len(STATE.positions)}.'
                 STATE.save()
+            # Prewarm provider checks before the short EARLY flow window fires.
+            self.prewarm_entry_checks(feed)
             # Entry preparation and quotes must not hold the account/UI lock.
             self.maybe_open(feed)
         except Exception as exc:
