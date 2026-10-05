@@ -564,43 +564,90 @@ def append_audit(event: str, payload: dict[str, Any]) -> None:
 
 
 def adaptive_profile(setup: dict[str, Any]) -> dict[str, Any]:
-    def age_band(v: float) -> int:
-        return 0 if v < 10 else 1 if v < 60 else 2 if v < 240 else 3
+    """Learn sizing from comparable EARLY paper entries without stopping trading."""
     similar = []
-    for t in STATE.history[:LEARNING_WINDOW]:
-        snap = t.get('coin_snapshot') or {}
-        score = num(t.get('score') or snap.get('score'))
-        liq = num(t.get('entry_liquidity_usd') or snap.get('liquidityUsd'))
-        m5 = num(t.get('entry_change_m5') if t.get('entry_change_m5') is not None else (snap.get('priceChange') or {}).get('m5'))
-        age = num(snap.get('ageMinutes'), 999999)
-        tx = (snap.get('txns') or {}).get('m5') or {}
-        bs = num(t.get('entry_buy_sell_ratio'), num(tx.get('buys')) / max(num(tx.get('sells')), 1.0))
-        mc = num(t.get('entry_market_cap') or snap.get('marketCap') or snap.get('fdv'))
-        lmc = num(t.get('entry_liquidity_mc_ratio'), liq / max(mc, 1.0))
-        sid = None
-        if score >= 95 and liq >= 20000 and 3 <= m5 <= 25 and bs >= .9 and lmc >= .10 and 2 <= age <= 480:
-            sid = 'PRECISION_V2'
-        if sid != setup['strategy_id']:
+    mode = str(setup.get('entry_mode') or '')
+    target_score = num(setup.get('score'))
+    target_liq = max(num(setup.get('liquidity')), 1.0)
+    target_m5 = num(setup.get('change_m5'))
+    for trade in STATE.history[:LEARNING_WINDOW]:
+        if trade.get('strategy_id') != 'ORDER_FLOW_EARLY_ADAPTIVE':
             continue
-        if abs(score - setup['score']) > 10 or abs(m5 - setup['change_m5']) > 12:
+        if str(trade.get('entry_mode') or '') != mode:
             continue
-        ratio = liq / max(setup['liquidity'], 1.0)
-        if not .45 <= ratio <= 2.2 or age_band(age) != age_band(setup['age']):
+        snap = trade.get('coin_snapshot') or {}
+        score = num(trade.get('score') or snap.get('score'))
+        liq = num(trade.get('entry_liquidity_usd') or snap.get('liquidityUsd'))
+        m5 = num(
+            trade.get('entry_change_m5')
+            if trade.get('entry_change_m5') is not None
+            else (snap.get('priceChange') or {}).get('m5')
+        )
+        if abs(score - target_score) > 15 or abs(m5 - target_m5) > 18:
             continue
-        similar.append(t)
+        liq_ratio = liq / target_liq
+        if not 0.25 <= liq_ratio <= 4.0:
+            continue
+        similar.append(trade)
+
     n = len(similar)
     wins = sum(1 for t in similar if num(t.get('pnl_usd')) > 0)
-    pnl = sum(num(t.get('pnl_usd')) for t in similar)
-    gw = sum(max(0.0, num(t.get('pnl_usd'))) for t in similar)
-    gl = -sum(min(0.0, num(t.get('pnl_usd'))) for t in similar)
-    wr = wins / n * 100 if n else 0.0
-    pf = gw / gl if gl > 0 else (99.0 if n >= 5 and gw > 0 else (1.0 if gw > 0 else 0.0))
+    pnl_pcts = [num(t.get('pnl_pct')) for t in similar]
+    avg_pct = sum(pnl_pcts) / n if n else 0.0
+    win_rate = wins / n * 100 if n else 0.0
+    gross_win = sum(max(0.0, num(t.get('pnl_usd'))) for t in similar)
+    gross_loss = -sum(min(0.0, num(t.get('pnl_usd'))) for t in similar)
+    profit_factor = gross_win / gross_loss if gross_loss > 0 else (99.0 if gross_win > 0 else 0.0)
     recent_losses = sum(1 for t in similar[:3] if num(t.get('pnl_usd')) <= 0)
-    blocked = (n >= 5 and wr < 55 and pf < 1.2 and pnl < 0) or (n >= 3 and recent_losses == 3)
-    bonus = 0.0  # learning may veto entries, never relax PRECISION_V2
-    return {'sample': n, 'wins': wins, 'win_rate': round(wr, 1),
-            'pnl_usd': round(pnl, 2), 'profit_factor': round(pf, 2),
-            'recent_losses': recent_losses, 'blocked': blocked, 'bonus': round(bonus, 2)}
+
+    # Never disable an entry family: learn by risking less after repeated mistakes.
+    size_multiplier = 1.0
+    if n >= 3 and recent_losses >= 3 and avg_pct < 0:
+        size_multiplier = 0.55
+    elif n >= 5 and win_rate < 35 and avg_pct < -1:
+        size_multiplier = 0.60
+    elif n >= 4 and avg_pct < 0:
+        size_multiplier = 0.80
+    elif n >= 5 and win_rate >= 60 and avg_pct > 1:
+        size_multiplier = 1.15
+
+    return {
+        'sample': n,
+        'wins': wins,
+        'win_rate': round(win_rate, 1),
+        'avg_pnl_pct': round(avg_pct, 3),
+        'profit_factor': round(profit_factor, 2),
+        'recent_losses': recent_losses,
+        'size_multiplier': round(size_multiplier, 2),
+        'bonus': round((size_multiplier - 1.0) * 100, 1),
+        'blocked': False,
+    }
+
+
+def early_requested_notional(coin: dict[str, Any], learning: dict[str, Any]) -> float:
+    """Use smaller scouts in thin/very-new pools so $200 impact does not kill entries."""
+    liquidity = num(coin.get('liquidityUsd'))
+    age = num(coin.get('ageMinutes'), 999999)
+    if liquidity < 8000:
+        base = 35.0
+    elif liquidity < 15000:
+        base = 50.0
+    elif liquidity < 30000:
+        base = 75.0
+    elif liquidity < 60000:
+        base = 100.0
+    elif liquidity < 120000:
+        base = 150.0
+    else:
+        base = TRADE_NOTIONAL_USD
+
+    if age <= 15:
+        base *= 0.70
+    elif age <= 45:
+        base *= 0.85
+
+    base *= num(learning.get('size_multiplier'), 1.0)
+    return round(max(25.0, min(TRADE_NOTIONAL_USD, base)), 2)
 
 STATE = State()
 
