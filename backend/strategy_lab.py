@@ -7,10 +7,12 @@ from astra_lab_bridge import merge_astra_snapshot
 from lab_paired_bridge import merge_paired_snapshot
 import lab_activity as activity
 import pair_price_integrity as price_integrity
+from lab_dashboard_projection import compact_strategy_lab
 
 API_URL=os.getenv('NEO_LOCAL_API','http://127.0.0.1:8788/state')
 DEX='https://api.dexscreener.com'
 STATE_PATH=Path(os.getenv('NEO_STRATEGY_LAB_PATH','/var/lib/neo-market/strategy_lab.json'))
+COMPACT_PATH=Path(os.getenv('NEO_STRATEGY_LAB_COMPACT_PATH',str(STATE_PATH.parent/'strategy_lab_compact.json')))
 RESET_FLAG_PATH=Path(os.getenv('NEO_STRATEGY_LAB_RESET_FLAG','/var/lib/neo-market/strategy_lab.reset'))
 START_BALANCE=float(os.getenv('NEO_LAB_START_BALANCE','500'))
 STRATEGY_START_BALANCES={'SCALPER':float(os.getenv('NEO_LAB_SCALPER_START_BALANCE','100'))}
@@ -100,11 +102,14 @@ def load_json(path,default):
     try: return json.loads(path.read_text())
     except Exception: return default
 
-def atomic_write(data):
-    STATE_PATH.parent.mkdir(parents=True,exist_ok=True)
-    tmp=STATE_PATH.with_suffix('.tmp')
+def atomic_write_path(path,data):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    tmp=path.with_suffix(path.suffix+'.tmp')
     tmp.write_text(json.dumps(data,ensure_ascii=False))
-    tmp.replace(STATE_PATH)
+    tmp.replace(path)
+
+def atomic_write(data):
+    atomic_write_path(STATE_PATH,data)
 
 def flow_map():
     tape=load_json(Path('/var/lib/neo-market/live_tape.json'),{})
@@ -404,7 +409,9 @@ def persist(status='online',error=None):
                               'take_profit_net_pct':TAKE_PROFIT,'trade_limit_usd':TRADE_NOTIONAL}
     if error: STATE['error']=str(error)[:200]
     else: STATE.pop('error',None)
-    atomic_write(merge_paired_snapshot(merge_astra_snapshot(STATE)))
+    published=merge_paired_snapshot(merge_astra_snapshot(STATE))
+    atomic_write(published)
+    atomic_write_path(COMPACT_PATH,compact_strategy_lab(published))
 
 def main():
     last_entry=0
