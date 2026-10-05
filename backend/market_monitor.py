@@ -197,6 +197,18 @@ def read_live_tape() -> dict[str, Any]:
     except Exception:
         return {'status': 'offline', 'events': []}
 
+def compact_public_trade(trade: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        'id', 'address', 'pairAddress', 'name', 'symbol', 'imageUrl',
+        'entry_price', 'current_price', 'peak_price', 'execution_entry_price',
+        'execution_exit_price', 'notional_usd', 'score', 'current_score',
+        'opened_at', 'updated_at', 'closed_at', 'exit_price', 'exit_reason',
+        'trade_no', 'session_id', 'pnl_usd', 'pnl_pct', 'balance_before',
+        'balance_after', 'dex_url', 'strategy_id', 'entry_policy_version',
+        'exit_policy_version', 'signal_pnl_pct', 'entry_roundtrip_pnl_pct',
+    )
+    return {field: trade.get(field) for field in fields if field in trade}
+
 
 def api(path: str) -> Any:
     response = SESSION.get(f'{DEX_API}{path}', timeout=15)
@@ -368,11 +380,11 @@ class State:
                 'scan_count': self.scan_count,
                 'feed': self.feed,
                 'positions': self.positions,
-                'history': self.history[:100],
+                'history': [compact_public_trade(t) for t in self.history[:100]],
                 'events': self.events[:30],
                 'source_status': self.source_status,
                 'entry_diagnostics': self.entry_diagnostics,
-                'live_tape': tape.get('events', [])[:100],
+                'live_tape': [],
                 'live_tape_status': {k: tape.get(k) for k in ('status','tracked_pairs','updated_at','source','error')},
                 'strategy_lab': read_strategy_lab(),
                 'stats': {
