@@ -881,17 +881,25 @@ class Monitor:
         self.discovery = runtime.DiscoveryCache(discover, refresh_seconds=8, max_age_seconds=90)
 
     def prewarm_entry_checks(self, feed: list[dict[str, Any]]) -> None:
-        """Start slow safety/reference fetches before the first buy-flow trigger."""
-        warmed = 0
+        """Warm only the most time-sensitive candidates; avoid provider queues."""
+        candidates = []
         for coin in feed:
-            if warmed >= 10:
-                break
             age = num(coin.get('ageMinutes'), 999999)
             if num(coin.get('score')) < 60 or num(coin.get('liquidityUsd')) < 4000 or age > 360:
                 continue
+            tx = (coin.get('txns') or {}).get('m5') or {}
+            activity = num(tx.get('buys')) + num(tx.get('sells'))
+            priority = (
+                1 if age <= 45 else 0,
+                1 if age <= 180 else 0,
+                activity,
+                num(coin.get('score')),
+            )
+            candidates.append((priority, coin))
+        candidates.sort(key=lambda row: row[0], reverse=True)
+        for _, coin in candidates[:4]:
             price_integrity.check(coin)
             rug_guard.check(coin)
-            warmed += 1
 
     def update_price_history(self, feed: list[dict[str, Any]]) -> None:
         stamp = now_ms()
