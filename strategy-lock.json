@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-05T05:31:00Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "c344083cb1819bd205dbe2590133ddc3c20f6ded3bbd82d96eaabdea5c1fb2af",
+  "sha256": "09bc0b87ede77c7ecbc6b32e66087c40e8d691bcfb3ab4815625d90665cf77f8",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 85,
@@ -18,7 +18,7 @@
     "min_liquidity_usd": 10000
   },
   "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "Order Flow GOLD logic retained with explicit user overrides only: minimum liquidity $10k, up to 5 concurrent positions, no daily loss cap in PAPER mode, and compact dashboard state transport. Trading rules/history are not reset or rewritten.",
+  "integrity_note": "Order Flow GOLD logic retained with explicit user overrides only: minimum liquidity $10k, up to 5 concurrent positions, no daily loss cap in PAPER mode, and compact dashboard transport via a separate Strategy Lab snapshot. Trading rules/history are not reset or rewritten.",
   "execution_mode": "JUPITER_QUOTE_V2_EXPECTED",
   "entry_policy_version": "ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V6",
   "entry_policy_limits": {
