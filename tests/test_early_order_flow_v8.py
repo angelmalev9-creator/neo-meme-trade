@@ -22,6 +22,10 @@ class EarlyOrderFlowTests(unittest.TestCase):
     def test_first_real_impulse_can_enter_ultra_early(self):
         self.assertEqual(g.entry_mode(coin(),flow(),{'conviction':40}),'ULTRA_EARLY')
 
+    def test_ultra_early_does_not_wait_for_mature_score(self):
+        c=coin(score=58,liquidityUsd=6000,ageMinutes=1,priceChange={'m5':1})
+        self.assertEqual(g.entry_mode(c,flow(buy_usd=20,sell_usd=2),{'conviction':30}),'ULTRA_EARLY')
+
     def test_two_trade_early_setup_enters(self):
         c=coin(score=74,liquidityUsd=12000,ageMinutes=100,priceChange={'m5':7})
         f=flow(trades=2,buy_sell_usd_ratio=1.3,buy_usd=80,sell_usd=30,unique_wallets=2)
