@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-05T16:35:00Z",
   "source_commit": "USER_UNLOCKED_EARLY_ORDER_FLOW_20261005",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "62928c79574aae7e5d56a4d6c692827ab19abf1a2f149a38fec76cec2642ee81",
+  "sha256": "181d53bdeee04bbdb09a10db506095ff1d250890aaebc41b191f7f915eb8ccea",
   "production_strategy_id": "ORDER_FLOW_EARLY_ADAPTIVE",
   "rules": {
     "entry_score": 65,
