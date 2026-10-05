@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Callable
 import requests
 from astra_lab_bridge import merge_astra_snapshot
+from lab_paired_bridge import merge_paired_snapshot
 import lab_activity as activity
 import pair_price_integrity as price_integrity
 
@@ -403,7 +404,7 @@ def persist(status='online',error=None):
                               'take_profit_net_pct':TAKE_PROFIT,'trade_limit_usd':TRADE_NOTIONAL}
     if error: STATE['error']=str(error)[:200]
     else: STATE.pop('error',None)
-    atomic_write(merge_astra_snapshot(STATE))
+    atomic_write(merge_paired_snapshot(merge_astra_snapshot(STATE)))
 
 def main():
     last_entry=0

@@ -1,3 +1,4 @@
+import LabPairedPanel, { type LabPairedSnapshot } from './components/LabPairedPanel';
 import AstraBrainPanel, { type AstraSnapshot } from './components/AstraBrainPanel';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -42,7 +43,7 @@ type PricePoint = { ts: number; price: number; liquidity: number; volumeH1: numb
 type LabPosition = { symbol: string; address: string; strategy_id: string; opened_at: number; pnl_pct: number; notional_usd: number };
 type LabBook = { id: string; name: string; starting_balance: number; balance: number; position: LabPosition | null; history: Position[] };
 type LabStats = { trades: number; wins: number; losses: number; win_rate: number; profit_factor: number; realized_pnl: number; equity: number; return_pct: number; open: boolean };
-type StrategyLab = { astra?: AstraSnapshot; status: string; updated_at: number; started_at: number; books: Record<string, LabBook>; stats: Record<string, LabStats>; error?: string };
+type StrategyLab = { paired?: LabPairedSnapshot; astra?: AstraSnapshot; status: string; updated_at: number; started_at: number; books: Record<string, LabBook>; stats: Record<string, LabStats>; error?: string };
 type LiveTrade = { ts: number; direction: 'BUY' | 'SELL'; token_amount: number; usd_amount: number; wallet: string; note: string; address: string; pairAddress: string; symbol: string; signature: string; slot: number };
 type FlowStats = { seconds: number; trades: number; buys: number; sells: number; buy_usd: number; sell_usd: number; buy_sell_usd_ratio: number; unique_wallets: number; max_buy_usd: number; max_sell_usd: number };
 type TapeStatus = { status?: string; tracked_pairs?: number; updated_at?: number; source?: string; error?: string | null };
@@ -337,6 +338,7 @@ export default function App() {
         </div>
         <div data-testid="lab-integrity-warning" className="mx-4 mt-3 rounded-xl border border-amber-400/20 bg-amber-400/[0.04] px-4 py-3 text-xs leading-5 text-amber-100">В историята на Lab има несъответстващи цени, включително XFUN. Сумите не са пренаписани. Новите входове изискват проверка на точния pool от втори източник.</div>
         <AstraBrainPanel data={state?.strategy_lab?.astra} />
+        <LabPairedPanel data={state?.strategy_lab?.paired} />
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1050px] text-left">
             <thead><tr className="border-b border-white/[0.06] text-[8px] font-black uppercase tracking-[0.14em] text-slate-700"><th className="px-4 py-3">Стратегия</th><th className="px-4 py-3">Balance</th><th className="px-4 py-3">Equity</th><th className="px-4 py-3">PnL</th><th className="px-4 py-3">Сделки</th><th className="px-4 py-3">Win rate</th><th className="px-4 py-3">PF</th><th className="px-4 py-3">Отворена позиция</th></tr></thead>
