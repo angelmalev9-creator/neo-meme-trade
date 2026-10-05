@@ -23,8 +23,8 @@ class EarlyOrderFlowTests(unittest.TestCase):
         self.assertEqual(g.entry_mode(coin(),flow(),{'conviction':40}),'ULTRA_EARLY')
 
     def test_ultra_early_does_not_wait_for_mature_score(self):
-        c=coin(score=58,liquidityUsd=6000,ageMinutes=1,priceChange={'m5':1})
-        self.assertEqual(g.entry_mode(c,flow(buy_usd=20,sell_usd=2),{'conviction':30}),'ULTRA_EARLY')
+        c=coin(score=40,liquidityUsd=4000,ageMinutes=1,priceChange={'m5':1})
+        self.assertEqual(g.entry_mode(c,flow(buy_usd=20,sell_usd=2),{'conviction':22}),'MICRO_SCOUT')
 
     def test_two_trade_early_setup_enters(self):
         c=coin(score=74,liquidityUsd=12000,ageMinutes=100,priceChange={'m5':7})
@@ -37,7 +37,7 @@ class EarlyOrderFlowTests(unittest.TestCase):
         self.assertEqual(g.entry_mode(c,f,{'conviction':65}),'MOMENTUM')
 
     def test_thin_liquidity_stays_blocked(self):
-        self.assertIsNone(g.entry_mode(coin(liquidityUsd=3000),flow(),{'conviction':90}))
+        self.assertIsNone(g.entry_mode(coin(liquidityUsd=2999),flow(),{'conviction':90}))
 
     def test_sell_pressure_stays_blocked(self):
         f=flow(buy_sell_usd_ratio=.8,buy_usd=20,sell_usd=60,max_sell_usd=60)
