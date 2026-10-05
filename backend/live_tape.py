@@ -8,9 +8,9 @@ import requests
 API_URL = os.getenv('NEO_LOCAL_API', 'http://127.0.0.1:8788/state')
 RPC_URL = os.getenv('SOLANA_RPC_URL', 'https://rpc.solanatracker.io/public')
 OUT = Path(os.getenv('NEO_LIVE_TAPE_PATH', '/var/lib/neo-market/live_tape.json'))
-MAX_TRACKED = int(os.getenv('NEO_TAPE_MAX_PAIRS', '45'))
-MAX_EVENTS = int(os.getenv('NEO_TAPE_MAX_EVENTS', '600'))
-POLL_SECONDS = float(os.getenv('NEO_TAPE_POLL_SECONDS', '2'))
+MAX_TRACKED = int(os.getenv('NEO_TAPE_MAX_PAIRS', '60'))
+MAX_EVENTS = int(os.getenv('NEO_TAPE_MAX_EVENTS', '1600'))
+POLL_SECONDS = float(os.getenv('NEO_TAPE_POLL_SECONDS', '1.0'))
 SESSION = requests.Session()
 SESSION.headers.update({'content-type':'application/json','user-agent':'NEO-LiveTape/2.0'})
 EVENTS = deque(maxlen=MAX_EVENTS)
@@ -26,8 +26,17 @@ def now_ms():
 def feed_snapshot():
     r=SESSION.get(API_URL,timeout=5)
     r.raise_for_status()
+    coins=list(r.json().get('feed',[]) or [])
+    def priority(c):
+        try: age=float(c.get('ageMinutes') if c.get('ageMinutes') is not None else 999999)
+        except: age=999999
+        tx=(c.get('txns') or {}).get('m5') or {}
+        activity=float(tx.get('buys') or 0)+float(tx.get('sells') or 0)
+        score=float(c.get('score') or 0)
+        return (1 if age<=180 else 0, activity, score)
+    coins.sort(key=priority,reverse=True)
     rows=[]
-    for c in r.json().get('feed',[])[:MAX_TRACKED]:
+    for c in coins[:MAX_TRACKED]:
         pair=c.get('pairAddress'); mint=c.get('address')
         if pair and mint:
             rows.append({'pair':pair,'address':mint,'symbol':c.get('symbol') or '?',
@@ -99,7 +108,7 @@ def poll_once():
     STATUS['updated_at']=now_ms()
     if not feed:
         STATUS['status']='degraded'; STATUS['error']='No pairs from NEO feed'; atomic_write(); return
-    calls=[('getSignaturesForAddress',[m['pair'],{'limit':4,'commitment':'confirmed'}]) for m in feed]
+    calls=[('getSignaturesForAddress',[m['pair'],{'limit':8,'commitment':'confirmed'}]) for m in feed]
     answers=rpc_batch(calls)
     new=[]
     for meta,answer in zip(feed,answers):
@@ -122,7 +131,7 @@ def poll_once():
         SEEN.clear(); SEEN.update(keep)
         INITIALIZED_PAIRS.clear()
     if new:
-        new=new[-60:]
+        new=new[-120:]
         tx_calls=[('getTransaction',[sig,{'encoding':'jsonParsed','commitment':'confirmed',
                    'maxSupportedTransactionVersion':0}]) for sig,_,_ in new]
         tx_answers=rpc_batch(tx_calls)
