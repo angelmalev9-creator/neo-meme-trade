@@ -24,8 +24,8 @@ DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 70
 ENTRY_SCORE = 80.0
 MAX_POSITIONS = 1
-STOP_LOSS_PCT = 3.0
-STOP_EXECUTION_BUFFER_PCT = 0.3
+STOP_LOSS_PCT = 5.0
+STOP_EXECUTION_BUFFER_PCT = 0.5
 TAKE_PROFIT_PCT = 10.0
 TRAILING_PCT = 4.0
 MAX_HOLD_MINUTES = 60
@@ -399,7 +399,7 @@ class State:
                     'reentry_seconds': 1200, 'loss_reentry_seconds': 1200,
                     'signal_strategy': 'ORDER_FLOW_ADAPTIVE',
                     'signal_source_commit': '44a7a09b019f068a97c2165068a556cadcc6bfc4',
-                    'risk_overlay': 'USER_NET_3_10',
+                    'risk_overlay': 'USER_NET_5_10_DYNAMIC_STOP',
                     'execution_verification_version': 'QUOTE_EVIDENCE_V6',
                     'rug_guard': rug_guard.VERSION,
                     'paper_only': True,
@@ -414,7 +414,7 @@ class State:
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
                     'starting_balance_usd': STARTING_BALANCE_USD,
                     'execution_mode': 'JUPITER_QUOTE_V2',
-                    'execution_note': 'Original GOLD entry signal; separate user net 3/10 risk overlay; independently checked prices and recorded quotes, not actual fills',
+                    'execution_note': 'Original GOLD entry signal; mandatory +10% net TP and dynamic early chart stop targeting a 5% net loss budget including expected execution costs',
                     'entry_policy_version': entry_policy.POLICY_VERSION,
                     'signal_source_commit': '44a7a09b019f068a97c2165068a556cadcc6bfc4',
                     'execution_verification_version': 'QUOTE_EVIDENCE_V6',
@@ -878,6 +878,17 @@ class Monitor:
                 coin=position.get('coin_snapshot') or {}
             if not coin: continue
             reason=position.get('pending_exit_reason')
+            market=num(coin.get('priceUsd'),num(position.get('current_price')))
+            entry=num(position.get('entry_price'))
+            signal_pct=((market-entry)/max(entry,1e-18))*100 if entry>0 else 0.0
+            signal_stop_trigger=num(
+                position.get('stop_signal_trigger_pct'),
+                -(STOP_LOSS_PCT-STOP_EXECUTION_BUFFER_PCT),
+            )
+            # Mandatory stop-market intent. The chart trigger is deliberately
+            # earlier so expected execution friction fits inside the 5% net budget.
+            if signal_pct<=signal_stop_trigger:
+                reason=reason or 'STOP_LOSS_5_NET_TARGET'
             fresh_market=0<=now_ms()-num(coin.get('updatedAt'))<=entry_policy.MAX_FEED_AGE_MS
             if fresh_market and num(coin.get('liquidityUsd'))<num(position.get('entry_liquidity_usd'))*.80:
                 reason=reason or 'LIQUIDITY_EMERGENCY'
@@ -901,9 +912,12 @@ class Monitor:
             pnl=quote['net_proceeds_usd']-notional-entry_cost
             pct=pnl/max(notional,1e-18)*100
             hold=(now_ms()-int(position.get('opened_at',now_ms())))/60000
-            # Begin before -3% to allow some execution headroom. Never clamp PnL.
-            if pct<=-(STOP_LOSS_PCT-STOP_EXECUTION_BUFFER_PCT): reason=reason or 'STOP_LOSS_3_NET'
-            elif pct>=TAKE_PROFIT_PCT: reason=reason or 'TAKE_PROFIT_10_NET'
+            # Mandatory bracket. The stop can trigger either from the earlier
+            # chart threshold or from executable net PnL; TP is +10% executable net.
+            if pct<=-(STOP_LOSS_PCT-STOP_EXECUTION_BUFFER_PCT):
+                reason=reason or 'STOP_LOSS_5_NET_TARGET'
+            elif pct>=TAKE_PROFIT_PCT:
+                reason=reason or 'TAKE_PROFIT_10_NET'
             elif hold>=MAX_HOLD_MINUTES: reason=reason or 'MAX_HOLD_60'
             if reason and is_quote and quote.get('from_cache'):
                 with STATE.lock:
@@ -914,18 +928,17 @@ class Monitor:
                 pnl=quote['net_proceeds_usd']-notional-entry_cost
                 pct=pnl/max(notional,1e-18)*100
                 if reason=='TAKE_PROFIT_10_NET' and pct<TAKE_PROFIT_PCT: reason=None
-            market=num(coin.get('priceUsd'),num(position.get('current_price')))
-            entry=num(position.get('entry_price'))
             updated={**position,'current_price':market,'peak_price':max(market,num(position.get('peak_price'))),
                      'pnl_usd':round(pnl,6),'pnl_pct':round(pct,6),
-                     'signal_pnl_pct':round((market-entry)/max(entry,1e-18)*100,6),
+                     'signal_pnl_pct':round(signal_pct,6),
+                     'active_stop_signal_trigger_pct':round(signal_stop_trigger,6),
                      'current_execution_price':quote['fill_price'],'quote_status':'fresh',
                      'execution_quote_source':quote.get('execution_source','MODEL_V1'),
                      'execution_quote_at':quote.get('quoted_at',now_ms()),'updated_at':now_ms(),
                      'last_sell_quote':quote.get('raw_quote'),
                      'quote_queue_ms':quote.get('queue_ms'),'quote_http_ms':quote.get('http_ms'),
                      'hard_stop_net_pct':-STOP_LOSS_PCT,'take_profit_net_pct':TAKE_PROFIT_PCT,
-                     'exit_policy_version':'NET_3_10_V5','pending_exit_reason':reason,
+                     'exit_policy_version':'NET_5_10_DYNAMIC_STOP_V7','pending_exit_reason':reason,
                      'estimated_exit_dex_fee_usd':quote['dex_fee_usd'],
                      'estimated_exit_network_fee_usd':quote['network_fee_usd'],
                      'estimated_exit_price_impact_pct':quote['impact_pct'],
