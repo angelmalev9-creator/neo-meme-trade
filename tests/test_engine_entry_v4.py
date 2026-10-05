@@ -60,11 +60,17 @@ class EngineEntryTests(unittest.TestCase):
         self.mocks[2].assert_not_called()
         self.assertFalse(m.STATE.positions)
 
-    def test_remaining_daily_risk_budget_blocks_new_position(self):
+    def test_remaining_daily_risk_budget_sizes_down_before_request(self):
         m.STATE.demo_balance_usd=905
         m.STATE.risk_day_start_balance_usd=1000
-        self.monitor.maybe_open([self.coin])
-        self.mocks[2].assert_not_called()
+        with patch.object(m.paper_quotes,'prepare_entry',return_value=None) as quote:
+            self.monitor.maybe_open([self.coin])
+        self.assertTrue(quote.called)
+        size=quote.call_args.args[2]
+        self.assertLess(size,200)
+        self.assertGreaterEqual(size,10)
+        self.assertLessEqual(size*.033+.225,5.01)
+
 
     def test_preserve_user_risk_settings(self):
         self.assertEqual(m.TRADE_NOTIONAL_USD, 200)

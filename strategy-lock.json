@@ -1,9 +1,9 @@
 {
   "name": "NEO Meme Coins GOLD strategy",
-  "locked_at_utc": "2026-10-05T04:45:38Z",
+  "locked_at_utc": "2026-10-05T05:05:33Z",
   "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "4d53c4140404b1a9778cdd3eab1f7ee890a2c33154be02329b32bf6f2f43dc86",
+  "sha256": "856b018f66e910a0e61edae1db1f9d0e3c3df07ed54051fe58fbc984650926f9",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
     "entry_score": 85,
@@ -33,12 +33,15 @@
     "risk_overlay": "USER_NET_3_10"
   },
   "support_files_sha256": {
-    "backend/engine_entry_policy.py": "925401b910a16c74ad6b518311d3ca88a4de1ec25f7184db0d3d2ec43a08a25c",
+    "backend/engine_entry_policy.py": "58d698d78ac236e712beef911aa24d435f7853b33f6b8ec66d57a93c295c4a7a",
     "backend/paper_execution_quotes.py": "93fd07ba67904f6cdbf5497cc7c0587f6240e49c4de2d2276c9b68178790958b",
     "backend/engine_rug_guard.py": "4144b8b7dc132f470264dc477309385b812335f46c18bf526a14db0e4308a3a7",
-    "backend/engine_execution.py": "61bde9dbdd05c4d3c2adfb8587af08a9c07e359539876311954d2a2b8475e727",
+    "backend/engine_execution.py": "e7f7f2dc403c6bfd6d99b0935b29cc76c8ca8f8b9dcc5f25a7f2cee5a58b0ae7",
     "backend/gold_order_flow.py": "d7cdfff4e36fc2784ebc5d8e7df8312c394dce07c8cdba8526ac46d03d111464",
     "backend/honest_quote_transport.py": "bd5868c186bdc64f708012df31f18f505fa55dc6ecc48478468728bd59b9eabd",
-    "backend/pair_price_integrity.py": "945d1723eb3ab785f0d9641c2787e31deff2846dfae58eba2367caf430df81f0"
-  }
+    "backend/pair_price_integrity.py": "945d1723eb3ab785f0d9641c2787e31deff2846dfae58eba2367caf430df81f0",
+    "backend/engine_runtime.py": "00959c07145619bbd01a81ad862c890ebf6803ece31b4f9ad47e1e63160ff5bb"
+  },
+  "runtime_version": "RUNTIME_REPAIR_V1",
+  "runtime_note": "Original Order Flow signal unchanged. Respect remaining daily risk with size reduction, nonblocking discovery, atomic state, valid same-mint sale routing. No reset."
 }

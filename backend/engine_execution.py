@@ -65,8 +65,14 @@ def entry_quote(token_mint,pair_address,notional_usd):
 
 def exit_quote(token_mint,token_raw_amount,pair_address=None,purpose='exit'):
     raw=int(token_raw_amount)
-    d=_request(token_mint,USDC,raw,pair_address,token_mint,purpose)
+    # Liquidate the same exact mint/quantity via Jupiter's best valid route.
+    # A different exit AMM is not a different asset or a chart-price substitution.
+    # Refusing a valid sale solely because it changes AMM can strand a position.
+    d=_request(token_mint,USDC,raw,None,token_mint,purpose)
     if not d: return None
+    token_legs=[x.get('swapInfo',{}) for x in d.get('routePlan',[])
+                if x.get('swapInfo',{}).get('inputMint')==token_mint]
+    if not token_legs: return None
     expected=_int(d['outAmount'])/1_000_000
     assumed=expected*(1-BUFFER_BPS/10000)
     return {'expected_usdc':assumed,'provider_expected_usdc':expected,
@@ -75,6 +81,7 @@ def exit_quote(token_mint,token_raw_amount,pair_address=None,purpose='exit'):
             'slippage_bps':int(d.get('slippageBps',SLIPPAGE_BPS)),
             'route':provider._compact_route(d),'quoted_at':d['_observed_at'],
             'context_slot':d.get('contextSlot'),'token_input_raw':raw,
+            'route_matches_entry_pool':same_token_pool(d,token_mint,pair_address),
             'assumed_buffer_bps':BUFFER_BPS,'raw_quote':d}
 
 def position_mark(position,coin,network_fee_usd,force=False):
@@ -101,7 +108,8 @@ def position_mark(position,coin,network_fee_usd,force=False):
             'token_input_raw':raw,'from_cache':False,'fees_included_in_quote':True,
             'execution_buffer_estimated':True,'raw_quote':fresh.get('raw_quote'),
             'queue_ms':(fresh.get('raw_quote') or {}).get('_queue_ms'),
-            'http_ms':(fresh.get('raw_quote') or {}).get('_http_ms')}
+            'http_ms':(fresh.get('raw_quote') or {}).get('_http_ms'),
+            'route_matches_entry_pool':fresh.get('route_matches_entry_pool')}
     with _LOCK:
         for k,v in list(_CACHE.items()):
             if stamp()-v['quoted_at']>MAX_AGE_MS: _CACHE.pop(k,None)

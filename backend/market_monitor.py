@@ -9,6 +9,7 @@ import engine_execution as paper_quotes
 import engine_rug_guard as rug_guard
 import engine_entry_policy as entry_policy
 import pair_price_integrity as price_integrity
+import engine_runtime as runtime
 
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
@@ -247,8 +248,9 @@ class State:
             raw = data.get('price_history', {})
             if isinstance(raw, dict):
                 self.price_history = {k: v[-480:] for k, v in raw.items() if isinstance(v, list)}
-        except Exception:
-            pass
+        except Exception as exc:
+            # Never boot a silently reset $1000 account from an unreadable file.
+            raise RuntimeError('Account state is unreadable; refusing automatic reset') from exc
 
     def save(self) -> None:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -256,7 +258,7 @@ class State:
         keep |= {p.get('address') for p in self.positions}
         keep |= {t.get('address') for t in self.history[:100]}
         price_history = {k: v[-480:] for k, v in self.price_history.items() if k in keep}
-        STATE_PATH.write_text(json.dumps({
+        runtime.atomic_json(STATE_PATH,{
             'positions': self.positions[-20:],
             'history': self.history[-300:],
             'events': self.events[-100:],
@@ -268,7 +270,7 @@ class State:
             'risk_day_key': self.risk_day_key,
             'risk_day_start_balance_usd': self.risk_day_start_balance_usd,
             'price_history': price_history,
-        }, ensure_ascii=False))
+        })
 
     def event(self, text: str) -> None:
         self.events.insert(0, {'ts': now_ms(), 'text': text[:500]})
@@ -372,6 +374,7 @@ class State:
                     'win_rate': round((wins / closed) * 100, 1) if closed else 0,
                     'realized_today_usd': round(self.realized_today(), 2),
                     'risk_day_pnl_usd': round(self.risk_day_pnl(), 2),
+                    'daily_risk_remaining_usd': round(max(0.,MAX_DAILY_LOSS_USD+self.risk_day_pnl()),4),
                     'risk_day_start_balance_usd': round(self.risk_day_start_balance_usd, 2),
                     'demo_starting_balance_usd': round(self.demo_starting_balance_usd, 2),
                     'demo_balance_usd': round(self.demo_balance_usd, 2),
@@ -400,6 +403,8 @@ class State:
                     'execution_verification_version': 'QUOTE_EVIDENCE_V6',
                     'rug_guard': rug_guard.VERSION,
                     'paper_only': True,
+                    'runtime_version': runtime.VERSION,
+                    'daily_budget_sizing': True,
                     'stop_execution_buffer_pct': STOP_EXECUTION_BUFFER_PCT,
                     'take_profit_pct': TAKE_PROFIT_PCT,
                     'trailing_pct': TRAILING_PCT,
@@ -724,6 +729,7 @@ class Monitor:
         self.position_lock = threading.Lock()
         self.position_poll_lock = threading.Lock()
         self.entry_lock = threading.Lock()
+        self.discovery = runtime.DiscoveryCache(discover)
 
     def update_price_history(self, feed: list[dict[str, Any]]) -> None:
         stamp = now_ms()
@@ -942,6 +948,7 @@ class Monitor:
                         'balance_before':before,'balance_after':STATE.demo_balance_usd,
                         'exit_liquidity_usd':coin.get('liquidityUsd'),'fees_included_in_quote':is_quote,
                         'exit_quote':quote.get('raw_quote'),'quote_queue_ms':quote.get('queue_ms'),
+                        'exit_route_matches_entry_pool':quote.get('route_matches_entry_pool'),
                         'quote_http_ms':quote.get('http_ms')}
                 STATE.history.insert(0,closed); STATE.history=STATE.history[:300]
                 STATE.positions.remove(live)
@@ -1061,11 +1068,16 @@ class Monitor:
             if not seen_before and rent_lamports<=0:
                 entry_policy.record(report,['risk_data_unavailable'],coin); continue
             entry_rent=0.0 if seen_before else rent_lamports/1e9*sol_usd
-            notional = min(TRADE_NOTIONAL_USD, max(0.0, available_before - pre_network_fee - entry_rent))
+            # Keep the user's $200 cap but fit the existing daily allowance.
+            # This never resets the day's loss or raises its $100 ceiling.
+            fixed_cost_budget=2*pre_network_fee+entry_rent
+            notional = runtime.plan_notional(
+                TRADE_NOTIONAL_USD,available_before,MAX_DAILY_LOSS_USD,
+                STATE.risk_day_pnl(),STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,
+                fixed_cost_budget,
+            )
             if notional < 10:
-                continue
-            if STATE.risk_day_pnl()-notional*STOP_LOSS_PCT/100 < -MAX_DAILY_LOSS_USD:
-                entry_policy.record(report,['daily_limit'],coin); return
+                entry_policy.record(report,['risk_budget_unavailable'],coin); return
             report['quoted'] += 1
             prepared=paper_quotes.prepare_entry(address,str(coin.get('pairAddress') or ''),notional)
             if not prepared:
@@ -1123,6 +1135,12 @@ class Monitor:
                     return
                 if STATE.available_balance_usd()<entry_quote['capital_committed_usd'] or STATE.risk_day_pnl()<=-MAX_DAILY_LOSS_USD:
                     entry_policy.record(report,['balance'],coin); return
+                permitted = runtime.plan_notional(
+                    TRADE_NOTIONAL_USD,STATE.available_balance_usd(),MAX_DAILY_LOSS_USD,
+                    STATE.risk_day_pnl(),STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
+                )
+                if notional>permitted:
+                    entry_policy.record(report,['risk_budget_unavailable'],coin); return
                 if now_ms()-int(live_quote['quoted_at'])>750:
                     entry_policy.record(report,['quote_age'],coin); return
                 STATE.trade_seq += 1
@@ -1140,6 +1158,8 @@ class Monitor:
                     'learning_win_rate': learning['win_rate'], 'learning_profit_factor': learning['profit_factor'],
                     'learning_recent_losses': learning['recent_losses'], 'learning_bonus': learning['bonus'],
                     'notional_usd': round(notional, 8),
+                    'size_limited_by_daily_budget': notional<min(TRADE_NOTIONAL_USD,available_before-fixed_cost_budget),
+                    'planned_risk_usd': notional*(STOP_LOSS_PCT+STOP_EXECUTION_BUFFER_PCT)/100+fixed_cost_budget,
                     'capital_committed_usd': round(entry_quote['capital_committed_usd'], 8),
                     'quantity': quantity, 'score': coin.get('score'),
                     'current_score': coin.get('score'), 'opened_at': now_ms(),
@@ -1200,7 +1220,7 @@ class Monitor:
         if not STATE.running or not self.scan_lock.acquire(blocking=False):
             return
         try:
-            addresses, metadata = discover()
+            addresses, metadata = self.discovery.get()
             for position in STATE.positions:
                 address = position.get('address')
                 if address and address not in addresses:
@@ -1210,7 +1230,10 @@ class Monitor:
                         'header': '', 'description': '', 'links': [], 'boost_amount': 0,
                     }
             if not addresses:
-                raise RuntimeError('No Solana tokens returned by discovery sources.')
+                with STATE.lock:
+                    STATE.status = 'discovering'
+                    STATE.message = 'Проверява пазарните източници.'
+                return
             pairs = fetch_pairs(addresses)
             chosen = best_pairs(pairs)
             feed = []
@@ -1273,6 +1296,7 @@ class Monitor:
 
     def stop(self) -> None:
         self.stop_event.set()
+        self.discovery.stop()
 
 
 MONITOR = Monitor()
