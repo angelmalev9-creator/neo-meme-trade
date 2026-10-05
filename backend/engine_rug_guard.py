@@ -24,6 +24,7 @@ INSIDER_REVIEW_COUNT=10
 _POOL=cf.ThreadPoolExecutor(max_workers=2,thread_name_prefix='engine-risk')
 _LOCK=threading.Lock()
 _PENDING={}
+_FAST_CHAIN_CACHE={}
 
 def now_ms(): return int(time.time()*1000)
 def num(x,default=math.nan):
@@ -153,6 +154,79 @@ def _fetch(mint,pair):
                     'reasons':['risk_data_unavailable'],'error_type':type(exc).__name__}
         p=_file(mint,pair); tmp=p.with_suffix('.tmp');tmp.write_text(json.dumps(result,allow_nan=False));tmp.replace(p)
         return result
+
+def fast_chain_check(coin):
+    """Fast provisional check for PAPER ultra-early scouts only.
+
+    Verifies the mint directly on Solana: token program, supply, decimals,
+    mint/freeze authorities and supported extensions. It does not replace the
+    full RugCheck holder/LP report and must never override a full blocked result.
+    """
+    mint=str(coin.get('address') or '');pair=str(coin.get('pairAddress') or '')
+    if not ADDR.fullmatch(mint) or not ADDR.fullmatch(pair):
+        return {'status':'blocked','reasons':['invalid_mint_or_pair']}
+    key=(mint,pair)
+    current=now_ms()
+    with _LOCK:
+        cached=_FAST_CHAIN_CACHE.get(key)
+    if cached and 0<=current-int(cached.get('checked_at',0))<=30_000:
+        return cached
+    try:
+        payload=[
+            {'jsonrpc':'2.0','id':1,'method':'getAccountInfo',
+             'params':[mint,{'encoding':'jsonParsed','commitment':'processed'}]},
+            {'jsonrpc':'2.0','id':2,'method':'getMinimumBalanceForRentExemption',
+             'params':[182]},
+        ]
+        response=requests.post(RPC,json=payload,timeout=(0.5,2.0))
+        response.raise_for_status(); rows=response.json()
+        if not isinstance(rows,list): raise ValueError('rpc_batch')
+        by_id={int(row.get('id',0)):row for row in rows if isinstance(row,dict)}
+        account=((by_id.get(1) or {}).get('result') or {}).get('value')
+        rent=(by_id.get(2) or {}).get('result')
+        if not isinstance(account,dict) or type(rent) is not int or rent<=0:
+            raise ValueError('rpc_missing')
+        reasons=[]
+        if account.get('owner') not in TOKEN_PROGRAMS: reasons.append('unsupported_token_program')
+        parsed=(account.get('data') or {}).get('parsed') or {}
+        info=parsed.get('info') or {}
+        if parsed.get('type')!='mint' or info.get('isInitialized') is not True or int(info.get('supply',0))<=0:
+            reasons.append('invalid_mint')
+        if 'mintAuthority' not in info or info.get('mintAuthority') is not None:
+            reasons.append('mint_authority')
+        if 'freezeAuthority' not in info or info.get('freezeAuthority') is not None:
+            reasons.append('freeze_authority')
+        decimals=info.get('decimals')
+        if type(decimals) is not int or not 0<=decimals<=18:
+            reasons.append('mint_decimals')
+        extensions=info.get('extensions',[])
+        if not isinstance(extensions,list):
+            reasons.append('token_extensions_unknown'); names=[]
+        else:
+            names=[str(e.get('extension','')) for e in extensions if isinstance(e,dict)]
+            if len(names)!=len(extensions) or any(x not in {'metadataPointer','tokenMetadata'} for x in names):
+                reasons.append('unsupported_token_extension')
+        result={
+            'version':'RUG_GUARD_FAST_CHAIN_V1',
+            'status':'blocked' if reasons else 'pass',
+            'mint':mint,'pair':pair,'checked_at':current,
+            'reasons':sorted(set(reasons)),
+            'metrics':{
+                'decimals':decimals,
+                'extensions':names,
+                'token_account_rent_lamports':rent,
+            },
+            'provisional_early':not reasons,
+            'limitations':['no_holder_report_yet','no_lp_report_yet','paper_ultra_early_only'],
+        }
+    except (requests.RequestException,ValueError,TypeError,KeyError,OverflowError) as exc:
+        result={'version':'RUG_GUARD_FAST_CHAIN_V1','status':'unavailable',
+                'mint':mint,'pair':pair,'checked_at':current,
+                'reasons':['risk_data_unavailable'],'error_type':type(exc).__name__}
+    with _LOCK:
+        _FAST_CHAIN_CACHE[key]=result
+    return result
+
 
 def check(coin):
     mint=str(coin.get('address') or '');pair=str(coin.get('pairAddress') or '')
