@@ -106,16 +106,30 @@ export default function App() {
     let cancelled = false;
     let retryTimer: number | undefined;
     let pollTimer: number | undefined;
+    let inFlight = false;
+    let hasValidState = false;
 
     try {
       const cached = sessionStorage.getItem('neo-live-state-v1');
       if (cached) {
         const parsed = JSON.parse(cached) as { savedAt: number; state: MonitorState };
-        if (Date.now() - parsed.savedAt < 15_000) setState(parsed.state);
+        if (Date.now() - parsed.savedAt < 15_000) {
+          hasValidState = true;
+          setState(parsed.state);
+          setError('');
+        }
       }
     } catch { /* cache is optional */ }
 
+    const schedulePoll = () => {
+      if (cancelled) return;
+      pollTimer = window.setTimeout(() => void load(0), 2000);
+    };
+
     const load = async (attempt = 0) => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      let retryScheduled = false;
       try {
         if (!supabase) throw new Error('Supabase unavailable');
         const { data: { session } } = await supabase.auth.getSession();
@@ -123,7 +137,7 @@ export default function App() {
         if (!token) throw new Error('Session expired');
 
         const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 2500);
+        const timeout = window.setTimeout(() => controller.abort(), 4000);
         const response = await fetch(`${API}/user/state`, {
           cache: 'no-store',
           signal: controller.signal,
@@ -132,6 +146,7 @@ export default function App() {
         if (!response.ok) throw new Error(`Backend HTTP ${response.status}`);
         const next = await response.json() as MonitorState;
         if (cancelled) return;
+        hasValidState = true;
         setState(next);
         setError('');
         try {
@@ -141,20 +156,24 @@ export default function App() {
       } catch (err) {
         if (cancelled) return;
         if (attempt < 3) {
-          const delays = [150, 300, 700];
+          const delays = [100, 250, 500];
+          retryScheduled = true;
           retryTimer = window.setTimeout(() => void load(attempt + 1), delays[attempt]);
-          return;
+        } else if (!hasValidState) {
+          const message = err instanceof Error ? err.message : 'Backend unavailable';
+          setError(message.includes('aborted') ? 'Backend unavailable' : message);
         }
-        setError(err instanceof Error ? err.message : 'Backend unavailable');
+      } finally {
+        inFlight = false;
+        if (!retryScheduled) schedulePoll();
       }
     };
 
     void load();
-    pollTimer = window.setInterval(() => void load(), 2000);
     return () => {
       cancelled = true;
       if (retryTimer) window.clearTimeout(retryTimer);
-      if (pollTimer) window.clearInterval(pollTimer);
+      if (pollTimer) window.clearTimeout(pollTimer);
     };
   }, [refreshTick]);
 
