@@ -1370,9 +1370,13 @@ class Monitor:
                 entry_policy.record(report, rejected, coin)
                 continue
             report['signal_passed'] += 1
+            entry_mode = order_flow.entry_mode(coin, flow, context)
+            if not entry_mode:
+                entry_policy.record(report, ['gold_signal'], coin)
+                continue
             # Start independent price and rug checks together. Both helpers are
             # cached/asynchronous; running them concurrently avoids serial provider
-            # latency without weakening either veto.
+            # latency without weakening known-risk vetoes.
             validation=price_integrity.check(coin)
             safety=rug_guard.check(coin)
             price_review=(
@@ -1387,12 +1391,32 @@ class Monitor:
                 entry_policy.record(report,[validation.get('reason') or 'price_unavailable'],coin,validation)
                 continue
             if safety.get('status')!='pass':
-                entry_policy.record(report, safety.get('reasons') or ['risk_check_pending'], coin)
-                continue
+                # PAPER-only provisional scout: if the full third-party report is
+                # merely pending/unavailable, ULTRA_EARLY may proceed only after a
+                # direct on-chain mint/freeze/extensions check. A real full-guard
+                # block is never overridden.
+                if (
+                    entry_mode == 'ULTRA_EARLY'
+                    and safety.get('status') in {'pending','unavailable'}
+                ):
+                    fast_safety = rug_guard.fast_chain_check(coin)
+                    if fast_safety.get('status') == 'pass':
+                        fast_safety = dict(fast_safety)
+                        fast_safety['full_guard_at_entry'] = safety
+                        safety = fast_safety
+                    else:
+                        entry_policy.record(
+                            report,
+                            fast_safety.get('reasons') or ['risk_check_pending'],
+                            coin,
+                        )
+                        continue
+                else:
+                    entry_policy.record(report, safety.get('reasons') or ['risk_check_pending'], coin)
+                    continue
             if report['quoted'] >= entry_policy.MAX_QUOTED_CANDIDATES:
                 entry_policy.record(report, ['quote_budget'], coin)
                 continue
-            entry_mode = order_flow.entry_mode(coin, flow, context) or 'EARLY'
             strategy_id = 'ORDER_FLOW_EARLY_ADAPTIVE'
             learning = adaptive_profile({
                 'strategy_id': strategy_id, 'entry_mode': entry_mode,
@@ -1422,6 +1446,8 @@ class Monitor:
             # position's planned loss before sizing another one.
             open_planned_risk=sum(num(p.get('planned_risk_usd')) for p in STATE.positions)
             requested_notional = early_requested_notional(coin, learning)
+            if safety.get('provisional_early'):
+                requested_notional = min(requested_notional, 25.0)
             notional = runtime.plan_notional(
                 requested_notional,available_before,MAX_DAILY_LOSS_USD,
                 STATE.risk_day_pnl()-open_planned_risk,
@@ -1523,6 +1549,7 @@ class Monitor:
                     'current_price': price, 'peak_price': price,
                     'trade_no': STATE.trade_seq, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
                     'entry_mode': entry_mode,
+                    'provisional_early_safety': bool(safety.get('provisional_early')),
                     'learning_mode': 'EARLY_SIZE_LEARNING+ADAPTIVE_CONTEXT_HOLD', 'entry_flow': flow,
                     'entry_context': context, 'entry_conviction': context.get('conviction'),
                     'entry_hold_mode': context.get('mode'), 'learning_sample': learning['sample'],
