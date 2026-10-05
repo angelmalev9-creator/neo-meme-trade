@@ -30,7 +30,9 @@ POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '0.5'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 90
 ENTRY_SCORE = 60.0
-MAX_POSITIONS = 8
+MAX_POSITIONS = max(1, int(os.getenv('NEO_MAX_POSITIONS', '16')))
+WIN_REENTRY_SECONDS = max(0, int(float(os.getenv('NEO_WIN_REENTRY_SECONDS', '120'))))
+LOSS_REENTRY_SECONDS = max(WIN_REENTRY_SECONDS, int(float(os.getenv('NEO_LOSS_REENTRY_SECONDS', '300'))))
 STOP_LOSS_PCT = 5.0
 STOP_EXECUTION_BUFFER_PCT = 0.5  # Planned risk allowance, never a fill clamp.
 STOP_EXECUTION_ARM_NET_PCT = 5.0
@@ -52,9 +54,9 @@ MAX_DRAWDOWN_PCT = float(os.getenv('NEO_MAX_DRAWDOWN_PCT', '0'))
 MIN_LIQUIDITY_USD = 10000.0
 
 # One validated effective threshold object governs every EARLY signal call.
-STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '58'))
-STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '30'))
-STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '4000'))
+STRICT_ENTRY_SCORE = float(os.getenv('NEO_STRICT_ENTRY_SCORE', '40'))
+STRICT_MIN_CONVICTION = float(os.getenv('NEO_STRICT_MIN_CONVICTION', '22'))
+STRICT_MIN_LIQUIDITY_USD = float(os.getenv('NEO_STRICT_MIN_LIQUIDITY_USD', '3000'))
 STRICT_MAX_ENTRY_IMPACT_PCT = float(os.getenv('NEO_STRICT_MAX_ENTRY_IMPACT_PCT', '1.75'))
 STRICT_MAX_ROUNDTRIP_COST_PCT = float(os.getenv('NEO_STRICT_MAX_ROUNDTRIP_COST_PCT', '2.75'))
 STRICT_MAX_WORST_CASE_COST_PCT = float(os.getenv('NEO_STRICT_MAX_WORST_CASE_COST_PCT', '4.0'))
@@ -82,7 +84,7 @@ SOL_MINT = 'So11111111111111111111111111111111111111112'
 _SOL_USD_CACHE = {'price': 0.0, 'ts': 0}
 _SOL_USD_LOCK = threading.Lock()
 GECKO_NEW_POOLS_URL = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1'
-GECKO_NEW_POOLS_TTL_MS = 15_000
+GECKO_NEW_POOLS_TTL_MS = 5_000
 _GECKO_NEW_POOLS_CACHE = {'ts': 0, 'pairs': []}
 _GECKO_NEW_POOLS_LOCK = threading.Lock()
 
@@ -717,30 +719,64 @@ def effective_config_hash():
     return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
 
 
+def adaptive_scout_profile(entry_mode: str) -> dict[str, Any]:
+    """Learn from the main PAPER journal by changing size, never by stopping samples."""
+    similar = [
+        trade for trade in STATE.history[:LEARNING_WINDOW]
+        if str(trade.get('entry_mode') or '') == str(entry_mode or '')
+        and math.isfinite(num(trade.get('pnl_pct'), math.nan))
+    ][:30]
+    count = len(similar)
+    wins = sum(num(trade.get('pnl_pct')) > 0 for trade in similar)
+    avg_pct = sum(num(trade.get('pnl_pct')) for trade in similar) / count if count else 0.0
+    win_rate = wins / count * 100 if count else 0.0
+    recent_losses = sum(num(trade.get('pnl_pct')) <= 0 for trade in similar[:5])
+
+    # Keep trading to gather evidence; repeated mistakes only shrink the next scouts.
+    size_multiplier = 1.0
+    if count >= 4 and recent_losses >= 4:
+        size_multiplier = 0.45
+    elif count >= 5 and win_rate < 35 and avg_pct < 0:
+        size_multiplier = 0.60
+    elif count >= 5 and avg_pct < 0:
+        size_multiplier = 0.75
+    elif count >= 8 and win_rate >= 60 and avg_pct > 0.5:
+        size_multiplier = 1.10
+
+    return {
+        'sample': count, 'wins': wins, 'win_rate': round(win_rate, 1),
+        'avg_pnl_pct': round(avg_pct, 3), 'profit_factor': None,
+        'recent_losses': recent_losses, 'size_multiplier': round(size_multiplier, 2),
+        'bonus': round((size_multiplier - 1.0) * 100, 1),
+    }
+
+
 def early_requested_notional(coin: dict[str, Any], learning: dict[str, Any]) -> float:
-    """Use smaller scouts in thin/very-new pools so $200 impact does not kill entries."""
+    """Prefer many cheap scouts over a few $200 bets, especially in newborn pools."""
     liquidity = num(coin.get('liquidityUsd'))
     age = num(coin.get('ageMinutes'), 999999)
-    if liquidity < 8000:
-        base = 35.0
+    if liquidity < 5000:
+        base = 12.0
+    elif liquidity < 8000:
+        base = 15.0
     elif liquidity < 15000:
-        base = 50.0
+        base = 20.0
     elif liquidity < 30000:
-        base = 75.0
+        base = 30.0
     elif liquidity < 60000:
-        base = 100.0
+        base = 45.0
     elif liquidity < 120000:
-        base = 150.0
+        base = 65.0
     else:
-        base = TRADE_NOTIONAL_USD
+        base = min(TRADE_NOTIONAL_USD, 90.0)
 
-    if age <= 15:
-        base *= 0.70
-    elif age <= 45:
-        base *= 0.85
+    if age <= 5:
+        base *= 0.80
+    elif age <= 15:
+        base *= 0.90
 
     base *= num(learning.get('size_multiplier'), 1.0)
-    return round(max(25.0, min(TRADE_NOTIONAL_USD, base)), 2)
+    return round(max(10.0, min(TRADE_NOTIONAL_USD, 100.0, base)), 2)
 
 def _iso_ms(value: Any) -> int:
     try:
@@ -1071,14 +1107,14 @@ class Monitor:
         self.position_lock = threading.Lock()
         self.position_poll_lock = threading.Lock()
         self.entry_lock = threading.Lock()
-        self.discovery = runtime.DiscoveryCache(discover, refresh_seconds=8, max_age_seconds=90)
+        self.discovery = runtime.DiscoveryCache(discover, refresh_seconds=4, max_age_seconds=60)
 
     def prewarm_entry_checks(self, feed: list[dict[str, Any]]) -> None:
         """Warm only the most time-sensitive candidates; avoid provider queues."""
         candidates = []
         for coin in feed:
             age = num(coin.get('ageMinutes'), 999999)
-            if num(coin.get('score')) < 60 or num(coin.get('liquidityUsd')) < 4000 or age > 360:
+            if num(coin.get('score')) < STRICT_ENTRY_SCORE or num(coin.get('liquidityUsd')) < STRICT_MIN_LIQUIDITY_USD or age > 360:
                 continue
             tx = (coin.get('txns') or {}).get('m5') or {}
             activity = num(tx.get('buys')) + num(tx.get('sells'))
@@ -1090,7 +1126,7 @@ class Monitor:
             )
             candidates.append((priority, coin))
         candidates.sort(key=lambda row: row[0], reverse=True)
-        for _, coin in candidates[:4]:
+        for _, coin in candidates[:8]:
             price_integrity.check(coin)
             rug_guard.check(coin)
 
