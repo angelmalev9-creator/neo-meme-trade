@@ -7,7 +7,7 @@ import fcntl,json,math,os,re,threading,time
 from pathlib import Path
 import requests
 
-VERSION='PRICE_CROSSCHECK_V3'
+VERSION='PRICE_CROSSCHECK_V4'
 ROOT=Path(os.getenv('NEO_PRICE_CHECK_DIR','/var/lib/neo-market/price-crosscheck'))
 ADDRESS=re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 TTL_MS=30_000
@@ -53,7 +53,8 @@ def validate(coin,ref,stamp=None):
 def jupiter_tiebreak(validation,jupiter_entry_price):
  observed=num(validation.get('observed_price')); jupiter=num(jupiter_entry_price)
  if validation.get('status')!='review' or validation.get('reason') not in {
-  'price_source_disagreement_needs_jupiter','price_unavailable_needs_jupiter'
+  'price_source_disagreement_needs_jupiter','price_unavailable_needs_jupiter',
+  'price_crosscheck_pending_needs_jupiter'
  }:
   return validation
  if observed<=0 or jupiter<=0:
@@ -109,4 +110,11 @@ def check(coin):
    if f.done():PENDING.pop(k,None)
   if (mint,pair) not in PENDING and len(PENDING)<12:
    PENDING[(mint,pair)]=POOL.submit(_fetch,mint,pair)
- return {'status':'pending','reason':'price_crosscheck_pending'}
+ observed=num(coin.get('priceUsd'))
+ if observed<=0:
+  return {'status':'blocked','reason':'price_unavailable'}
+ return {'status':'review','reason':'price_crosscheck_pending_needs_jupiter',
+         'version':VERSION,'observed_price':observed,'reference_price':None,
+         'reference_received_at':None,
+         'source':'GeckoTerminal pending; Jupiter exact-pool confirmation required',
+         'pair':pair,'mint':mint}
