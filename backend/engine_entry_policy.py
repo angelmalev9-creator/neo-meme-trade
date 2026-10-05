@@ -18,7 +18,6 @@ LABELS = {
     'risk_budget_unavailable': 'недостатъчен оставащ дневен бюджет за минималната позиция',
     'gold_signal': 'не покрива оригиналния Order Flow сигнал',
     'price_crosscheck_pending': 'проверка на цената от втори източник',
-    'price_crosscheck_pending_needs_jupiter': 'вторият източник още се зарежда — изисква exact-pool Jupiter потвърждение',
     'price_reference_expired': 'ценовата проверка е остаряла',
     'price_source_disagreement': 'силно несъответствие между ценовите източници',
     'price_source_disagreement_needs_jupiter': 'умерено ценово разминаване — чака Jupiter потвърждение',
