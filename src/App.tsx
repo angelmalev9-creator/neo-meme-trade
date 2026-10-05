@@ -104,31 +104,59 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const load = async () => {
+    let retryTimer: number | undefined;
+    let pollTimer: number | undefined;
+
+    try {
+      const cached = sessionStorage.getItem('neo-live-state-v1');
+      if (cached) {
+        const parsed = JSON.parse(cached) as { savedAt: number; state: MonitorState };
+        if (Date.now() - parsed.savedAt < 15_000) setState(parsed.state);
+      }
+    } catch { /* cache is optional */ }
+
+    const load = async (attempt = 0) => {
       try {
         if (!supabase) throw new Error('Supabase unavailable');
         const { data: { session } } = await supabase.auth.getSession();
         const token = session?.access_token;
         if (!token) throw new Error('Session expired');
 
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 2500);
         const response = await fetch(`${API}/user/state`, {
           cache: 'no-store',
+          signal: controller.signal,
           headers: { Authorization: `Bearer ${token}` },
-        });
+        }).finally(() => window.clearTimeout(timeout));
         if (!response.ok) throw new Error(`Backend HTTP ${response.status}`);
         const next = await response.json() as MonitorState;
         if (cancelled) return;
         setState(next);
         setError('');
-        if (!selectedAddress && next.feed[0]) setSelectedAddress(next.feed[0].address);
+        try {
+          sessionStorage.setItem('neo-live-state-v1', JSON.stringify({ savedAt: Date.now(), state: next }));
+        } catch { /* cache is optional */ }
+        setSelectedAddress(current => current || next.feed[0]?.address || '');
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Backend unavailable');
+        if (cancelled) return;
+        if (attempt < 3) {
+          const delays = [150, 300, 700];
+          retryTimer = window.setTimeout(() => void load(attempt + 1), delays[attempt]);
+          return;
+        }
+        setError(err instanceof Error ? err.message : 'Backend unavailable');
       }
     };
+
     void load();
-    const timer = window.setInterval(load, 5000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [selectedAddress, refreshTick]);
+    pollTimer = window.setInterval(() => void load(), 2000);
+    return () => {
+      cancelled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+      if (pollTimer) window.clearInterval(pollTimer);
+    };
+  }, [refreshTick]);
 
   useEffect(() => {
     if (!selectedAddress) return;
