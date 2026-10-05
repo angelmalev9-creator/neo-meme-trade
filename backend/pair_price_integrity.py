@@ -7,7 +7,7 @@ import fcntl,json,math,os,re,threading,time
 from pathlib import Path
 import requests
 
-VERSION='PRICE_CROSSCHECK_V2'
+VERSION='PRICE_CROSSCHECK_V3'
 ROOT=Path(os.getenv('NEO_PRICE_CHECK_DIR','/var/lib/neo-market/price-crosscheck'))
 ADDRESS=re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 TTL_MS=30_000
@@ -30,7 +30,13 @@ def validate(coin,ref,stamp=None):
  if not 0<=stamp-int(ref.get('received_at',0))<=TTL_MS:
   return {'status':'pending','reason':'price_reference_expired'}
  price=num(coin.get('priceUsd')); other=num(ref.get('price_usd'))
- if price<=0 or other<=0:return {'status':'blocked','reason':'price_unavailable'}
+ if price<=0:return {'status':'blocked','reason':'price_unavailable'}
+ if other<=0:
+  return {'status':'review','reason':'price_unavailable_needs_jupiter',
+          'version':VERSION,'observed_price':price,'reference_price':None,
+          'reference_received_at':ref.get('received_at'),
+          'source':'GeckoTerminal unavailable; Jupiter exact-pool confirmation required',
+          'pair':ref.get('pair'),'mint':ref.get('mint')}
  divergence=abs(price/other-1)*100
  if divergence<=MAX_DIVERGENCE_PCT:
   status,reason='pass',''
@@ -46,7 +52,9 @@ def validate(coin,ref,stamp=None):
 
 def jupiter_tiebreak(validation,jupiter_entry_price):
  observed=num(validation.get('observed_price')); jupiter=num(jupiter_entry_price)
- if validation.get('status')!='review' or validation.get('reason')!='price_source_disagreement_needs_jupiter':
+ if validation.get('status')!='review' or validation.get('reason') not in {
+  'price_source_disagreement_needs_jupiter','price_unavailable_needs_jupiter'
+ }:
   return validation
  if observed<=0 or jupiter<=0:
   return {**validation,'status':'blocked','reason':'price_tiebreak_failed'}
