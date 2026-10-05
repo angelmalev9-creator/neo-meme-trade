@@ -1,55 +1,85 @@
 {
-  "name": "NEO Meme Coins GOLD strategy",
-  "locked_at_utc": "2026-10-05T05:31:00Z",
-  "source_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
+  "name": "NEO Meme Coins EARLY Order Flow paper strategy",
+  "locked_at_utc": "2026-10-05T16:35:00Z",
+  "source_commit": "USER_UNLOCKED_EARLY_ORDER_FLOW_20261005",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "4a5aa1c94a8b6c4fbfbb5a66cebef69d4a68434784a11aaa55be530996a3c67c",
-  "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
+  "sha256": "2a8ccffe4b216db0ec42f91c33ae1eafcb1689fd60e829549459dd610175a1a4",
+  "production_strategy_id": "ORDER_FLOW_EARLY_ADAPTIVE",
   "rules": {
-    "entry_score": 85,
-    "max_positions": 5,
+    "entry_score": 65,
+    "max_positions": 8,
     "stop_loss_pct": 5,
     "take_profit_pct": 10,
     "trailing_pct": 4,
     "max_hold_minutes": 60,
     "starting_balance_usd": 1000,
-    "trade_notional_usd": 200,
+    "trade_notional_usd_max": 200,
+    "early_trade_notional_usd_range": [
+      25,
+      200
+    ],
     "max_daily_loss_usd": 0,
-    "min_liquidity_usd": 10000
+    "min_liquidity_usd": 4000
   },
-  "policy": "Do not modify the production strategy file or trading rules without an explicit user request to unlock the GOLD strategy.",
-  "integrity_note": "ORDER FLOW and adaptive hold unchanged. Entry data checks now start concurrently to avoid serial provider latency. Missing GeckoTerminal prices still require exact-pool Jupiter confirmation; SOL/USD network costs use cached live DexScreener SOL pricing. Rug, impact and round-trip safety vetoes remain mandatory. Stop execution remains direct PumpSwap reserve marks with absolute -5% PAPER accounting cap. No reset/history rewrite.",
+  "policy": "User explicitly unlocked the strategy on 2026-10-05 to favor many early PAPER entries and learning from outcomes. Do not switch this PAPER strategy to real-money execution without a separate explicit request.",
+  "integrity_note": "High-frequency PAPER mode: 30-second flow, ULTRA_EARLY/EARLY/MOMENTUM entry tiers, up to 8 positions, liquidity-aware $25-$200 scout sizing, history-based size reduction after repeated losing setups, faster discovery/tape polling, prewarmed safety checks, exact-pool Jupiter price confirmation, mandatory rug vetoes, and absolute -5% PAPER stop accounting. Existing state/history must not be reset.",
   "execution_mode": "JUPITER_QUOTE_V2_EXPECTED",
-  "entry_policy_version": "ORDER_FLOW_GOLD_SIGNAL_VERIFIED_V7",
+  "entry_policy_version": "ORDER_FLOW_EARLY_LEARNER_V8",
   "entry_policy_limits": {
-    "min_score": 85,
-    "min_conviction": 75,
-    "min_liquidity_usd": 10000,
-    "min_m5_pct": -5,
-    "max_m5_pct": 25,
-    "min_flow_trades": 3,
-    "flow_ratio": 1.3,
-    "original_cooldown_seconds": 1200,
-    "risk_overlay": "USER_NET_5_10_DYNAMIC_STOP"
+    "ultra_early": {
+      "max_age_minutes": 45,
+      "min_score": 65,
+      "min_liquidity_usd": 4000,
+      "min_flow_trades": 1,
+      "min_flow_ratio": 1.05,
+      "min_conviction": 35
+    },
+    "early": {
+      "max_age_minutes": 180,
+      "min_score": 70,
+      "min_liquidity_usd": 5000,
+      "min_flow_trades": 2,
+      "min_flow_ratio": 1.1,
+      "min_conviction": 45
+    },
+    "momentum": {
+      "min_score": 78,
+      "min_liquidity_usd": 7500,
+      "min_flow_trades": 3,
+      "min_flow_ratio": 1.2,
+      "min_conviction": 55
+    },
+    "max_entry_impact_pct": 1.75,
+    "max_roundtrip_cost_pct": 2.75,
+    "max_worst_case_cost_pct": 4,
+    "reentry_cooldown_seconds": 1200,
+    "risk_overlay": "USER_NET_5_HARD_CAP"
   },
   "support_files_sha256": {
-    "backend/engine_entry_policy.py": "f8c3873402fc8bfade20ce772a1a7739683316b32b5cf7d11b3c24fd50e33050",
+    "backend/engine_entry_policy.py": "ef9bcecd56b08944cf51f8175e06fbb62940d19e7836f1df866423c57b8c711d",
     "backend/paper_execution_quotes.py": "93fd07ba67904f6cdbf5497cc7c0587f6240e49c4de2d2276c9b68178790958b",
     "backend/engine_rug_guard.py": "871d62ea0769d3d6d34eb0f4d1032dc822bae0134c5fb5506ceec60591e9cc0e",
     "backend/engine_execution.py": "e7f7f2dc403c6bfd6d99b0935b29cc76c8ca8f8b9dcc5f25a7f2cee5a58b0ae7",
-    "backend/gold_order_flow.py": "0ebf8f3bf34c85b376fda1e2fb97bdafa3a0ad6d667b0e7c92f54fd4e95be36b",
+    "backend/gold_order_flow.py": "08ec912fcd808bcb93c84e87b015dc41526b705879d331b005b336b49ea46fce",
     "backend/honest_quote_transport.py": "bd5868c186bdc64f708012df31f18f505fa55dc6ecc48478468728bd59b9eabd",
-    "backend/pair_price_integrity.py": "b21cbb7882749b71ab974dc38a38c1b8f937d6fd180779af4adfa65e7689db09",
+    "backend/pair_price_integrity.py": "a92e8fffb95949982321dc1f67d77484415cc037cadd9e1d318a6f0ed444463b",
     "backend/engine_runtime.py": "7aaf03b854d032a4a6b5e840c95d1a7eaae9239007d03e15e90f1d59d55e2c66",
-    "backend/pumpswap_stop_quote.py": "0b782ffc6e2984e1d86127c16ed09539f66dc3ef9644a0d2304d291643311d8b"
+    "backend/pumpswap_stop_quote.py": "0b782ffc6e2984e1d86127c16ed09539f66dc3ef9644a0d2304d291643311d8b",
+    "backend/live_tape.py": "2884d509b8aad870d8a382b58b7ea43c55d6f5e55fec7533d8d97e75fd913c18"
   },
   "runtime_version": "RUNTIME_REPAIR_V1",
-  "runtime_note": "Up to five concurrent paper positions. $200 remains the per-position cap. Daily loss cap is disabled for the ongoing PAPER test; accumulated PnL/history are preserved.",
+  "runtime_note": "Up to 8 concurrent PAPER positions. $200 is a maximum, not a fixed size: thin/very-new pools use $25-$150 scouts so high-frequency learning is not blocked by $200 price impact. Daily loss cap remains disabled for this ongoing PAPER experiment; history/state are preserved.",
   "stop_execution_mode": "PUMPSWAP_RPC_RESERVES_V2_WITH_PAPER_5_PCT_CAP",
   "stop_execution_note": "Execution-only change: PumpSwap exits use batched direct Solana reserve marks with Jupiter fallback; -4% net pre-arm and an absolute -5% PAPER accounting cap preserve observed gap quotes for audit. Entry, ORDER FLOW signal, adaptive hold and history are unchanged.",
   "entry_data_fallbacks": {
-    "missing_reference_price": "EXACT_POOL_JUPITER_CONFIRMATION_REQUIRED",
+    "missing_or_pending_reference_price": "EXACT_POOL_JUPITER_CONFIRMATION_REQUIRED",
     "sol_usd_for_costs": "DEXSCREENER_SOL_MARKET_60S_CACHE",
-    "strategy_changed": false
+    "prewarm_safety_checks": true,
+    "strategy_changed": true
+  },
+  "learning": {
+    "mode": "SIZE_NOT_ENTRY_VETO",
+    "window_trades": 60,
+    "behavior": "Repeated losing comparable setups continue trading at smaller size instead of being disabled."
   }
 }
