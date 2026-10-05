@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+from engine_runtime import atomic_json
 
 HOST = os.getenv("NEO_USER_GATEWAY_HOST", "127.0.0.1")
 PORT = int(os.getenv("NEO_USER_GATEWAY_PORT", "8789"))
@@ -65,12 +66,12 @@ def load_store():
         if not STORE_PATH.exists():
             return {"accounts": {}}
         data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return {"accounts": {}}
+        if not isinstance(data, dict) or not isinstance(data.get('accounts', {}), dict):
+            raise ValueError('invalid account store schema')
         data.setdefault("accounts", {})
         return data
-    except Exception:
-        return {"accounts": {}}
+    except Exception as exc:
+        raise RuntimeError('Account registry unreadable; refusing silent account reset') from exc
 
 
 STORE = load_store()
@@ -78,9 +79,7 @@ STORE = load_store()
 
 def save_store():
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STORE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(STORE, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    tmp.replace(STORE_PATH)
+    atomic_json(STORE_PATH, STORE)
 
 
 def verify_user(headers):
@@ -182,17 +181,11 @@ def build_bootstrap_state(user, account, raw):
     if isinstance(legacy_history, list) and legacy_history:
         history = copy.deepcopy(legacy_history)
     else:
-        history = [
-            copy.deepcopy(trade)
-            for trade in (raw.get("history") or [])
-            if int(trade.get("opened_at") or 0) >= started_at
-        ]
+        history = []
 
-    positions = [
-        copy.deepcopy(position)
-        for position in (raw.get("positions") or [])
-        if int(position.get("opened_at") or 0) >= started_at
-    ]
+    # A fresh personal account owns no central positions or central profits.
+    # Explicit legacy personal state may be migrated without borrowing another book.
+    positions = copy.deepcopy(account.get('positions') or [])
     events = [
         copy.deepcopy(event)
         for event in (raw.get("events") or [])
@@ -215,7 +208,7 @@ def build_bootstrap_state(user, account, raw):
     sid = f"USER-{str(user['id'])[:8]}-{str(started_at)[-6:]}"
     return {
         "positions": positions[-20:],
-        "history": history[:300],
+        "history": history,
         "events": events[:100],
         "demo_starting_balance_usd": STARTING_BALANCE,
         "demo_balance_usd": round(balance, 8),
@@ -233,7 +226,7 @@ def bootstrap_if_needed(user, account):
     raw = central_state()
     state_path.parent.mkdir(parents=True, exist_ok=True)
     bootstrap = build_bootstrap_state(user, account, raw)
-    state_path.write_text(json.dumps(bootstrap, ensure_ascii=False), encoding="utf-8")
+    atomic_json(state_path, bootstrap)
     account["migrated_to_independent_engine_at"] = now_ms()
     account["started_at"] = bootstrap["demo_started_at"]
     account["balance"] = bootstrap["demo_balance_usd"]
@@ -269,6 +262,9 @@ def start_engine(user, account):
         "NEO_MARKET_AUDIT_PATH": str(engine_audit_path(user_id)),
         "NEO_LIVE_TAPE_PATH": LIVE_TAPE_PATH,
         "NEO_STRATEGY_LAB_PATH": STRATEGY_LAB_PATH,
+        "NEO_EXECUTION_MODE": "PAPER",
+        "NEO_ENGINE_MODE": "PAPER",
+        "NEO_TRAINING_ROOT": str(engine_dir(user_id) / 'training'),
     })
 
     engine_dir(user_id).mkdir(parents=True, exist_ok=True)
@@ -311,7 +307,7 @@ def proxy_user_engine(user, method, path):
             "user_id": str(user["id"]),
             "isolated": True,
             "independent_engine": True,
-            "strategy": "ORDER_FLOW_ADAPTIVE",
+            "strategy": (data.get('config') or {}).get('signal_strategy', 'UNKNOWN'),
         }
     return data
 
@@ -386,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "isolated_accounts": True,
                 "independent_engines": True,
-                "strategy_file_untouched": True,
+                "engine_scope": "INDEPENDENT_PAPER",
             })
             return
 

@@ -8,7 +8,7 @@ import math
 import re
 from typing import Any
 
-POLICY_VERSION = 'ORDER_FLOW_EARLY_LEARNER_V8'
+POLICY_VERSION = 'ORDER_FLOW_VALIDATED_THRESHOLDS_V9'
 import gold_order_flow
 MAX_FEED_AGE_MS = 30_000
 MAX_ENTRY_QUOTE_AGE_MS = 10_000
@@ -17,6 +17,11 @@ _ADDRESS = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 LABELS = {
     'risk_budget_unavailable': 'недостатъчен оставащ дневен бюджет за минималната позиция',
     'gold_signal': 'няма достатъчно ранен buy-flow импулс',
+    'flow_quality': 'непълен или забавен проверен order flow',
+    'audit_pending': 'непотвърден траен audit запис; изчаква повторен запис',
+    'liquidation_unavailable': 'неизвестна ликвидационна оценка на отворена позиция',
+    'drawdown_limit': 'достигнат максимален drawdown',
+    'stale_signal': 'входният сигнал е остарял по време на изпълнението',
     'price_crosscheck_pending': 'проверка на цената от втори източник',
     'price_crosscheck_pending_needs_jupiter': 'вторият източник се зарежда — exact-pool Jupiter потвърждение',
     'price_reference_expired': 'ценовата проверка е остаряла',
@@ -91,13 +96,16 @@ def number(value: Any, default: float = 0.0) -> float:
 
 def signal_rejections(coin, flow, context, *, min_score, min_liquidity,
                       min_conviction, now):
+    thresholds = gold_order_flow.EntryThresholds(min_score, min_liquidity, min_conviction)
     reasons=[]
     if not _ADDRESS.fullmatch(str(coin.get('address') or '')) or not _ADDRESS.fullmatch(str(coin.get('pairAddress') or '')):
         reasons.append('invalid_pair')
     if number(coin.get('priceUsd'))<=0: reasons.append('invalid_price')
     observed=number(coin.get('updatedAt'))
     if not observed or not 0<=now-observed<=MAX_FEED_AGE_MS:reasons.append('stale_feed')
-    if not gold_order_flow.qualifies(coin,flow,context):reasons.append('gold_signal')
+    if str(flow.get('quality', flow.get('status', 'UNKNOWN'))).upper() not in {'GOOD', 'COMPLETE', 'HEALTHY', 'VALID'}:
+        reasons.append('flow_quality')
+    if not gold_order_flow.qualifies(coin,flow,context,thresholds):reasons.append('gold_signal')
     return reasons
 
 
@@ -134,7 +142,7 @@ def finish(report):
         report['message'] = 'Отворена е нова тестова позиция след проверка на котировките и разходите.'
     elif 'position_open' in counts:
         report['status'] = 'position_open'
-        report['message'] = 'Следи отворената позиция. Не отваря втора едновременно.'
+        report['message'] = f"Достигнат е лимитът от {report.get('max_positions', '?')} едновременни PAPER позиции; изходите продължават."
     elif 'daily_limit' in counts:
         report['status'] = 'daily_limit'
         report['message'] = 'Дневният лимит е достигнат. Новите входове са спрени.'

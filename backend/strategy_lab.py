@@ -99,13 +99,13 @@ def exit_execution(c,qty):
             'gross_proceeds_usd':gross,'dex_fee_usd':dex_fee,'net_proceeds_usd':net}
 
 def load_json(path,default):
-    try: return json.loads(path.read_text())
+    try: return json.loads(path.read_text(encoding='utf-8'))
     except Exception: return default
 
 def atomic_write_path(path,data):
     path.parent.mkdir(parents=True,exist_ok=True)
     tmp=path.with_suffix(path.suffix+'.tmp')
-    tmp.write_text(json.dumps(data,ensure_ascii=False))
+    tmp.write_text(json.dumps(data,ensure_ascii=False),encoding='utf-8')
     tmp.replace(path)
 
 def atomic_write(data):
@@ -200,7 +200,8 @@ def load_state():
             'activity_version':raw.get('activity_version'),
             'activity_started_at':raw.get('activity_started_at')}
 
-STATE=load_state()
+STATE={'started_at':now_ms(),'updated_at':now_ms(),'status':'starting',
+       'books':{s['id']:empty_book(s) for s in STRATEGIES}}
 if STATE.get('activity_version')!=activity.POLICY_VERSION:
     STATE['activity_version']=activity.POLICY_VERSION
     STATE['activity_started_at']=now_ms()
@@ -243,7 +244,7 @@ def close_position(book,pos,coin,reason):
            'exit_price_impact_pct':round(quote['impact_pct'],4),
            'exit_slippage_pct':round(quote['slippage_pct']+quote['latency_pct'],4),
            'execution_mode':'REALISTIC_COSTS_V1'}
-    book['history'].insert(0,trade); book['history']=book['history'][:300]; book['position']=None
+    book['history'].insert(0,trade); book['position']=None
 
 def realize_partial(book,pos,coin,fraction,label):
     market_price=num(coin.get('priceUsd'))
@@ -395,7 +396,9 @@ def stats(book):
     partial_count=sum(len(t.get('partial_exits') or []) for t in h)+len((p or {}).get('partial_exits') or [])
     locked_partial=sum(num(t.get('partial_realized_pnl')) for t in h)+num((p or {}).get('partial_realized_pnl'))
     return {'trades':len(h),'wins':len(wins),'losses':len(h)-len(wins),'win_rate':round(len(wins)/len(h)*100,1) if h else 0,
-            'profit_factor':round(gp/gl,2) if gl>0 else (99.0 if gp>0 else 0.0),'realized_pnl':round(num(book.get('balance'))-start,2),
+            'profit_factor':round(gp/gl,2) if gl>0 else None,
+            'profit_factor_status':'finite' if gl>0 else ('infinite_no_losses' if gp>0 else 'undefined_no_results'),
+            'realized_pnl':round(num(book.get('balance'))-start,2),
             'equity':round(equity,2),'return_pct':round((equity-start)/max(start,1e-18)*100,2),'open':bool(p),
             'partial_exits':partial_count,'partial_locked_pnl':round(locked_partial,2),
             'active_policy_trades':sum(t.get('entry_policy_version')==activity.POLICY_VERSION for t in h),
@@ -414,6 +417,11 @@ def persist(status='online',error=None):
     atomic_write_path(COMPACT_PATH,compact_strategy_lab(published))
 
 def main():
+    global STATE
+    STATE=load_state()
+    if STATE.get('activity_version')!=activity.POLICY_VERSION:
+        STATE['activity_version']=activity.POLICY_VERSION
+        STATE['activity_started_at']=now_ms()
     last_entry=0
     while True:
         started=time.time()

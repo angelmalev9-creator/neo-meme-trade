@@ -1,4 +1,5 @@
 import LabPairedPanel, { type LabPairedSnapshot } from './components/LabPairedPanel';
+import PaperTrainingPanel, { type PaperTrainingSnapshot } from './components/PaperTrainingPanel';
 import AstraBrainPanel, { type AstraSnapshot } from './components/AstraBrainPanel';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -42,7 +43,7 @@ type Position = {
 type PricePoint = { ts: number; price: number; liquidity: number; volumeH1: number; score: number };
 type LabPosition = { symbol: string; address: string; strategy_id: string; opened_at: number; pnl_pct: number; notional_usd: number };
 type LabBook = { id: string; name: string; starting_balance: number; balance: number; position: LabPosition | null; history: Position[] };
-type LabStats = { trades: number; wins: number; losses: number; win_rate: number; profit_factor: number; realized_pnl: number; equity: number; return_pct: number; open: boolean };
+type LabStats = { trades: number; wins: number; losses: number; win_rate: number; profit_factor: number | null; realized_pnl: number; equity: number; return_pct: number; open: boolean };
 type StrategyLab = { paired?: LabPairedSnapshot; astra?: AstraSnapshot; status: string; updated_at: number; started_at: number; books: Record<string, LabBook>; stats: Record<string, LabStats>; error?: string };
 type LiveTrade = { ts: number; direction: 'BUY' | 'SELL'; token_amount: number; usd_amount: number; wallet: string; note: string; address: string; pairAddress: string; symbol: string; signature: string; slot: number };
 type FlowStats = { seconds: number; trades: number; buys: number; sells: number; buy_usd: number; sell_usd: number; buy_sell_usd_ratio: number; unique_wallets: number; max_buy_usd: number; max_sell_usd: number };
@@ -54,6 +55,7 @@ type MonitorState = {
   source_status: Record<string, string>;
   live_tape: LiveTrade[]; live_tape_status: TapeStatus;
   strategy_lab: StrategyLab;
+  paper_training?: PaperTrainingSnapshot;
   stats: { feed_count: number; open_positions: number; closed_trades: number; wins: number; win_rate: number; realized_today_usd: number; demo_starting_balance_usd: number; demo_balance_usd: number; demo_equity_usd: number; demo_available_usd: number; demo_reserved_usd: number; unrealized_pnl_usd: number; realized_total_usd: number; return_pct: number; demo_started_at: number; demo_session_id: string };
   config: { signal_strategy?: string; risk_overlay?: string; execution_verification_version?: string; scan_seconds: number; position_scan_seconds?: number; entry_score: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trailing_pct: number; max_hold_minutes: number; min_liquidity_usd: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number };
 };
@@ -361,7 +363,7 @@ export default function App() {
               <div className="mt-2 text-[8px] text-slate-600">Session {state?.stats.demo_session_id || '—'} · от {fullTimeLabel(state?.stats.demo_started_at || 0)}</div>
             </div>
             <div className="mt-2 grid grid-cols-2 gap-2"><div className="rounded-xl border border-white/[0.07] bg-black/20 p-3"><div className="text-[8px] font-black uppercase tracking-[0.12em] text-slate-700">Entry score</div><div className="mt-1 text-lg font-black text-white">{state?.config.entry_score ?? 75}+</div></div><div className="rounded-xl border border-white/[0.07] bg-black/20 p-3"><div className="text-[8px] font-black uppercase tracking-[0.12em] text-slate-700">Trade size</div><div className="mt-1 text-lg font-black text-white">${state?.config.trade_notional_usd ?? 100}</div></div></div>
-            <div className="mt-2 rounded-xl border border-white/[0.07] bg-white/[0.02] p-3 text-[9px] leading-4 text-slate-500">Hard SL {state?.config.stop_loss_pct ?? 8}% · TP {state?.config.take_profit_pct ?? 16}% · trailing {state?.config.trailing_pct ?? 6}% · max hold {state?.config.max_hold_minutes ?? 45}m · дневен лимит -${state?.config.max_daily_loss_usd ?? 30}</div>
+            <div className="mt-2 rounded-xl border border-white/[0.07] bg-white/[0.02] p-3 text-[9px] leading-4 text-slate-500">Планиран стоп {state?.config.stop_loss_pct ?? 5}% · TP {state?.config.take_profit_pct ?? 10}% · trailing {state?.config.trailing_pct ?? 4}% · max hold {state?.config.max_hold_minutes ?? 60}m · дневен лимит {state?.config.max_daily_loss_usd === 0 ? 'ИЗКЛЮЧЕН' : `-$${state?.config.max_daily_loss_usd ?? 0}`}. Gap или липсващ sell route могат да увеличат загубата отвъд стопа.</div>
             <div className="mt-3 flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-emerald-400/15 bg-emerald-400/[0.05] px-3 text-center text-[10px] font-black text-emerald-200"><ShieldCheck className="h-4 w-4" /> GOLD ENGINE СЕ УПРАВЛЯВА ЦЕНТРАЛНО</div>
             <div className="mt-3 text-[9px] leading-4 text-slate-600">{state?.message || 'Свързване с backend…'}</div>
           </div>
@@ -400,7 +402,7 @@ export default function App() {
                   <td className={`px-4 py-3 font-black ${pnl >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}<div className="mt-1 text-[9px]">{(st?.return_pct ?? 0) >= 0 ? '+' : ''}{(st?.return_pct ?? 0).toFixed(2)}%</div></td>
                   <td className="px-4 py-3 text-slate-400">{st?.trades ?? 0}<div className="mt-1 text-[9px] text-slate-700">{st?.wins ?? 0}W / {st?.losses ?? 0}L</div></td>
                   <td className="px-4 py-3 font-black text-white">{st?.trades ? `${st.win_rate.toFixed(1)}%` : '—'}</td>
-                  <td className="px-4 py-3 text-slate-300">{st?.trades ? (st.profit_factor >= 99 ? '∞' : st.profit_factor.toFixed(2)) : '—'}</td>
+                  <td className="px-4 py-3 text-slate-300">{st?.profit_factor != null ? st.profit_factor.toFixed(2) : st?.wins && !st.losses ? '∞ (няма загуби)' : '—'}</td>
                   <td className="px-4 py-3">{book.position ? <button onClick={() => setSelectedAddress(book.position!.address)} className="rounded-xl border border-cyan-400/15 bg-cyan-400/[0.05] px-3 py-2 text-left"><div className="font-black text-cyan-200">${book.position.symbol}</div><div className={`mt-1 text-[9px] font-black ${(book.position.pnl_pct || 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{(book.position.pnl_pct || 0) >= 0 ? '+' : ''}{(book.position.pnl_pct || 0).toFixed(2)}% · ${book.position.notional_usd.toFixed(0)}</div></button> : <span className="text-[9px] text-slate-700">чака setup</span>}</td>
                 </tr>
               })}
@@ -413,7 +415,7 @@ export default function App() {
         <div className="font-bold text-white">Order Flow · стратегията и изпълнението се проверяват отделно</div>
         <p>Сигнал: {state?.config.signal_strategy ?? 'Зареждане…'} · Стоп −{state?.config.stop_loss_pct ?? 3}% нето · Цел +{state?.config.take_profit_pct ?? 10}% нето.</p>
         <p>Цените по-долу са от симулираното изпълнение, когато са налични, а не от графиката. Котировката не е изпълнена транзакция. Мрежовите разходи и допълнителният буфер остават оценки.</p>
-        <p className="mt-1 text-amber-200">Старите резултати са запазени, но не са доказателство за реална доходност. Няма reset или връщане на отчетени загуби.</p>
+        <p className="mt-1 text-amber-200">При reset старата PAPER история се архивира и започва нова сесия. Архивните и симулираните резултати не доказват бъдеща доходност.</p>
       </section>
 
       <section className="mt-4 overflow-hidden rounded-3xl border border-white/10 bg-[#0b0e11]">
@@ -421,6 +423,7 @@ export default function App() {
         <div className="overflow-x-auto"><table className="w-full min-w-[1450px] text-left"><thead><tr className="border-b border-white/[0.06] text-[8px] font-black uppercase tracking-[0.14em] text-slate-700"><th className="px-4 py-3"># / Coin</th><th className="px-4 py-3">Вход време</th><th className="px-4 py-3">Симулиран вход</th><th className="px-4 py-3">Изход време</th><th className="px-4 py-3">Симулиран изход</th><th className="px-4 py-3">Размер</th><th className="px-4 py-3">PnL</th><th className="px-4 py-3">Balance</th><th className="px-4 py-3">Score</th><th className="px-4 py-3">Изход</th><th className="px-4 py-3">Hold</th><th className="px-4 py-3">Проверка</th></tr></thead><tbody>{(state?.history || []).length === 0 ? <tr><td colSpan={12} className="px-4 py-8 text-center text-xs text-slate-600">Историята ще се появи след първите автоматично затворени demo позиции.</td></tr> : state?.history.slice(0, 100).map(trade => <tr key={trade.id} onClick={() => setSelectedAddress(trade.address)} className="cursor-pointer border-b border-white/[0.04] text-xs hover:bg-white/[0.02]"><td className="px-4 py-3"><div className="font-black text-white">#{trade.trade_no ?? '—'} · ${trade.symbol}</div><div className="mt-1 text-[9px] text-slate-700">{shortAddress(trade.address)}</div></td><td className="px-4 py-3 text-[10px] text-slate-500">{fullTimeLabel(trade.opened_at)}</td><td className="px-4 py-3 text-slate-300">{fmtPrice(trade.execution_entry_price ?? trade.entry_price)}</td><td className="px-4 py-3 text-[10px] text-slate-500">{fullTimeLabel(trade.closed_at || trade.updated_at)}</td><td className="px-4 py-3 text-slate-300">{fmtPrice(trade.execution_exit_price ?? trade.exit_price ?? trade.current_price)}</td><td className="px-4 py-3 text-slate-400">${trade.notional_usd.toFixed(2)}</td><td className={`px-4 py-3 font-black ${(trade.pnl_pct || 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}><div>{(trade.pnl_usd || 0) >= 0 ? '+' : ''}${(trade.pnl_usd || 0).toFixed(2)}</div><div className="mt-1 text-[9px]">{(trade.pnl_pct || 0) >= 0 ? '+' : ''}{(trade.pnl_pct || 0).toFixed(2)}%</div></td><td className="px-4 py-3"><div className="text-slate-500">${(trade.balance_before ?? 0).toFixed(2)}</div><div className="mt-1 font-black text-white">→ ${(trade.balance_after ?? 0).toFixed(2)}</div></td><td className="px-4 py-3 text-slate-400">{trade.score?.toFixed(0)}</td><td className="px-4 py-3 text-slate-400">{trade.exit_reason || '—'}</td><td className="px-4 py-3 text-slate-500">{durationLabel(trade.opened_at, trade.closed_at)}</td><td className="px-4 py-3">{trade.dex_url ? <a onClick={e => e.stopPropagation()} href={trade.dex_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1.5 text-[9px] font-black text-slate-400 hover:text-white">CHART <ExternalLink className="h-3 w-3" /></a> : '—'}</td></tr>)}</tbody></table></div>
       </section>
 
+      <PaperTrainingPanel data={state?.paper_training} />
       <footer className="mt-5 flex flex-col justify-between gap-2 border-t border-white/[0.06] py-5 text-[9px] leading-4 text-slate-700 sm:flex-row"><div>NEO Meme Coins · live Solana market monitoring · isolated account engine</div><div className="max-w-2xl sm:text-right">Paper режимът е симулация. Meme coins са високорискови; score-ът е филтър за наблюдение, не обещание за печалба.</div></footer>
     </main>
   </div>;

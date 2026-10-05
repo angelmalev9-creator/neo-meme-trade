@@ -3,7 +3,8 @@ Uses GeckoTerminal, separate from the DexScreener signal source. This detects
 inconsistent quotes, not a guarantee of fresh executable prices or rug safety.
 """
 import concurrent.futures as cf
-import fcntl,json,math,os,re,threading,time
+import compat_file_lock as fcntl
+import json,math,os,re,threading,time
 from pathlib import Path
 import requests
 

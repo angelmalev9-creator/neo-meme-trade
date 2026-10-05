@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent matched paper experiments. No wallets, signing, swaps or live-state writes."""
 import copy
-import fcntl
+import compat_file_lock as fcntl
 import hashlib
 import json
 import math
@@ -35,7 +35,7 @@ def atomic(path,data):
     encoded=json.dumps(data,ensure_ascii=False,allow_nan=False)
     fd,name=tempfile.mkstemp(prefix='.'+path.name+'.',dir=path.parent)
     try:
-        with os.fdopen(fd,'w') as f:
+        with os.fdopen(fd,'w',encoding='utf-8') as f:
             f.write(encoded);f.flush();os.fsync(f.fileno())
         os.replace(name,path)
     finally:
@@ -48,7 +48,7 @@ def reference_check(coin,now):
     if not activity.ADDRESS.fullmatch(mint) or not activity.ADDRESS.fullmatch(pair):
         return {'status':'blocked','reason':'invalid_identity'}
     path=Path('/var/lib/neo-market/price-crosscheck')/(mint+'-'+pair+'.json')
-    try: return integrity.validate(coin,json.loads(path.read_text()),now)
+    try: return integrity.validate(coin,json.loads(path.read_text(encoding='utf-8')),now)
     except (OSError,ValueError,KeyError,TypeError): return {'status':'pending','reason':'reference_unavailable'}
 
 
@@ -76,7 +76,7 @@ class ExperimentRunner:
         self.path=self.root/'paired_state.json'
         if self.path.exists():
             # Corrupt state must halt, never silently start over.
-            self.state=json.loads(self.path.read_text())
+            self.state=json.loads(self.path.read_text(encoding='utf-8'))
             if self.state.get('version')!=policy.VERSION or not isinstance(self.state.get('groups'),dict):
                 raise ValueError('Unexpected experiment state; refusing reset')
             expected={g.id for g in policy.GROUPS}
@@ -264,7 +264,7 @@ def main():
         feed=[];last_feed=0
         while not STOP.is_set():
             started=time.monotonic();errors=[];now=now_ms()
-            try:tape=json.loads(Path('/var/lib/neo-market/live_tape.json').read_text())
+            try:tape=json.loads(Path('/var/lib/neo-market/live_tape.json').read_text(encoding='utf-8'))
             except (OSError,ValueError):tape={};errors.append('tape_unavailable')
             try:runner.update_positions(held_prices(session,runner),tape,now_ms())
             except (requests.RequestException,ValueError,KeyError,TypeError) as exc:

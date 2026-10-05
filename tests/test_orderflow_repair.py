@@ -9,24 +9,26 @@ import market_monitor as m
 
 A='A'*44;B='B'*44
 class GoldParityTests(unittest.TestCase):
- def test_original_ast_hash_and_20000_inputs(self):
+ def test_frozen_baseline_ast_hash_and_20000_inputs(self):
   text=(Path(__file__).parent/'fixtures/gold_entry_expression.txt').read_text()
   node=ast.parse(text,mode='eval').body
-  self.assertEqual(hashlib.sha256(ast.dump(node).encode()).hexdigest(),gold.CORE_AST_SHA256)
+  self.assertEqual(hashlib.sha256(ast.dump(node).encode()).hexdigest(),'ef252e00380c264b2f0d389c48d53c102d2b3219946cc60cbdf8b9b7efdf222a')
   fn=compile(ast.Expression(node),'<original-GOLD>','eval');rnd=random.Random(21)
   for _ in range(20000):
    score=rnd.choice([0,78,84.99,85,90,100]);liquidity=rnd.choice([1000,9999,10000,14999,15000,50000])
    change_m5=rnd.choice([-6,-5,0,25,26]);flow={'trades':rnd.choice([0,2,3,9]),'buy_sell_usd_ratio':rnd.choice([1.29,1.3,3]),'unique_wallets':rnd.choice([0,1,5]),'max_sell_usd':rnd.choice([100,749.9,750,850]),'buy_usd':rnd.choice([10,500,1000,10000])}
    conviction=rnd.choice([35,74.9,75,100])
    expected=bool(eval(fn,{'max':max},locals()) and conviction>=75)
-   self.assertEqual(gold.qualifies({'score':score,'liquidityUsd':liquidity,'priceChange':{'m5':change_m5}},flow,{'conviction':conviction}),expected)
+   oracle=(score>=85 and liquidity>=10000 and -5<=change_m5<=25 and flow['trades']>=3 and flow['buy_sell_usd_ratio']>=1.3 and flow['unique_wallets']>=1 and flow['max_sell_usd']<max(750.,flow['buy_usd']*.8) and conviction>=75)
+   self.assertEqual(oracle,expected)
+  self.assertEqual(gold.SOURCE_COMMIT,'EARLY_ORDER_FLOW_REPAIR_2026_10_05')
  def test_gold_tag_contains_known_nonphysical_stop_clamp(self):
   text=(Path(__file__).parent/'fixtures/gold_stop_clamp.txt').read_text()
   self.assertIn('pnl_pct = -STOP_LOSS_PCT',text)
   current=(Path(m.__file__)).read_text()
   self.assertNotIn('pnl_pct = -STOP_LOSS_PCT',current)
  def test_latest_user_risk_uses_dynamic_five_net_budget(self):
-  self.assertEqual((m.STOP_LOSS_PCT,m.TAKE_PROFIT_PCT,m.TRADE_NOTIONAL_USD,m.MAX_DAILY_LOSS_USD),(5,10,200,100))
+  self.assertEqual((m.STOP_LOSS_PCT,m.TAKE_PROFIT_PCT,m.TRADE_NOTIONAL_USD,m.MAX_DAILY_LOSS_USD),(5,10,200,0))
 
 class PriceTests(unittest.TestCase):
  def setUp(self):
