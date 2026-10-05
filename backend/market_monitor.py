@@ -36,7 +36,7 @@ LEARNING_WINDOW = 60
 HEALTH_WINDOW = 12
 STARTING_BALANCE_USD = 1000.0
 TRADE_NOTIONAL_USD = float(os.getenv('NEO_TRADE_NOTIONAL_USD', '200'))
-MAX_DAILY_LOSS_USD = float(os.getenv('NEO_MAX_DAILY_LOSS_USD', '100'))
+MAX_DAILY_LOSS_USD = float(os.getenv('NEO_MAX_DAILY_LOSS_USD', '0'))
 MIN_LIQUIDITY_USD = 10000.0
 
 # BALANCED_V4: observable, bounded paper-entry checks. The prior AND-gate
@@ -374,7 +374,8 @@ class State:
                     'win_rate': round((wins / closed) * 100, 1) if closed else 0,
                     'realized_today_usd': round(self.realized_today(), 2),
                     'risk_day_pnl_usd': round(self.risk_day_pnl(), 2),
-                    'daily_risk_remaining_usd': round(max(0.,MAX_DAILY_LOSS_USD+self.risk_day_pnl()),4),
+                    'daily_risk_remaining_usd': (round(max(0.,MAX_DAILY_LOSS_USD+self.risk_day_pnl()),4) if MAX_DAILY_LOSS_USD > 0 else None),
+                    'daily_risk_cap_enabled': MAX_DAILY_LOSS_USD > 0,
                     'risk_day_start_balance_usd': round(self.risk_day_start_balance_usd, 2),
                     'demo_starting_balance_usd': round(self.demo_starting_balance_usd, 2),
                     'demo_balance_usd': round(self.demo_balance_usd, 2),
@@ -412,6 +413,7 @@ class State:
                     'min_liquidity_usd': STRICT_MIN_LIQUIDITY_USD,
                     'trade_notional_usd': TRADE_NOTIONAL_USD,
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
+                    'daily_loss_cap_enabled': MAX_DAILY_LOSS_USD > 0,
                     'starting_balance_usd': STARTING_BALANCE_USD,
                     'execution_mode': 'JUPITER_QUOTE_V2',
                     'execution_note': 'Original GOLD entry signal; mandatory +10% net TP and dynamic early chart stop targeting a 5% net loss budget including expected execution costs',
@@ -1009,7 +1011,7 @@ class Monitor:
     def _maybe_open_checked(self, feed: list[dict[str, Any]], report: dict[str, Any]) -> None:
         session_at_check = STATE.demo_session_id
         STATE.refresh_risk_day()
-        if STATE.risk_day_pnl() <= -MAX_DAILY_LOSS_USD:
+        if MAX_DAILY_LOSS_USD > 0 and STATE.risk_day_pnl() <= -MAX_DAILY_LOSS_USD:
             entry_policy.record(report, ['daily_limit'])
             return
         if len(STATE.positions) >= MAX_POSITIONS:
@@ -1149,7 +1151,7 @@ class Monitor:
             with STATE.lock:
                 if STATE.demo_session_id!=session_at_check or not STATE.running or len(STATE.positions)>=MAX_POSITIONS:
                     return
-                if STATE.available_balance_usd()<entry_quote['capital_committed_usd'] or STATE.risk_day_pnl()<=-MAX_DAILY_LOSS_USD:
+                if STATE.available_balance_usd()<entry_quote['capital_committed_usd'] or (MAX_DAILY_LOSS_USD > 0 and STATE.risk_day_pnl()<=-MAX_DAILY_LOSS_USD):
                     entry_policy.record(report,['balance'],coin); return
                 live_open_risk=sum(num(p.get('planned_risk_usd')) for p in STATE.positions)
                 permitted = runtime.plan_notional(
