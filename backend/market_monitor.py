@@ -26,6 +26,7 @@ AUDIT_PATH = Path(os.getenv('NEO_MARKET_AUDIT_PATH', '/var/lib/neo-market/audit.
 LIVE_TAPE_PATH = Path(os.getenv('NEO_LIVE_TAPE_PATH', '/var/lib/neo-market/live_tape.json'))
 STRATEGY_LAB_PATH = Path(os.getenv('NEO_STRATEGY_LAB_PATH', '/var/lib/neo-market/strategy_lab.json'))
 STRATEGY_LAB_COMPACT_PATH = Path(os.getenv('NEO_STRATEGY_LAB_COMPACT_PATH', str(STRATEGY_LAB_PATH.parent / 'strategy_lab_compact.json')))
+ALL_TIME_HISTORY_PATH = Path(os.getenv('NEO_ALL_TIME_HISTORY_PATH', str(STATE_PATH.with_name('all_time_history.json'))))
 POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '0.5'))
 DEX_API = 'https://api.dexscreener.com'
 MAX_FEED = 90
@@ -234,6 +235,39 @@ def read_live_tape() -> dict[str, Any]:
         return data if isinstance(data, dict) else {'status': 'offline', 'events': []}
     except Exception:
         return {'status': 'offline', 'events': []}
+
+_ALL_TIME_HISTORY_CACHE: dict[str, Any] = {'mtime_ns': None, 'rows': []}
+_ALL_TIME_HISTORY_LOCK = threading.Lock()
+
+def read_all_time_history(current_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge restored PAPER history for display without touching engine state."""
+    archive_rows: list[dict[str, Any]] = []
+    try:
+        stat = ALL_TIME_HISTORY_PATH.stat()
+        with _ALL_TIME_HISTORY_LOCK:
+            if _ALL_TIME_HISTORY_CACHE.get('mtime_ns') != stat.st_mtime_ns:
+                data = json.loads(ALL_TIME_HISTORY_PATH.read_text(encoding='utf-8'))
+                rows = data.get('history', []) if isinstance(data, dict) else []
+                _ALL_TIME_HISTORY_CACHE['rows'] = [row for row in rows if isinstance(row, dict)]
+                _ALL_TIME_HISTORY_CACHE['mtime_ns'] = stat.st_mtime_ns
+            archive_rows = list(_ALL_TIME_HISTORY_CACHE.get('rows') or [])
+    except Exception:
+        archive_rows = []
+
+    merged: dict[str, dict[str, Any]] = {}
+    for trade in archive_rows:
+        trade_id = str(trade.get('id') or '')
+        if trade_id:
+            merged[trade_id] = trade
+    for trade in current_history:
+        if not isinstance(trade, dict):
+            continue
+        trade_id = str(trade.get('id') or '')
+        if trade_id:
+            merged[trade_id] = trade
+    if not merged:
+        return list(current_history)
+    return sorted(merged.values(), key=lambda trade: int(trade.get('closed_at') or trade.get('updated_at') or 0), reverse=True)
 
 def compact_public_trade(trade: dict[str, Any]) -> dict[str, Any]:
     fields = (
@@ -543,7 +577,8 @@ class State:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
-            lifetime = trade_metrics(self.history)
+            display_history = read_all_time_history(self.history)
+            lifetime = trade_metrics(display_history)
             wins, closed = lifetime['wins'], lifetime['closed_trades']
             closed_total = closed
             tape = read_live_tape()
@@ -555,7 +590,7 @@ class State:
                 'scan_count': self.scan_count,
                 'feed': self.feed,
                 'positions': self.positions,
-                'history': [compact_public_trade(t) for t in self.history[:100]],
+                'history': [compact_public_trade(t) for t in display_history],
                 'events': self.events[:30],
                 'source_status': self.source_status,
                 'entry_diagnostics': self.entry_diagnostics,
@@ -571,9 +606,9 @@ class State:
                     'win_rate': round((wins / closed) * 100, 1) if closed else 0,
                     'metrics': {'lifetime': lifetime,
                         'session': trade_metrics([t for t in self.history if t.get('session_id') == self.demo_session_id]),
-                        'rolling_100': trade_metrics(self.history[:100]),
-                        'policy_versions': {v: trade_metrics([t for t in self.history if str(t.get('exit_policy_version') or 'legacy_unknown') == v])
-                            for v in {str(t.get('exit_policy_version') or 'legacy_unknown') for t in self.history}}},
+                        'rolling_100': trade_metrics(display_history[:100]),
+                        'policy_versions': {v: trade_metrics([t for t in display_history if str(t.get('exit_policy_version') or 'legacy_unknown') == v])
+                            for v in {str(t.get('exit_policy_version') or 'legacy_unknown') for t in display_history}}},
                     'historical_records_missing': max(0, self.trade_seq - len(self.positions) - len(self.history)),
                     'audit_status': self.audit_status,
                     'unavailable_liquidation_positions': sum(1 for p in self.positions if p.get('valuation_status') == 'unavailable'),
