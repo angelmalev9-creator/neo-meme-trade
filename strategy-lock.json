@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-05",
   "source_commit": "USER_HIGH_FREQ_EARLY_SCOUT_20261005",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "840154aba9bde979d75cbb2ef59ab9a824b2d9f70bf705424db2e1c173d20659",
+  "sha256": "ef65970cc02aa94744a72bb21e2114ae1a4f101dbcdb39d5fc60253649c53770",
   "production_strategy_id": "ORDER_FLOW_EARLY_SCOUT_PAPER_V10",
   "rules": {
     "entry_score": 40,
@@ -90,7 +90,7 @@
     "backend/paper_state_reset.py": "72a270787ca7af6af6b7d3883aae3e09cba3e5a7bc73359f56ec33e14b7b828b",
     "backend/paper_training.py": "c560ec945c210663b00617780f71c93cf76f08538b4fcb7af2815d163af9df48",
     "backend/pumpswap_stop_quote.py": "518f607710ea738edd94d5e6040fcd0ec8bc5521f6f20814ad20967c8be4be61",
-    "backend/strategy_lab.py": "627d8c592d64082362a23c6ee729dd945a1be1cf63d0d0645da34a3f29416e17",
+    "backend/strategy_lab.py": "38cd600ede488c80bc1a696e0b290d251c2c10d53bc818bff39046da5c037240",
     "backend/training_bridge.py": "f25d6bc763c801bbaa4c65c05869921b471885b46ca6187ed81ad2a39ac0c08d",
     "backend/training_worker.py": "75a48c03cbdf7274a74d6701f8e2f45ce618337caf135fde9dfe05bc3bbeba81",
     "backend/user_gateway.py": "85b0c359ef4e9ce38039872ae11c91256e5a93ff027cca239e66ca76f032feb6"
@@ -139,7 +139,7 @@
   "hash_basis": "UTF8_LF",
   "exit_policy_version": "HONEST_NET_EXIT_V1",
   "hash_change_reasons": {
-    "backend/market_monitor.py": "High-frequency newborn scoring, 10/20s validated early flow windows, 16 concurrent PAPER scouts, 10-100 USD scout sizing, outcome-aware re-entry cooldown and journal-based size learning.",
+    "backend/market_monitor.py": "High-frequency newborn scoring, 10/20s validated early flow windows, 16 concurrent PAPER scouts, 10-100 USD scout sizing, outcome-aware re-entry cooldown and journal-based size learning. All-time PAPER history is merged for read-only dashboard reporting without changing operational entry/exit/risk state.",
     "backend/engine_entry_policy.py": "Raised validated quote throughput to 12 candidates per scan and versioned V10 high-frequency scout policy.",
     "backend/gold_order_flow.py": "Added MICRO_SCOUT before ULTRA_EARLY with lower early thresholds while leaving safety/price/execution vetoes outside and mandatory.",
     "backend/engine_exit_policy.py": "Versioned net fixed policy and original adaptive candidate, no chart stop",
@@ -157,7 +157,7 @@
     "backend/training_worker.py": "Independent process, durable reset boundary and restart",
     "backend/paper_state_reset.py": "User-authorized checksum archives and all PAPER reset/restore",
     "backend/user_gateway.py": "Independent private accounts without inherited central trades and atomic registry",
-    "backend/strategy_lab.py": "Inert import, complete histories and truthful profit factor",
+    "backend/strategy_lab.py": "Inert import, complete histories and truthful profit factor Includes the isolated PAPER MOMENTUM_HUNTER challenger and ranking diagnostics.",
     "backend/astra6_brain.py": "Shared exit-priority quote transport, cache/backoff, UTF-8 persistence and truthful profit factor",
     "backend/lab_paired_runner.py": "Cross-platform file locking and UTF-8 persistence",
     "backend/main_replay.py": "Actual primary engine recorded-only evidence replay"
