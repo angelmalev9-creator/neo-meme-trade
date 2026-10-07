@@ -127,6 +127,7 @@ def flow_map():
     for f in out.values():
         f['unique_wallets']=len(f.pop('wallets')); f['ratio']=f['buy_usd']/max(f['sell_usd'],1)
     return out
+
 def enrich(c,flows):
     tx=(c.get('txns') or {}).get('m5') or {}
     b=num(tx.get('buys')); s=num(tx.get('sells'))
@@ -144,6 +145,7 @@ STRATEGIES=[
  {'id':'ULTRA_PRECISION','name':'Ultra Precision','rule':lambda f: f['score']>=98 and f['liq']>=25000 and 3<=f['m5']<=18 and 1.1<=f['bs']<=3.0 and f['lmc']>=.15 and 8<=f['age']<=180},
  {'id':'PRECISION','name':'Precision','rule':lambda f: f['score']>=95 and f['liq']>=20000 and 2<=f['m5']<=22 and 1.0<=f['bs']<=3.2 and f['lmc']>=.12 and 5<=f['age']<=240},
  {'id':'MOMENTUM','name':'Momentum','rule':lambda f: f['score']>=90 and f['liq']>=15000 and 5<=f['m5']<=30 and f['bs']>=1.15 and f['lmc']>=.08 and 3<=f['age']<=300},
+ {'id':'MOMENTUM_HUNTER','name':'Momentum Hunter','rule':lambda f: f['score']>=78 and f['liq']>=10000 and .5<=f['m5']<=45 and f['bs']>=.90 and f['lmc']>=.03 and 2<=f['age']<=1440 and -35<=f['h1']<=350 and f['vol_liq']>=.03},
  {'id':'BREAKOUT','name':'Breakout','rule':lambda f: f['score']>=90 and f['liq']>=20000 and 15<f['m5']<=55 and f['bs']>=1.4 and f['lmc']>=.08 and 3<=f['age']<=300},
  {'id':'LIQUIDITY','name':'Liquidity First','rule':lambda f: f['score']>=85 and f['liq']>=40000 and -2<=f['m5']<=20 and f['bs']>=.9 and f['lmc']>=.12 and 5<=f['age']<=720},
  {'id':'ORDER_FLOW','name':'Order Flow','rule':lambda f: f['score']>=85 and f['liq']>=15000 and -5<=f['m5']<=25 and f['flow']['trades']>=3 and f['flow']['ratio']>=1.3 and f['flow']['unique_wallets']>=1 and f['flow']['max_sell']<max(750,f['flow']['buy_usd']*.8)},
@@ -178,6 +180,7 @@ STRATEGIES=[
  {'id':'CLEAN_MOMENTUM','name':'Clean Momentum','rule':lambda f: f['score']>=92 and f['liq']>=30000 and 3<=f['m5']<=18 and f['bs']>=1.2 and .20<=f['vol_liq']<=3.5 and f['flow']['ratio']>=1.5 and f['flow']['max_sell']<max(250,f['flow']['buy_usd']*.6)},
  {'id':'CONFLUENCE_MAX','name':'Confluence Max','rule':lambda f: f['score']>=95 and f['liq']>=40000 and 1<=f['m5']<=12 and f['h1']>-10 and f['bs']>=1.25 and f['lmc']>=.15 and .20<=f['vol_liq']<=4 and f['flow']['trades']>=5 and f['flow']['ratio']>=2.0 and f['flow']['unique_wallets']>=4 and f['flow']['max_sell']<max(200,f['flow']['buy_usd']*.45)},
 ]
+
 def empty_book(s):
     start=STRATEGY_START_BALANCES.get(s['id'],START_BALANCE)
     return {'id':s['id'],'name':s['name'],'starting_balance':start,'balance':start,
@@ -205,7 +208,7 @@ STATE={'started_at':now_ms(),'updated_at':now_ms(),'status':'starting',
 if STATE.get('activity_version')!=activity.POLICY_VERSION:
     STATE['activity_version']=activity.POLICY_VERSION
     STATE['activity_started_at']=now_ms()
-assert set(activity.RULES)=={s['id'] for s in STRATEGIES}, 'All 33 entries need a policy'
+assert set(activity.RULES)=={s['id'] for s in STRATEGIES}, 'All 34 entries need a policy'
 
 def dex_position_prices(positions):
     if not positions: return {}
@@ -290,7 +293,7 @@ def update_positions(flows):
         total_live_pnl=num(pos.get('partial_realized_pnl'))+open_pnl
         total_live_pct=total_live_pnl/max(num(pos.get('notional_usd')),1e-18)*100
 
-        # Unified 3:10 NET exit framework across all 33 strategies.
+        # Unified 3:10 NET exit framework across all 34 strategies.
         # Entry logic stays strategy-specific; exits are identical and include
         # DEX fee, price impact, slippage/latency and network cost.
         if total_live_pct<=-STOP_LOSS:
@@ -308,6 +311,7 @@ def update_positions(flows):
                     'remaining_fraction':round(remaining_qty/max(num(pos.get('original_quantity'),remaining_qty),1e-18),4),
                     'updated_at':now_ms()})
         if reason: close_position(book,pos,coin,reason)
+
 def maybe_open(feed,flows):
     now=now_ms()
     candidates=[]
@@ -323,6 +327,7 @@ def maybe_open(feed,flows):
         blocked_cost=0
         blocked_price=0
         blocked_cooldown=0
+        blocked_rank=0
         for coin,features in candidates:
             if not activity.RULES[strategy['id']].matches(features):
                 continue
@@ -340,12 +345,22 @@ def maybe_open(feed,flows):
             if proposed is None:
                 blocked_cost+=1
                 continue
-            eligible.append((proposed['initial_pnl_pct'],num(features.get('score')),
-                             coin,features,proposed))
+            if strategy['id']=='MOMENTUM_HUNTER':
+                priority=activity.momentum_hunter_rank(features,proposed['initial_pnl_pct'])
+                if priority < activity.MOMENTUM_HUNTER_MIN_RANK:
+                    blocked_rank+=1
+                    continue
+                tiebreak=proposed['initial_pnl_pct']
+            else:
+                priority=proposed['initial_pnl_pct']
+                tiebreak=num(features.get('score'))
+            eligible.append((priority,tiebreak,coin,features,proposed))
         book['entry_diagnostics']={
             'at':now,'matched_candidates':checked,'cost_rejected':blocked_cost,
             'cooldown_rejected':blocked_cooldown,'affordable_candidates':len(eligible),
             'price_verification_rejected':blocked_price,
+            'rank_rejected':blocked_rank,
+            'selection_mode':'MOMENTUM_HUNTER_RANK_V1' if strategy['id']=='MOMENTUM_HUNTER' else 'LOWEST_COST_THEN_SCORE',
         }
         if not eligible:
             continue
