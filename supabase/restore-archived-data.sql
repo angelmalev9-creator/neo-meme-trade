@@ -317,7 +317,7 @@ end;
 $$;
 
 -- ============================================================================
--- 7) BULK RESTORATION FUNCTION - Restore all archived accounts
+-- 7) BULK RESTORATION FUNCTION - Restore all archived accounts (FIXED)
 -- ============================================================================
 
 create or replace function public.restore_all_archived_accounts()
@@ -335,14 +335,17 @@ as $$
 declare
   v_archived_user uuid;
   v_restore_result jsonb;
+  v_rec record;
 begin
   -- Find all users with archived accounts
-  for v_archived_user in
-    select distinct user_id
-    from public.paper_accounts_archive
-    where deleted_at is null
-    order by archived_at desc
+  for v_rec in
+    select distinct paa.user_id
+    from public.paper_accounts_archive paa
+    where paa.deleted_at is null
+    order by paa.archived_at desc
   loop
+    v_archived_user := v_rec.user_id;
+
     -- Restore each archived account
     v_restore_result := public.restore_archived_account(v_archived_user, true, true);
 
