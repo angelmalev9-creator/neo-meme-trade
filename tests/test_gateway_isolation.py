@@ -49,6 +49,17 @@ class GatewayIsolation(unittest.TestCase):
         self.assertEqual(second['id'], 'user-1')
         self.assertEqual(get.call_count, 1)
 
+    def test_busy_configured_port_does_not_churn_to_another_port(self):
+        account = {'engine_port': 18804}
+        user = {'id': 'test'}
+        with patch.object(self.gateway, 'engine_health', return_value=False), \
+             patch.object(self.gateway, 'port_open', return_value=True), \
+             patch.object(self.gateway, 'allocate_port') as allocate:
+            with self.assertRaisesRegex(RuntimeError, 'occupied but not healthy'):
+                self.gateway.start_engine(user, account)
+        self.assertEqual(account['engine_port'], 18804)
+        allocate.assert_not_called()
+
     def test_corrupt_registry_refuses_silent_reset(self):
         p=Path(self.gateway.STORE_PATH)
         p.write_text('{broken', encoding='utf-8')

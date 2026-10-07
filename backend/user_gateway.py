@@ -269,9 +269,19 @@ def start_engine(user, account):
             return port
 
     port = int(account.get("engine_port") or 0)
-    if port and engine_health(port):
-        return port
-    if port <= 0 or port_open(port):
+    if port:
+        if engine_health(port):
+            return port
+        if port_open(port):
+            # A configured port that is already listening belongs to an existing
+            # account engine. Give readiness a few chances under CPU pressure;
+            # never churn through new ports just because one health probe was slow.
+            for _ in range(4):
+                time.sleep(0.25)
+                if engine_health(port):
+                    return port
+            raise RuntimeError("Configured user engine port is occupied but not healthy.")
+    else:
         port = allocate_port(user_id)
         account["engine_port"] = port
         account["updated_at"] = now_ms()

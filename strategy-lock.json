@@ -93,7 +93,7 @@
     "backend/strategy_lab.py": "38cd600ede488c80bc1a696e0b290d251c2c10d53bc818bff39046da5c037240",
     "backend/training_bridge.py": "f25d6bc763c801bbaa4c65c05869921b471885b46ca6187ed81ad2a39ac0c08d",
     "backend/training_worker.py": "75a48c03cbdf7274a74d6701f8e2f45ce618337caf135fde9dfe05bc3bbeba81",
-    "backend/user_gateway.py": "482c60c21bc439c91f198394cb5b98d7a6a65d3bc13dcbf68e8d9688a227f6d9"
+    "backend/user_gateway.py": "a46b4b6972e2ef8fece2e8dce52f8bb9485f48a28619f0052a6566670ea03350"
   },
   "runtime_version": "RUNTIME_DURABLE_PAPER_V2",
   "runtime_note": "Primary PAPER engine now prioritizes many small early scouts. Its own closed-trade journal adapts scout size after repeated mistakes; threshold/exit experiments still run in isolated learner books.",
@@ -156,7 +156,7 @@
     "backend/training_bridge.py": "Bounded no-API journal bridge with actual evidence timestamps",
     "backend/training_worker.py": "Independent process, durable reset boundary and restart",
     "backend/paper_state_reset.py": "User-authorized checksum archives and all PAPER reset/restore",
-    "backend/user_gateway.py": "Independent private PAPER accounts with cached Supabase user verification to remove repeated network latency; authorization is still verified and no trading logic changes.",
+    "backend/user_gateway.py": "Independent private PAPER accounts with cached Supabase verification and stable configured-port reuse; a slow health probe can no longer churn through new per-user engine ports.",
     "backend/strategy_lab.py": "Inert import, complete histories and truthful profit factor Includes the isolated PAPER MOMENTUM_HUNTER challenger and ranking diagnostics.",
     "backend/astra6_brain.py": "Shared exit-priority quote transport, cache/backoff, UTF-8 persistence and truthful profit factor",
     "backend/lab_paired_runner.py": "Cross-platform file locking and UTF-8 persistence",
