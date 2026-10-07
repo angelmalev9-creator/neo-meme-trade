@@ -32,10 +32,27 @@ class ActivityTests(unittest.TestCase):
         guard.start();self.addCleanup(guard.stop)
         lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
 
-    def test_all_33_rules_exist(self):
-        self.assertEqual(len(a.RULES),33)
+    def test_all_34_rules_exist(self):
+        self.assertEqual(len(a.RULES),34)
         self.assertEqual(set(a.RULES),{s['id'] for s in lab.STRATEGIES})
         for rule in a.RULES.values():self.assertGreaterEqual(rule.liquidity,10000)
+
+    def test_momentum_hunter_broad_but_quality_ranked(self):
+        broad={'score':80,'liq':12000,'m5':4,'h1':20,'bs':1.0,'lmc':.05,
+               'age':600,'vol_liq':.12,
+               'flow':{'trades':2,'ratio':1.0,'buy_usd':80,'sell_usd':60,
+                       'unique_wallets':1,'max_sell':60}}
+        self.assertTrue(a.RULES['MOMENTUM_HUNTER'].matches(broad))
+        self.assertFalse(a.RULES['MOMENTUM'].matches(broad))
+
+        strong={**broad,'score':86,'m5':7,'bs':1.4,'vol_liq':.30,
+                'flow':{'trades':8,'ratio':2.4,'buy_usd':600,'sell_usd':150,
+                        'unique_wallets':5,'max_sell':60}}
+        weak={**broad,'score':78,'m5':.5,'h1':-35,'bs':.9,'lmc':.03,'vol_liq':.03,
+              'flow':{'trades':0,'ratio':0,'buy_usd':0,'sell_usd':250,
+                      'unique_wallets':0,'max_sell':500}}
+        self.assertGreater(a.momentum_hunter_rank(strong,-.5),a.MOMENTUM_HUNTER_MIN_RANK)
+        self.assertLess(a.momentum_hunter_rank(weak,-.5),a.MOMENTUM_HUNTER_MIN_RANK)
 
     def test_every_strategy_can_match_its_family(self):
         for key,rule in a.RULES.items():
@@ -98,7 +115,7 @@ class ActivityTests(unittest.TestCase):
             self.assertLess(b['position']['open_pnl_usd'],0)
             self.assertGreaterEqual(b['position']['entry_roundtrip_pnl_pct'],-2.75)
 
-    def test_net_stop_all_33_no_loss_clamping(self):
+    def test_net_stop_all_34_no_loss_clamping(self):
         c=coin()
         for b in lab.STATE['books'].values():
             b['position']={'trade_no':1,'address':ADDRESS,'pairAddress':PAIR,'entry_price':1,
