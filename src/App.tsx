@@ -143,7 +143,7 @@ export default function App() {
         if (!token) throw new Error('Session expired');
 
         const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 4000);
+        const timeout = window.setTimeout(() => controller.abort(), 12000);
         const response = await fetch(`${API}/user/state`, {
           cache: 'no-store',
           signal: controller.signal,

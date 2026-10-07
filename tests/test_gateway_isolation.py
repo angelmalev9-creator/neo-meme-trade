@@ -33,6 +33,22 @@ class GatewayIsolation(unittest.TestCase):
         self.assertEqual(len(s['history']), 400)
         self.assertEqual(s['demo_balance_usd'], 600)
 
+
+    def test_verified_user_is_cached_between_polls(self):
+        class Response:
+            status_code = 200
+            def json(self):
+                return {'id': 'user-1', 'email': 'paper@example.test'}
+
+        with patch.object(self.gateway, 'SUPABASE_PUBLISHABLE_KEY', 'test-key'), \
+             patch.object(self.gateway.SESSION, 'get', return_value=Response()) as get:
+            first = self.gateway.verify_user({'Authorization': 'Bearer test-token'})
+            second = self.gateway.verify_user({'Authorization': 'Bearer test-token'})
+
+        self.assertEqual(first['id'], 'user-1')
+        self.assertEqual(second['id'], 'user-1')
+        self.assertEqual(get.call_count, 1)
+
     def test_corrupt_registry_refuses_silent_reset(self):
         p=Path(self.gateway.STORE_PATH)
         p.write_text('{broken', encoding='utf-8')

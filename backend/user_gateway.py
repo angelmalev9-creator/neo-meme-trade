@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import copy
+import hashlib
 import json
 import os
 import socket
@@ -28,9 +29,12 @@ MAX_USER_PORT = int(os.getenv("NEO_USER_ENGINE_PORT_END", "19800"))
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://qziuovwcauaklgqscqys.supabase.co").rstrip("/")
 SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
 STARTING_BALANCE = 1000.0
+AUTH_CACHE_SECONDS = max(0.0, float(os.getenv("NEO_USER_AUTH_CACHE_SECONDS", "30")))
 
 LOCK = threading.RLock()
 ENGINE_PROCESSES = {}
+AUTH_CACHE: dict[str, tuple[float, dict]] = {}
+AUTH_CACHE_LOCK = threading.Lock()
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "NEO-Meme-User-Gateway/2.0", "Accept": "application/json"})
 
@@ -89,6 +93,17 @@ def verify_user(headers):
     token = auth[7:].strip()
     if not token or not SUPABASE_PUBLISHABLE_KEY:
         return None
+
+    cache_key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = time.monotonic()
+    if AUTH_CACHE_SECONDS > 0:
+        with AUTH_CACHE_LOCK:
+            cached = AUTH_CACHE.get(cache_key)
+            if cached and cached[0] > now:
+                return copy.deepcopy(cached[1])
+            if cached:
+                AUTH_CACHE.pop(cache_key, None)
+
     try:
         response = SESSION.get(
             f"{SUPABASE_URL}/auth/v1/user",
@@ -101,7 +116,18 @@ def verify_user(headers):
         if response.status_code != 200:
             return None
         data = response.json()
-        return data if data.get("id") else None
+        if not data.get("id"):
+            return None
+        if AUTH_CACHE_SECONDS > 0:
+            with AUTH_CACHE_LOCK:
+                if len(AUTH_CACHE) >= 256:
+                    expired = [key for key, (expires_at, _) in AUTH_CACHE.items() if expires_at <= now]
+                    for key in expired:
+                        AUTH_CACHE.pop(key, None)
+                    if len(AUTH_CACHE) >= 256:
+                        AUTH_CACHE.pop(next(iter(AUTH_CACHE)), None)
+                AUTH_CACHE[cache_key] = (now + AUTH_CACHE_SECONDS, copy.deepcopy(data))
+        return data
     except Exception:
         return None
 
