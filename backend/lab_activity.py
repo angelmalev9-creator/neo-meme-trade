@@ -8,7 +8,7 @@ import math
 import re
 from typing import Any, Callable
 
-POLICY_VERSION = 'LAB_ACTIVE_V2'
+POLICY_VERSION = 'LAB_ACTIVE_V3_MOMENTUM_HUNTER'
 REENTRY_SECONDS = 60
 LOSS_REENTRY_SECONDS = 180
 MAX_FEED_AGE_MS = 20_000
@@ -64,6 +64,8 @@ RULES = {
     'ULTRA_PRECISION': EntryRule(93, 25000, (1, 25), 1.0, .12, (5, 360)),
     'PRECISION': EntryRule(90, 20000, (0, 30), .95, .09, (3, 480)),
     'MOMENTUM': EntryRule(85, 15000, (3, 40), 1.05, .06, (2, 720)),
+    # Broader PAPER-only momentum funnel; global feed/price/cost safety stays unchanged.
+    'MOMENTUM_HUNTER': EntryRule(78, 10000, (.5, 45), .90, .03, (2, 1440), (-35, 350), (.03, 1000)),
     'BREAKOUT': EntryRule(86, 20000, (10, 60), 1.2, .06, (2, 720)),
     'LIQUIDITY': EntryRule(80, 40000, (-3, 25), .85, .08, (3, 1440)),
     'ORDER_FLOW': EntryRule(80, 15000, (-5, 30), .8, .04, (2, 1e7), flow_trades=3, flow_ratio=1.2, wallets=2),
@@ -95,6 +97,40 @@ RULES = {
     'CLEAN_MOMENTUM': EntryRule(87, 30000, (1, 25), 1.05, .06, (2, 1e7), volume_liquidity=(.12, 5), flow_ratio=1.25),
     'CONFLUENCE_MAX': EntryRule(90, 40000, (0, 18), 1.1, .12, (2, 1e7), (-15, 1000), (.12, 6), flow_trades=4, flow_ratio=1.6, wallets=3),
 }
+
+
+MOMENTUM_HUNTER_MIN_RANK = 32.0
+
+
+def momentum_hunter_rank(f: dict[str, Any], entry_cost_pct: float = 0.0) -> float:
+    """Rank broad PAPER momentum candidates using current/past-only features."""
+    flow = f.get('flow') or {}
+
+    def clamp01(value: float) -> float:
+        return max(0.0, min(1.0, number(value)))
+
+    score = clamp01((number(f.get('score')) - 70.0) / 30.0)
+    m5 = number(f.get('m5'))
+    momentum = clamp01(m5 / 12.0) if m5 <= 12 else clamp01(1.0 - (m5 - 12.0) / 38.0)
+    trend = clamp01((number(f.get('h1')) + 20.0) / 100.0)
+    buy_sell = clamp01((number(f.get('bs')) - .80) / 1.20)
+    flow_ratio = clamp01((number(flow.get('ratio')) - .80) / 2.20)
+    tape = clamp01(number(flow.get('trades')) / 10.0)
+    wallets = clamp01(number(flow.get('unique_wallets')) / 6.0)
+    volume = clamp01(number(f.get('vol_liq')) / .50)
+    lmc = clamp01(number(f.get('lmc')) / .15)
+    cost = clamp01((MAX_ENTRY_COST_PCT + number(entry_cost_pct)) / MAX_ENTRY_COST_PCT)
+
+    buy_usd = number(flow.get('buy_usd'))
+    max_sell = number(flow.get('max_sell'))
+    sell_pressure = clamp01(max_sell / max(buy_usd, 1.0))
+
+    rank = (
+        .17 * score + .20 * momentum + .08 * trend + .12 * buy_sell
+        + .14 * flow_ratio + .08 * tape + .06 * wallets + .05 * volume
+        + .04 * lmc + .06 * cost - .08 * sell_pressure
+    )
+    return round(max(0.0, min(1.0, rank)) * 100.0, 4)
 
 
 def cooldown_remaining_ms(book: dict, address: str, now: int) -> int:
