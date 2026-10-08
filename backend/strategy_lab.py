@@ -241,7 +241,7 @@ def dex_position_prices(positions):
                 if price>0: out[(a,pair)]=p
     return out
 
-def close_position(book,pos,coin,reason):
+def close_position(book,pos,coin,reason,limit_net_pct=None):
     market_price=num(coin.get('priceUsd')); qty=num(pos.get('quantity'))
     quote=exit_execution(coin,qty)
     cost_basis=num(pos.get('remaining_cost_basis_usd'),num(pos.get('notional_usd'))+num(pos.get('entry_network_fee_usd')))
@@ -250,9 +250,21 @@ def close_position(book,pos,coin,reason):
     total_pnl=partial_pnl+final_pnl
     original_notional=num(pos.get('notional_usd'))
     pct=total_pnl/max(original_notional,1e-18)*100
+    observed_pct=pct; fill_price=quote['fill_price']; fill_model='MARKET_AT_OBSERVED_MARK'
+    if limit_net_pct is not None and pct>limit_net_pct:
+        # Resting limit order: it fills at its own level, so the result can be
+        # lowered to the target but never raised. Losses are never adjusted.
+        limited_final=original_notional*limit_net_pct/100-partial_pnl
+        proceeds=max(quote['net_proceeds_usd'],1e-18)
+        fill_price*=max(0.0,limited_final+cost_basis)/proceeds
+        final_pnl=limited_final; total_pnl=partial_pnl+final_pnl; pct=limit_net_pct
+        fill_model='LIMIT_AT_TARGET'
     book['balance']=round(num(book['balance'])+final_pnl,8)
-    trade={**pos,'exit_price':market_price,'execution_exit_price':round(quote['fill_price'],12),
-           'closed_at':now_ms(),'exit_reason':reason,'final_leg_pnl_usd':round(final_pnl,4),
+    trade={**pos,'exit_price':market_price,'execution_exit_price':round(fill_price,12),
+           'closed_at':now_ms(),'exit_reason':reason,'exit_fill_model':fill_model,
+           'observed_exit_pnl_pct':round(observed_pct,3),
+           'pre_exit_pnl_pct':pos.get('pnl_pct'),
+           'pre_exit_gap_seconds':round(max(0,now_ms()-int(num(pos.get('updated_at'),now_ms())))/1000,3),'final_leg_pnl_usd':round(final_pnl,4),
            'pnl_usd':round(total_pnl,4),'pnl_pct':round(pct,3),'balance_after':round(book['balance'],4),
            'exit_dex_fee_usd':round(quote['dex_fee_usd'],6),'exit_network_fee_usd':round(quote['network_fee_usd'],6),
            'exit_price_impact_pct':round(quote['impact_pct'],4),
@@ -315,6 +327,12 @@ def update_positions(flows):
         elif hold>=ex['max_hold_minutes']:
             reason=f"ABSOLUTE_MAX_HOLD_{ex['max_hold_minutes']:g}"
 
+        if reason:
+            # pos still holds the previous mark, so the trade records how far
+            # and how fast the price moved between the last two observations.
+            limit=ex['take_profit'] if reason.startswith('TAKE_PROFIT_') and book['id'] in activity.LIMIT_TAKE_PROFIT_IDS else None
+            close_position(book,pos,coin,reason,limit)
+            continue
         pos.update({'current_price':price,'peak_price':peak,'execution_exit_price':round(live_quote['fill_price'],12),
                     'pnl_pct':round(total_live_pct,3),'open_pnl_usd':round(open_pnl,4),
                     'estimated_exit_fee_usd':round(live_quote['dex_fee_usd']+live_quote['network_fee_usd'],6),
@@ -322,7 +340,6 @@ def update_positions(flows):
                     'partial_realized_pnl':round(num(pos.get('partial_realized_pnl')),4),
                     'remaining_fraction':round(remaining_qty/max(num(pos.get('original_quantity'),remaining_qty),1e-18),4),
                     'updated_at':now_ms()})
-        if reason: close_position(book,pos,coin,reason)
 
 def maybe_open(feed,flows):
     now=now_ms()

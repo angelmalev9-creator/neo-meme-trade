@@ -42,7 +42,8 @@ class Projection(unittest.TestCase):
             'opened_at': T0 + 4_000_000, 'closed_at': T0 + 4_134_000, 'hold_seconds': 134.0,
             'entry_price': 1.0, 'execution_entry_price': 1.01, 'exit_price': 1.2, 'execution_exit_price': 1.19,
             'current_price': None, 'notional_usd': 150.0, 'pnl_usd': 25.5, 'pnl_pct': 17.0,
-            'exit_reason': 'TAKE_PROFIT_17_NET'})
+            'exit_reason': 'TAKE_PROFIT_17_NET', 'observed_exit_pnl_pct': None, 'pre_exit_pnl_pct': None,
+            'pre_exit_gap_seconds': None, 'exit_fill_model': None})
         self.assertEqual((oldest['hold_seconds'], oldest['exit_reason'], oldest['pnl_pct']), (3725.0, 'STOP_LOSS_12_NET', -12.0))
         self.assertEqual((open_row['open'], open_row['closed_at'], open_row['exit_price'], open_row['current_price'],
                           open_row['hold_seconds'], open_row['pnl_usd'], open_row['exit_reason']),
