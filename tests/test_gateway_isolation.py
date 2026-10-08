@@ -49,6 +49,24 @@ class GatewayIsolation(unittest.TestCase):
         self.assertEqual(second['id'], 'user-1')
         self.assertEqual(get.call_count, 1)
 
+    def test_cors_allows_only_known_frontends(self):
+        g = self.gateway
+        for origin in ('https://neo-meme-trade.vercel.app', 'https://angelmalev9-creator.github.io',
+                       'http://localhost:5173'):
+            self.assertEqual(g.cors_origin(origin), origin)
+        for origin in ('', 'null', 'https://evil.example', 'https://neo-meme-trade.vercel.app.evil.example',
+                       'https://neo-meme-trade-abc123-team.vercel.app', 'http://neo-meme-trade.vercel.app'):
+            self.assertEqual(g.cors_origin(origin), 'https://neo-meme-trade.vercel.app')
+
+    def test_extra_origins_are_exact_and_never_wildcards(self):
+        with patch.dict(os.environ, {'NEO_ALLOWED_ORIGINS':
+                ' https://paper.example.com/ , *, https://*.vercel.app, https://a.example/path, ftp://x.example ,'}):
+            g = importlib.reload(self.gateway)
+        self.assertEqual(g.cors_origin('https://paper.example.com'), 'https://paper.example.com')
+        for origin in ('*', 'https://anything.vercel.app', 'https://a.example', 'ftp://x.example'):
+            self.assertEqual(g.cors_origin(origin), g.PRIMARY_ORIGIN)
+        self.assertEqual(len(g.ALLOWED_ORIGINS), len(g.DEFAULT_ALLOWED_ORIGINS) + 1)
+
     def test_busy_configured_port_does_not_churn_to_another_port(self):
         account = {'engine_port': 18804}
         user = {'id': 'test'}

@@ -368,6 +368,36 @@ def revive_known_engines():
             pass
 
 
+# Browser origins allowed to call the authenticated /user/* API. The Vercel
+# site is the primary frontend; the GitHub Pages origin stays allowed so the
+# old address keeps working. NEO_ALLOWED_ORIGINS adds exact origins (comma
+# separated); it can never widen the list to a wildcard.
+PRIMARY_ORIGIN = "https://neo-meme-trade.vercel.app"
+DEFAULT_ALLOWED_ORIGINS = (
+    PRIMARY_ORIGIN,
+    "https://angelmalev9-creator.github.io",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+)
+
+
+def _extra_origins(raw):
+    extra = []
+    for item in str(raw or "").split(","):
+        origin = item.strip().rstrip("/")
+        if origin.startswith(("https://", "http://")) and "*" not in origin and origin.count("/") == 2:
+            extra.append(origin)
+    return tuple(extra)
+
+
+ALLOWED_ORIGINS = frozenset(DEFAULT_ALLOWED_ORIGINS + _extra_origins(os.getenv("NEO_ALLOWED_ORIGINS")))
+
+
+def cors_origin(origin):
+    """Echo an allowed origin exactly; anything else gets the primary origin."""
+    return origin if origin in ALLOWED_ORIGINS else PRIMARY_ORIGIN
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "NEOUserGateway/2.0"
 
@@ -375,16 +405,7 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def cors(self):
-        origin = self.headers.get("Origin", "")
-        allowed = {
-            "https://angelmalev9-creator.github.io",
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-        }
-        self.send_header(
-            "Access-Control-Allow-Origin",
-            origin if origin in allowed else "https://angelmalev9-creator.github.io",
-        )
+        self.send_header("Access-Control-Allow-Origin", cors_origin(self.headers.get("Origin", "")))
         self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")

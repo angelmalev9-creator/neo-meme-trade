@@ -1,9 +1,8 @@
 name: Deploy NEO Meme Trade
 
+# Hosting moved to Vercel (see docs/HOSTING_VERCEL.md). This GitHub Pages
+# deploy no longer runs on push; start it manually only if Pages is needed.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:

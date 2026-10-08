@@ -108,7 +108,7 @@ print({'history': len(d['history']), 'balance': s['demo_balance_usd'], 'open': s
 curl -s http://127.0.0.1:8789/user/health
 ```
 
-Expect `ORDER_FLOW_ADAPTIVE` / `ORDER_FLOW_BALANCED_V4`, `paper_only: true`, the same port, a history count and balance that did not fall, and `ignored_env_overrides` naming the old strategy variables still present in the unit. The gateway needs no restart: `backend/user_gateway.py` is unchanged.
+Expect `ORDER_FLOW_ADAPTIVE` / `ORDER_FLOW_BALANCED_V4`, `paper_only: true`, the same port, a history count and balance that did not fall, and `ignored_env_overrides` naming the old strategy variables still present in the unit. The strategy change itself needs no gateway restart. The gateway is restarted only for the Vercel hosting move (`docs/HOSTING_VERCEL.md`), which changes its CORS allowlist and nothing else.
 
 ## Roll back
 
