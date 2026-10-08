@@ -6,6 +6,12 @@ import engine_runtime as r
 import engine_execution as ex
 import market_monitor as m
 
+def setUpModule():
+    # These suites pin the 2026-10-05 EARLY_SCOUT_V10 profile they were written for.
+    import market_monitor
+    market_monitor.apply_strategy_profile(market_monitor.V10_PROFILE)
+
+
 class Budget(unittest.TestCase):
  def test_full_allowance_retains_user_size(self):self.assertEqual(r.plan_notional(200,1000,100,0,5,.5,.25),200)
  def test_spent_limit_never_reopens(self):

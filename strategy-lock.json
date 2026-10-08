@@ -1,75 +1,61 @@
 {
-  "name": "NEO high-frequency early-scout PAPER execution and isolated learning",
-  "locked_at_utc": "2026-10-05",
-  "source_commit": "USER_HIGH_FREQ_EARLY_SCOUT_20261005",
+  "name": "NEO ORDER_FLOW_ADAPTIVE (2026-10-04 decision policy) on the durable honest PAPER runtime",
+  "locked_at_utc": "2026-10-08",
+  "source_commit": "RESTORE_ORDER_FLOW_ADAPTIVE_OCT4_20261008",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "ef65970cc02aa94744a72bb21e2114ae1a4f101dbcdb39d5fc60253649c53770",
-  "production_strategy_id": "ORDER_FLOW_EARLY_SCOUT_PAPER_V10",
+  "sha256": "75ebc5339762f0a615bd27a78edf241e76fc1770b7992e09439b71f200618eb1",
+  "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
   "rules": {
-    "entry_score": 40,
-    "max_positions": 16,
+    "entry_score": 85,
+    "max_positions": 1,
     "stop_loss_pct": 5,
-    "take_profit_pct": 10,
+    "take_profit_pct": 18,
     "trailing_pct": 4,
-    "max_hold_minutes": 60,
+    "max_hold_minutes": 7,
     "starting_balance_usd": 1000,
-    "trade_notional_usd_max": 200,
-    "early_trade_notional_usd_range": [
-      10,
-      100
-    ],
-    "max_daily_loss_usd": 0,
-    "min_liquidity_usd": 3000,
+    "trade_notional_usd": 200,
+    "max_daily_loss_usd": 100,
+    "min_liquidity_usd": 30000,
+    "min_conviction": 72,
+    "scan_seconds": 15,
+    "position_scan_seconds": 2,
+    "same_token_cooldown_seconds": 1200,
     "max_position_full_loss_usd": 250,
     "max_total_exposure_pct": 100,
     "max_drawdown_pct": 0,
     "stop_execution_buffer_pct": 0.5,
-    "primary_daily_and_drawdown_caps_enabled": false
+    "primary_daily_loss_cap_enabled": true,
+    "adaptive_exits_override_base_take_profit_trailing_and_hold": true
   },
-  "policy": "User authorized high-frequency EARLY PAPER scouting and learning from accumulated results. Existing PAPER account history is preserved; no reset, no live execution and no automatic live-money promotion.",
-  "integrity_note": "Mandatory validated flow coverage, exact pool/mint checks, complete safety checks, one effective threshold object, bounded recorded quote latency and uncapped actual modeled losses.",
+  "policy": "Owner-requested restore of the 2026-10-04 ORDER_FLOW_ADAPTIVE decision behavior. Existing PAPER account history, balance, trade sequence and audit are preserved; no reset, no live execution and no automatic live-money promotion.",
+  "integrity_note": "Historical entry filter, conviction model, hold modes and exit order restored as one pure versioned module. Mandatory validated flow coverage, exact pool/mint checks, complete safety checks, bounded quote age and uncapped actual modeled losses are retained. A planned stop is not a guaranteed fill.",
   "execution_mode": "PAPER_QUOTE_OR_OBSERVED_POOL_MODEL",
-  "entry_policy_version": "ORDER_FLOW_HIGH_FREQ_SCOUT_V10",
+  "entry_policy_version": "ORDER_FLOW_BALANCED_V4",
   "entry_policy_limits": {
-    "micro_scout": {
-      "max_age_minutes": 15,
-      "min_score": 40,
-      "min_liquidity_usd": 3000,
-      "min_flow_trades": 1,
-      "min_flow_ratio": 1,
-      "min_conviction": 22
-    },
-    "ultra_early": {
-      "max_age_minutes": 45,
-      "min_score": 46,
-      "min_liquidity_usd": 3500,
-      "min_flow_trades": 1,
-      "min_flow_ratio": 1.03,
-      "min_conviction": 27
-    },
-    "early": {
-      "max_age_minutes": 180,
-      "min_score": 55,
-      "min_liquidity_usd": 4500,
-      "min_flow_trades": 2,
-      "min_flow_ratio": 1.08,
-      "min_conviction": 35
-    },
-    "momentum": {
-      "min_score": 70,
-      "min_liquidity_usd": 7000,
-      "min_flow_trades": 3,
-      "min_flow_ratio": 1.15,
-      "min_conviction": 47
-    },
-    "micro_flow_window_seconds": 10,
-    "ultra_flow_window_seconds": 20,
-    "max_entry_impact_pct": 1.75,
+    "min_score": 85.0,
+    "min_liquidity_usd": 30000.0,
+    "min_conviction": 72.0,
+    "min_m5_pct": -3.0,
+    "max_m5_pct": 25.0,
+    "min_h1_pct": -30.0,
+    "max_h1_pct": 150.0,
+    "min_market_buy_sell_ratio": 1.0,
+    "min_liquidity_market_cap_ratio": 0.03,
+    "min_flow_trades": 4,
+    "min_flow_buy_sell_usd_ratio": 1.3,
+    "min_buy_usd": 150.0,
+    "min_unique_wallets": 4,
+    "min_buyer_wallets": 3,
+    "min_wallet_buy_sell_ratio": 1.0,
+    "large_sell_floor_usd": 250.0,
+    "large_sell_buy_fraction": 0.5,
+    "entry_flow_window_seconds": 60,
+    "max_feed_age_ms": 30000,
+    "max_entry_quote_age_ms": 10000,
+    "max_entry_impact_pct": 2.0,
     "max_roundtrip_cost_pct": 2.75,
-    "max_worst_case_cost_pct": 4,
-    "max_quoted_candidates_per_scan": 12,
-    "win_reentry_cooldown_seconds": 120,
-    "loss_reentry_cooldown_seconds": 300,
+    "max_worst_case_cost_pct": 4.5,
+    "max_quoted_candidates_per_scan": 2,
     "risk_overlay": "PLANNED_NET_STOP_NO_FILL_GUARANTEE"
   },
   "support_files_sha256": {
@@ -85,6 +71,7 @@
     "backend/lab_paired_runner.py": "9d58e368a833cb28a6734c8e4f4ca6b260ec481249971ad776db49f01104be86",
     "backend/live_tape.py": "f3f15e0f6e3f6239a3378f19abaadd8af441a4f54365cd2ebdf1242b093d6bea",
     "backend/main_replay.py": "f81e4152a61e00d24a1cb354276aca7ff3fbd4d08c2533d09b1c0c8dc657b6f9",
+    "backend/order_flow_adaptive_oct4.py": "92049f1ad8b25a7af974e3e431d33e54668d1986be5c5cc4225c8ec98ac5089e",
     "backend/pair_price_integrity.py": "f301d4adecf6fa3aa93692bf1d4feb250203a4d76db74dce02fc77c57c43f1cb",
     "backend/paper_execution_quotes.py": "fc5b0582c627800a80edc3fd48f24f8c2a9b4460bbf28cb8571493e1568fe2ac",
     "backend/paper_state_reset.py": "72a270787ca7af6af6b7d3883aae3e09cba3e5a7bc73359f56ec33e14b7b828b",
@@ -96,7 +83,7 @@
     "backend/user_gateway.py": "a46b4b6972e2ef8fece2e8dce52f8bb9485f48a28619f0052a6566670ea03350"
   },
   "runtime_version": "RUNTIME_DURABLE_PAPER_V2",
-  "runtime_note": "Primary PAPER engine now prioritizes many small early scouts. Its own closed-trade journal adapts scout size after repeated mistakes; threshold/exit experiments still run in isolated learner books.",
+  "runtime_note": "Primary PAPER engine runs one $200 ORDER_FLOW_ADAPTIVE position at a time with adaptive conviction holds. Positions opened under an earlier profile keep the exit policy recorded at entry. Threshold/exit experiments still run in isolated learner books.",
   "stop_execution_mode": "JUPITER_USDC_QUOTE_LATENCY_BUFFER_V6",
   "stop_execution_note": "Planned net stop -5%; all observed gap losses and unavailable liquidation risk retained. Never clamps a loss or realizes native SOL as USDC.",
   "entry_data_fallbacks": {
@@ -123,9 +110,9 @@
     "embargo_ms": 60000,
     "recording_drop_blocks_promotion": true,
     "automatic_main_or_live_promotion": false,
-    "main_scout_size_learning": true,
+    "main_scout_size_learning": false,
     "main_signal_auto_promotion": false,
-    "main_loss_response": "SHRINK_NEXT_SCOUT_SIZE_WITHOUT_BLOCKING_ENTRY_FAMILY"
+    "main_loss_response": "NONE_FIXED_NOTIONAL_UNDER_ORDER_FLOW_ADAPTIVE"
   },
   "discovery": {
     "primary_early": "GECKOTERMINAL_SOLANA_NEW_POOLS_PUMPSWAP",
@@ -137,11 +124,11 @@
   "baseline_commit": "bccb0ed30bac1efbf2e16cfe89e0ee1af049f050",
   "baseline_manifest": "docs/strategy-lock-before-repair.json",
   "hash_basis": "UTF8_LF",
-  "exit_policy_version": "HONEST_NET_EXIT_V1",
+  "exit_policy_version": "ADAPTIVE_CONTEXT_HOLD_NET_V1",
   "hash_change_reasons": {
-    "backend/market_monitor.py": "High-frequency newborn scoring, 10/20s validated early flow windows, 16 concurrent PAPER scouts, 10-100 USD scout sizing, outcome-aware re-entry cooldown and journal-based size learning. All-time PAPER history is merged for read-only dashboard reporting without changing operational entry/exit/risk state.",
-    "backend/engine_entry_policy.py": "Raised validated quote throughput to 12 candidates per scan and versioned V10 high-frequency scout policy.",
-    "backend/gold_order_flow.py": "Added MICRO_SCOUT before ULTRA_EARLY with lower early thresholds while leaving safety/price/execution vetoes outside and mandatory.",
+    "backend/market_monitor.py": "2026-10-08: explicit strategy profile selection; ORDER_FLOW_ADAPTIVE (2026-10-04) is the primary profile with module-owned configuration, BALANCED_V4 entry filter, 60s flow window, fixed $200 size, $100 daily gate, 20-minute same-token cooldown, one position and adaptive conviction exits. EARLY_SCOUT_V10 behavior is unchanged when selected. Open positions keep the exit policy recorded at entry.",
+    "backend/engine_entry_policy.py": "Raised validated quote throughput to 12 candidates per scan and versioned V10 high-frequency scout policy. Unchanged on 2026-10-08; used only by the EARLY_SCOUT_V10 profile.",
+    "backend/gold_order_flow.py": "Added MICRO_SCOUT before ULTRA_EARLY with lower early thresholds while leaving safety/price/execution vetoes outside and mandatory. Unchanged on 2026-10-08; used only by the EARLY_SCOUT_V10 profile.",
     "backend/engine_exit_policy.py": "Versioned net fixed policy and original adaptive candidate, no chart stop",
     "backend/engine_execution.py": "Fresh exact-quantity quote path, landing delay, final signal age and forced refresh",
     "backend/honest_quote_transport.py": "Shared cross-platform budget with exit priority and explicit API errors",
@@ -160,6 +147,78 @@
     "backend/strategy_lab.py": "Inert import, complete histories and truthful profit factor Includes the isolated PAPER MOMENTUM_HUNTER challenger and ranking diagnostics.",
     "backend/astra6_brain.py": "Shared exit-priority quote transport, cache/backoff, UTF-8 persistence and truthful profit factor",
     "backend/lab_paired_runner.py": "Cross-platform file locking and UTF-8 persistence",
-    "backend/main_replay.py": "Actual primary engine recorded-only evidence replay"
-  }
+    "backend/main_replay.py": "Actual primary engine recorded-only evidence replay",
+    "backend/order_flow_adaptive_oct4.py": "New pure module: owned configuration, ORDER_FLOW_BALANCED_V4 entry filter, conviction model, hold modes and exit priority recovered from commit 5b78efd."
+  },
+  "strategy_profile": "ORDER_FLOW_ADAPTIVE_OCT4",
+  "strategy_version": "gold-2026-10-04",
+  "recovered_from_commit": "5b78efdba8121f2a8ce11e8ecc400a3e97443ad5",
+  "exit_policy": "oct4_adaptive",
+  "accounting_exit_version": "HONEST_NET_EXIT_V1",
+  "learning_mode": "ADAPTIVE_CONTEXT_HOLD",
+  "hold_modes": [
+    {
+      "mode": "RUNNER",
+      "min_conviction": 85.0,
+      "max_hold_minutes": 60.0,
+      "target_pct": null,
+      "trail_arm_pct": 15.0,
+      "trail_pct": 7.0
+    },
+    {
+      "mode": "STRONG",
+      "min_conviction": 72.0,
+      "max_hold_minutes": 30.0,
+      "target_pct": null,
+      "trail_arm_pct": 12.0,
+      "trail_pct": 6.0
+    },
+    {
+      "mode": "NORMAL",
+      "min_conviction": 58.0,
+      "max_hold_minutes": 15.0,
+      "target_pct": 20.0,
+      "trail_arm_pct": 9.0,
+      "trail_pct": 5.0
+    },
+    {
+      "mode": "CAUTIOUS",
+      "min_conviction": 45.0,
+      "max_hold_minutes": 8.0,
+      "target_pct": 14.0,
+      "trail_arm_pct": 7.0,
+      "trail_pct": 4.0
+    },
+    {
+      "mode": "WEAK",
+      "min_conviction": 0.0,
+      "max_hold_minutes": 4.0,
+      "target_pct": 8.0,
+      "trail_arm_pct": 5.0,
+      "trail_pct": 3.0
+    }
+  ],
+  "exit_limits": {
+    "conviction_exit_below": 35.0,
+    "orderflow_min_trades": 4,
+    "orderflow_min_sells": 3,
+    "orderflow_sell_floor_usd": 200.0,
+    "orderflow_sell_buy_multiple": 2.0,
+    "orderflow_max_signal_pct": 3.0,
+    "profit_lock_peak_pct": 10.0,
+    "profit_lock_conviction_below": 50.0,
+    "profit_lock_min_profit_pct": 2.0,
+    "max_hold_conviction_below": 72.0
+  },
+  "config_ownership": "backend/order_flow_adaptive_oct4.py CONFIG; same-named NEO_* environment variables are ignored and reported in /state config.ignored_env_overrides.",
+  "alternate_profiles": {
+    "EARLY_SCOUT_V10": {
+      "selected_by": "NEO_STRATEGY_PROFILE=EARLY_SCOUT_V10",
+      "strategy_id": "ORDER_FLOW_EARLY_SCOUT_PAPER_V10",
+      "entry_policy_version": "ORDER_FLOW_HIGH_FREQ_SCOUT_V10",
+      "exit_policy_version": "HONEST_NET_EXIT_V1",
+      "previous_lock_market_monitor_sha256": "ef65970cc02aa94744a72bb21e2114ae1a4f101dbcdb39d5fc60253649c53770"
+    }
+  },
+  "documentation": "docs/ORDER_FLOW_ADAPTIVE_OCT4.md"
 }

@@ -8,6 +8,13 @@ import pair_price_integrity as pi
 import market_monitor as m
 
 A='A'*44;B='B'*44
+
+def setUpModule():
+    # These suites pin the 2026-10-05 EARLY_SCOUT_V10 profile they were written for.
+    import market_monitor
+    market_monitor.apply_strategy_profile(market_monitor.V10_PROFILE)
+
+
 class GoldParityTests(unittest.TestCase):
  def test_frozen_baseline_ast_hash_and_20000_inputs(self):
   text=(Path(__file__).parent/'fixtures/gold_entry_expression.txt').read_text()

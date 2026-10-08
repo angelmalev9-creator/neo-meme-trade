@@ -14,6 +14,7 @@ import pair_price_integrity as price_integrity
 import pumpswap_stop_quote as pumpswap_stop
 import engine_runtime as runtime
 import engine_exit_policy as exit_policy
+import order_flow_adaptive_oct4 as oct4
 import training_bridge
 from lab_dashboard_projection import compact_strategy_lab
 
@@ -69,6 +70,89 @@ for _threshold in (STRICT_MAX_ENTRY_IMPACT_PCT, STRICT_MAX_ROUNDTRIP_COST_PCT, S
 if TRADE_NOTIONAL_USD <= 0 or POSITION_SCAN_SECONDS <= 0: raise ValueError('invalid PAPER configuration')
 if MAX_POSITION_RISK_USD <= 0 or not 0 < MAX_TOTAL_EXPOSURE_PCT <= 100 or not 0 <= MAX_DRAWDOWN_PCT <= 100:
     raise ValueError('invalid PAPER risk limits')
+
+# --- Strategy profile -------------------------------------------------------
+# Exactly one versioned profile decides entries and exits for this process.
+# ORDER_FLOW_ADAPTIVE_OCT4 (the primary strategy) owns its whole configuration
+# in order_flow_adaptive_oct4.CONFIG and ignores same-named environment
+# variables; EARLY_SCOUT_V10 keeps the 2026-10-05 environment-driven values
+# captured above. An unknown profile refuses to start.
+V10_PROFILE = 'EARLY_SCOUT_V10'
+DEFAULT_STRATEGY_PROFILE = oct4.PROFILE
+_V10_SETTINGS = dict(
+    SCAN_SECONDS=SCAN_SECONDS, POSITION_SCAN_SECONDS=POSITION_SCAN_SECONDS, MAX_POSITIONS=MAX_POSITIONS,
+    WIN_REENTRY_SECONDS=WIN_REENTRY_SECONDS, LOSS_REENTRY_SECONDS=LOSS_REENTRY_SECONDS,
+    STOP_LOSS_PCT=STOP_LOSS_PCT, TAKE_PROFIT_PCT=TAKE_PROFIT_PCT, TRAILING_PCT=TRAILING_PCT,
+    MAX_HOLD_MINUTES=MAX_HOLD_MINUTES, TRADE_NOTIONAL_USD=TRADE_NOTIONAL_USD,
+    MAX_DAILY_LOSS_USD=MAX_DAILY_LOSS_USD, MAX_POSITION_RISK_USD=MAX_POSITION_RISK_USD,
+    MAX_TOTAL_EXPOSURE_PCT=MAX_TOTAL_EXPOSURE_PCT, MAX_DRAWDOWN_PCT=MAX_DRAWDOWN_PCT,
+    STRICT_ENTRY_SCORE=STRICT_ENTRY_SCORE, STRICT_MIN_CONVICTION=STRICT_MIN_CONVICTION,
+    STRICT_MIN_LIQUIDITY_USD=STRICT_MIN_LIQUIDITY_USD,
+    STRICT_MAX_ENTRY_IMPACT_PCT=STRICT_MAX_ENTRY_IMPACT_PCT,
+    STRICT_MAX_ROUNDTRIP_COST_PCT=STRICT_MAX_ROUNDTRIP_COST_PCT,
+    STRICT_MAX_WORST_CASE_COST_PCT=STRICT_MAX_WORST_CASE_COST_PCT,
+    EFFECTIVE_ENTRY_THRESHOLDS=EFFECTIVE_ENTRY_THRESHOLDS,
+    SIGNAL_STRATEGY='ORDER_FLOW_EARLY_SCOUT_PAPER_V10', STRATEGY_VERSION=order_flow.SOURCE_COMMIT,
+    ENTRY_POLICY_VERSION=entry_policy.POLICY_VERSION, SIGNAL_SOURCE=order_flow.SOURCE_COMMIT,
+    EXIT_POLICY='fixed', EXIT_POLICY_VERSION=exit_policy.VERSION,
+    LEARNING_MODE='HIGH_FREQ_SCOUT_SIZE_LEARNING+SEPARATE_VALIDATED_TRAINING',
+    MAX_QUOTED_CANDIDATES=entry_policy.MAX_QUOTED_CANDIDATES,
+    ENTRY_ON_POSITION_GUARD=True, DAILY_BUDGET_SIZING=True,
+    CONFIG_SOURCE='environment+market_monitor defaults', IGNORED_ENV_OVERRIDES=(),
+)
+
+
+def _oct4_settings() -> dict[str, Any]:
+    c, limits = oct4.CONFIG, oct4.ENTRY_LIMITS
+    return dict(
+        SCAN_SECONDS=c['scan_seconds'], POSITION_SCAN_SECONDS=c['position_scan_seconds'],
+        MAX_POSITIONS=c['max_positions'],
+        WIN_REENTRY_SECONDS=c['same_token_cooldown_seconds'],
+        LOSS_REENTRY_SECONDS=c['same_token_cooldown_seconds'],
+        STOP_LOSS_PCT=c['stop_loss_pct'], TAKE_PROFIT_PCT=c['take_profit_pct'],
+        TRAILING_PCT=c['trailing_pct'], MAX_HOLD_MINUTES=c['max_hold_minutes'],
+        TRADE_NOTIONAL_USD=c['trade_notional_usd'], MAX_DAILY_LOSS_USD=c['max_daily_loss_usd'],
+        MAX_POSITION_RISK_USD=c['max_position_full_loss_usd'],
+        MAX_TOTAL_EXPOSURE_PCT=c['max_total_exposure_pct'], MAX_DRAWDOWN_PCT=c['max_drawdown_pct'],
+        STRICT_ENTRY_SCORE=limits['min_score'], STRICT_MIN_CONVICTION=limits['min_conviction'],
+        STRICT_MIN_LIQUIDITY_USD=limits['min_liquidity_usd'],
+        STRICT_MAX_ENTRY_IMPACT_PCT=c['max_entry_impact_pct'],
+        STRICT_MAX_ROUNDTRIP_COST_PCT=c['max_roundtrip_cost_pct'],
+        STRICT_MAX_WORST_CASE_COST_PCT=c['max_worst_case_cost_pct'],
+        EFFECTIVE_ENTRY_THRESHOLDS=order_flow.EntryThresholds(
+            limits['min_score'], limits['min_liquidity_usd'], limits['min_conviction']),
+        SIGNAL_STRATEGY=oct4.STRATEGY_ID, STRATEGY_VERSION=oct4.STRATEGY_VERSION,
+        ENTRY_POLICY_VERSION=oct4.ENTRY_POLICY_VERSION, SIGNAL_SOURCE=oct4.SOURCE_COMMIT,
+        EXIT_POLICY=oct4.EXIT_POLICY, EXIT_POLICY_VERSION=oct4.EXIT_POLICY_VERSION,
+        LEARNING_MODE=oct4.LEARNING_MODE,
+        MAX_QUOTED_CANDIDATES=c['max_quoted_candidates_per_scan'],
+        ENTRY_ON_POSITION_GUARD=c['entry_on_position_guard'],
+        DAILY_BUDGET_SIZING=c['daily_budget_sizing'],
+        CONFIG_SOURCE='order_flow_adaptive_oct4.CONFIG',
+        IGNORED_ENV_OVERRIDES=tuple(sorted(name for name in oct4.OWNED_ENV if os.getenv(name) is not None)),
+    )
+
+
+def apply_strategy_profile(name: str | None = None) -> str:
+    """Select the strategy profile. Production calls this once, at import."""
+    global STRATEGY_PROFILE
+    profile = str(name or os.getenv('NEO_STRATEGY_PROFILE') or DEFAULT_STRATEGY_PROFILE).strip().upper()
+    if profile == oct4.PROFILE:
+        settings = _oct4_settings()
+    elif profile == V10_PROFILE:
+        settings = _V10_SETTINGS
+    else:
+        raise ValueError(f'unknown NEO_STRATEGY_PROFILE {profile!r}; refusing to start')
+    globals().update(settings)
+    STRATEGY_PROFILE = profile
+    return profile
+
+
+def is_oct4() -> bool:
+    return STRATEGY_PROFILE == oct4.PROFILE
+
+
+apply_strategy_profile()
 
 # Legacy deterministic PAPER friction model; quote-backed positions use the
 # versioned engine_execution adapter. PumpSwap canonical fee tiers mirror pump.fun fees
@@ -347,7 +431,7 @@ class State:
         self.pending_audit: list[dict[str, Any]] = []
         self.audit_status = 'ok'
         self.equity_peak_usd = STARTING_BALANCE_USD
-        self.entry_diagnostics = {'status': 'starting', 'policy_version': entry_policy.POLICY_VERSION}
+        self.entry_diagnostics = {'status': 'starting', 'policy_version': ENTRY_POLICY_VERSION}
         self.risk_day_key = time.strftime('%Y-%m-%d', time.gmtime())
         self.risk_day_start_balance_usd = STARTING_BALANCE_USD
         if load_state: self.load()
@@ -476,7 +560,7 @@ class State:
                 demo_started_at=now_ms(), demo_session_id=new_session, trade_seq=0,
                 equity_peak_usd=STARTING_BALANCE_USD,
                 risk_day_key=time.strftime('%Y-%m-%d', time.gmtime()), risk_day_start_balance_usd=STARTING_BALANCE_USD,
-                entry_diagnostics={'status': 'reset', 'policy_version': entry_policy.POLICY_VERSION})
+                entry_diagnostics={'status': 'reset', 'policy_version': ENTRY_POLICY_VERSION})
             self.event(f'New PAPER session with ${STARTING_BALANCE_USD:.2f}; archive {archive.name}.')
             self.save()
             return str(archive)
@@ -640,14 +724,21 @@ class State:
                     'stop_trigger_net_pct': -STOP_LOSS_PCT,
                     'take_profit_basis': 'EXECUTABLE_NET_PNL',
                     'reentry_seconds': WIN_REENTRY_SECONDS, 'loss_reentry_seconds': LOSS_REENTRY_SECONDS,
-                    'signal_strategy': 'ORDER_FLOW_EARLY_SCOUT_PAPER_V10',
-                    'signal_source_commit': order_flow.SOURCE_COMMIT,
+                    'signal_strategy': SIGNAL_STRATEGY,
+                    'strategy_profile': STRATEGY_PROFILE, 'strategy_version': STRATEGY_VERSION,
+                    'learning_mode': LEARNING_MODE,
+                    'config_source': CONFIG_SOURCE,
+                    'ignored_env_overrides': list(IGNORED_ENV_OVERRIDES),
+                    'same_token_cooldown_seconds': LOSS_REENTRY_SECONDS if is_oct4() else None,
+                    'entry_flow_window_seconds': oct4.CONFIG['entry_flow_window_seconds'] if is_oct4() else None,
+                    'entry_on_position_guard': ENTRY_ON_POSITION_GUARD,
+                    'adaptive_strategy': oct4.describe() if is_oct4() else None,
                     'risk_overlay': 'PLANNED_NET_STOP_NO_FILL_GUARANTEE',
                     'execution_verification_version': 'QUOTE_EVIDENCE_V9',
                     'rug_guard': rug_guard.VERSION,
                     'paper_only': True,
                     'runtime_version': runtime.VERSION,
-                    'daily_budget_sizing': True,
+                    'daily_budget_sizing': DAILY_BUDGET_SIZING,
                     'stop_execution_buffer_pct': STOP_EXECUTION_BUFFER_PCT,
                     'exit_impact_emergency_pct': EXIT_IMPACT_EMERGENCY_PCT,
                     'take_profit_pct': TAKE_PROFIT_PCT,
@@ -663,18 +754,24 @@ class State:
                     'daily_loss_cap_enabled': MAX_DAILY_LOSS_USD > 0,
                     'starting_balance_usd': STARTING_BALANCE_USD,
                     'execution_mode': 'PAPER_QUOTE_OR_OBSERVED_POOL_MODEL',
-                    'execution_note': 'PAPER only; high-frequency early micro scouts, observed quotes with modeled fills, full fees and uncapped gap losses. Main journal learns scout size; validated strategy experiments remain separate.',
-                    'entry_policy_version': entry_policy.POLICY_VERSION,
-                    'exit_policy': 'fixed', 'exit_policy_version': exit_policy.VERSION,
+                    'execution_note': (
+                        'PAPER only; 2026-10-04 ORDER_FLOW_ADAPTIVE decisions with adaptive conviction holds. '
+                        'Observed quotes with modeled fills, full fees and uncapped gap losses; a planned stop is not a guaranteed fill.'
+                        if is_oct4() else
+                        'PAPER only; high-frequency early micro scouts, observed quotes with modeled fills, full fees and uncapped gap losses. Main journal learns scout size; validated strategy experiments remain separate.'),
+                    'entry_policy_version': ENTRY_POLICY_VERSION,
+                    'exit_policy': EXIT_POLICY, 'exit_policy_version': EXIT_POLICY_VERSION,
                     'effective_config_hash': effective_config_hash(),
-                    'effective_entry_thresholds': EFFECTIVE_ENTRY_THRESHOLDS.as_dict(),
-                    'signal_source_commit': order_flow.SOURCE_COMMIT,
-                    'max_quoted_candidates_per_scan': entry_policy.MAX_QUOTED_CANDIDATES,
+                    'effective_entry_thresholds': (dict(oct4.ENTRY_LIMITS) if is_oct4()
+                                                   else EFFECTIVE_ENTRY_THRESHOLDS.as_dict()),
+                    'signal_source_commit': SIGNAL_SOURCE,
+                    'max_quoted_candidates_per_scan': MAX_QUOTED_CANDIDATES,
                     'strict_entry_score': STRICT_ENTRY_SCORE,
                     'strict_min_conviction': STRICT_MIN_CONVICTION,
                     'strict_min_liquidity_usd': STRICT_MIN_LIQUIDITY_USD,
                     'strict_max_entry_impact_pct': STRICT_MAX_ENTRY_IMPACT_PCT,
                     'strict_max_roundtrip_cost_pct': STRICT_MAX_ROUNDTRIP_COST_PCT,
+                    'strict_max_worst_case_cost_pct': STRICT_MAX_WORST_CASE_COST_PCT,
                     'jupiter_slippage_bps': paper_quotes.SLIPPAGE_BPS,
                     'generic_dex_fee_bps': GENERIC_DEX_FEE_BPS,
                     'base_slippage_bps': BASE_SLIPPAGE_BPS,
@@ -738,8 +835,8 @@ def trade_metrics(trades):
 
 
 def effective_config_hash():
-    config = {'entry': EFFECTIVE_ENTRY_THRESHOLDS.as_dict(), 'entry_version': entry_policy.POLICY_VERSION,
-              'exit_version': exit_policy.VERSION, 'stop_pct': STOP_LOSS_PCT, 'take_profit_pct': TAKE_PROFIT_PCT,
+    config = {'entry': EFFECTIVE_ENTRY_THRESHOLDS.as_dict(), 'entry_version': ENTRY_POLICY_VERSION,
+              'exit_version': EXIT_POLICY_VERSION, 'stop_pct': STOP_LOSS_PCT, 'take_profit_pct': TAKE_PROFIT_PCT,
               'risk_buffer_pct': STOP_EXECUTION_BUFFER_PCT, 'daily_loss_usd': MAX_DAILY_LOSS_USD,
               'max_positions': MAX_POSITIONS, 'notional_usd': TRADE_NOTIONAL_USD,
               'win_reentry_seconds': WIN_REENTRY_SECONDS, 'loss_reentry_seconds': LOSS_REENTRY_SECONDS,
@@ -753,6 +850,10 @@ def effective_config_hash():
               'assumed_execution_buffer_bps': paper_quotes.BUFFER_BPS,
               'simulated_execution_delay_ms': paper_quotes.SIMULATED_DELAY_MS,
               'max_signal_age_ms': paper_quotes.MAX_SIGNAL_AGE_MS}
+    if is_oct4():
+        # The whole owned policy is part of the identity of an ORDER_FLOW_ADAPTIVE run.
+        for key in ('micro_flow_seconds', 'ultra_flow_seconds'): config.pop(key)
+        config['adaptive_strategy'] = oct4.describe()
     return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
 
 
@@ -1157,7 +1258,7 @@ class Monitor:
         candidates = []
         for coin in feed:
             age = num(coin.get('ageMinutes'), 999999)
-            if num(coin.get('score')) < STRICT_ENTRY_SCORE or num(coin.get('liquidityUsd')) < STRICT_MIN_LIQUIDITY_USD or age > 360:
+            if num(coin.get('score')) < STRICT_ENTRY_SCORE or num(coin.get('liquidityUsd')) < STRICT_MIN_LIQUIDITY_USD or (age > 360 and not is_oct4()):
                 continue
             tx = (coin.get('txns') or {}).get('m5') or {}
             activity = num(tx.get('buys')) + num(tx.get('sells'))
@@ -1194,119 +1295,8 @@ class Monitor:
         address = coin.get('address') or (position or {}).get('address')
         fast = STATE.live_flow(address, 30, str(coin.get('pairAddress') or ''))
         slow = STATE.live_flow(address, 300, str(coin.get('pairAddress') or ''))
-        changes = coin.get('priceChange') or {}
-        tx_m5 = (coin.get('txns') or {}).get('m5') or {}
-        m5 = num(changes.get('m5'))
-        h1 = num(changes.get('h1'))
-        market_ratio = num(tx_m5.get('buys')) / max(num(tx_m5.get('sells')), 1.0)
-        liquidity = num(coin.get('liquidityUsd'))
-        entry_liquidity = num((position or {}).get('entry_liquidity_usd'), liquidity)
-        liquidity_ratio = liquidity / max(entry_liquidity, 1.0)
-        score = 50.0
-
-        fast_ratio = num(fast.get('buy_sell_usd_ratio'))
-        slow_ratio = num(slow.get('buy_sell_usd_ratio'))
-        if fast_ratio >= 3.0:
-            score += 18
-        elif fast_ratio >= 2.0:
-            score += 12
-        elif fast_ratio >= 1.4:
-            score += 6
-        elif fast_ratio < 0.8:
-            score -= 20
-        elif fast_ratio < 1.0:
-            score -= 10
-
-        if slow_ratio >= 2.0:
-            score += 12
-        elif slow_ratio >= 1.4:
-            score += 7
-        elif slow_ratio < 0.8:
-            score -= 15
-        elif slow_ratio < 1.0:
-            score -= 7
-
-        if num(slow.get('unique_wallets')) >= 10:
-            score += 6
-        elif num(slow.get('unique_wallets')) >= 5:
-            score += 3
-        elif num(slow.get('unique_wallets')) <= 2:
-            score -= 5
-
-        if num(slow.get('repeat_buy_wallets')) >= 3:
-            score += 6
-        elif num(slow.get('repeat_buy_wallets')) >= 1:
-            score += 3
-
-        whale_buy = num(slow.get('whale_buy_usd'))
-        whale_sell = num(slow.get('whale_sell_usd'))
-        if whale_buy > 0 and whale_buy >= whale_sell * 1.3:
-            score += 6
-        elif whale_sell > 0 and whale_sell >= max(whale_buy * 1.3, 750.0):
-            score -= 8
-
-        if 0 <= m5 <= 10:
-            score += 8
-        elif -2 <= m5 < 0:
-            score += 2
-        elif m5 > 20:
-            score -= 8
-        elif m5 < -5:
-            score -= 15
-
-        if 0 <= h1 <= 120:
-            score += 4
-        elif h1 < -15:
-            score -= 8
-        elif h1 > 250:
-            score -= 5
-
-        if market_ratio >= 1.4:
-            score += 8
-        elif market_ratio >= 1.1:
-            score += 4
-        elif market_ratio < 0.8:
-            score -= 8
-
-        if liquidity_ratio >= 0.95:
-            score += 3
-        elif liquidity_ratio < 0.80:
-            score -= 15
-        elif liquidity_ratio < 0.90:
-            score -= 7
-
-        neo_score = num(coin.get('score'))
-        if neo_score >= 95:
-            score += 4
-        elif neo_score < 85:
-            score -= 4
-
-        conviction = round(clamp(score), 1)
-        if conviction >= 85:
-            mode, max_hold, target, trail_arm, trail = 'RUNNER', 60.0, None, 15.0, 7.0
-        elif conviction >= 72:
-            mode, max_hold, target, trail_arm, trail = 'STRONG', 30.0, None, 12.0, 6.0
-        elif conviction >= 58:
-            mode, max_hold, target, trail_arm, trail = 'NORMAL', 15.0, 20.0, 9.0, 5.0
-        elif conviction >= 45:
-            mode, max_hold, target, trail_arm, trail = 'CAUTIOUS', 8.0, 14.0, 7.0, 4.0
-        else:
-            mode, max_hold, target, trail_arm, trail = 'WEAK', 4.0, 8.0, 5.0, 3.0
-
-        return {
-            'conviction': conviction, 'mode': mode, 'max_hold_minutes': max_hold,
-            'target_pct': target, 'trail_arm_pct': trail_arm, 'trail_pct': trail,
-            'm5': round(m5, 3), 'h1': round(h1, 3), 'market_buy_sell_ratio': round(market_ratio, 3),
-            'liquidity_ratio_vs_entry': round(liquidity_ratio, 3),
-            'fast_flow': fast, 'slow_flow': slow,
-            'holder_proxy': {
-                'unique_wallets_5m': slow.get('unique_wallets', 0),
-                'repeat_buy_wallets_5m': slow.get('repeat_buy_wallets', 0),
-                'wallet_buy_sell_ratio_5m': slow.get('wallet_buy_sell_ratio', 0),
-                'whale_buy_usd_5m': slow.get('whale_buy_usd', 0),
-                'whale_sell_usd_5m': slow.get('whale_sell_usd', 0),
-            },
-        }
+        # One conviction model for entries and exits: order_flow_adaptive_oct4.
+        return oct4.market_context(coin, fast, slow, (position or {}).get('entry_liquidity_usd'))
 
     def _quote_unavailable(self, position, session, reason, error='no_sell_route'):
         with STATE.lock:
@@ -1435,10 +1425,28 @@ class Monitor:
             pct = pnl/max(notional,1e-18)*100
             peak_pct = max(pct,num(position.get('peak_net_pnl_pct'), pct))
             hold = (now_ms()-int(position.get('opened_at',now_ms())))/60000
+            # A position is managed by the policy recorded when it was opened,
+            # so changing the active profile never rewrites an open trade's rules.
             policy = str(position.get('exit_policy') or 'fixed')
-            context = self.market_context(coin,position) if policy == 'adaptive' else {}
-            reason = reason or exit_policy.exit_reason(position, context, net_pct=pct,peak_net_pct=peak_pct,
-                hold_minutes=hold,stop_pct=STOP_LOSS_PCT,take_profit_pct=TAKE_PROFIT_PCT,policy=policy)
+            context = self.market_context(coin,position) if policy in ('adaptive', oct4.EXIT_POLICY) else {}
+            market = num(coin.get('priceUsd'), num(position.get('current_price')))
+            entry = num(position.get('entry_price'))
+            peak_price = max(market, num(position.get('peak_price')))
+            # The observed exact-pool price drives context triggers only while
+            # it is fresh; otherwise the decision falls back to the net mark.
+            signal_ok = fresh_market and num(coin.get('priceUsd')) > 0 and entry > 0
+            signal_pct = (market-entry)/entry*100 if signal_ok else None
+            peak_signal_pct = (peak_price-entry)/entry*100 if signal_ok else None
+            def decide(net_now, peak_now):
+                if policy == oct4.EXIT_POLICY:
+                    return oct4.exit_reason(context, net_pct=net_now, peak_net_pct=peak_now, hold_minutes=hold,
+                        signal_pct=signal_pct, peak_signal_pct=peak_signal_pct,
+                        stop_pct=num(position.get('stop_loss_pct'), oct4.CONFIG['stop_loss_pct']))
+                return exit_policy.exit_reason(position, context, net_pct=net_now, peak_net_pct=peak_now,
+                    hold_minutes=hold, stop_pct=STOP_LOSS_PCT,
+                    take_profit_pct=num(position.get('take_profit_net_pct'), TAKE_PROFIT_PCT) if policy == 'fixed' else TAKE_PROFIT_PCT,
+                    policy=policy)
+            reason = reason or decide(pct, peak_pct)
             if num(quote.get('impact_pct')) >= max(EXIT_IMPACT_EMERGENCY_PCT,num(position.get('entry_price_impact_pct'))+.50):
                 reason = reason or 'EXIT_IMPACT_EMERGENCY'
             if reason and is_quote and quote.get('from_cache'):
@@ -1457,11 +1465,17 @@ class Monitor:
                 peak_pct = max(peak_pct,pct)
                 # A profit signal must still hold at the actual simulated sale.
                 if reason.startswith(('TAKE_PROFIT', 'ADAPTIVE_TP', 'ADAPTIVE_TRAILING', 'CONVICTION_PROFIT')):
-                    reason = exit_policy.exit_reason(position,context,net_pct=pct,peak_net_pct=peak_pct,
-                        hold_minutes=hold,stop_pct=STOP_LOSS_PCT,take_profit_pct=TAKE_PROFIT_PCT,policy=policy)
-            market = num(coin.get('priceUsd'), num(position.get('current_price')))
-            entry = num(position.get('entry_price'))
-            updated = dict(position, current_price=market,peak_price=max(market,num(position.get('peak_price'))),
+                    reason = decide(pct, peak_pct)
+            adaptive_fields = {}
+            if policy == oct4.EXIT_POLICY:
+                adaptive_fields = dict(conviction=context.get('conviction'), hold_mode=context.get('mode'),
+                    adaptive_target_pct=context.get('target_pct'),
+                    adaptive_max_hold_minutes=context.get('max_hold_minutes'),
+                    adaptive_trail_arm_pct=context.get('trail_arm_pct'),
+                    adaptive_trail_pct=context.get('trail_pct'),
+                    peak_signal_pnl_pct=peak_signal_pct, exit_signal_basis='OBSERVED_POOL_PRICE' if signal_ok else 'NET_MARK_FALLBACK',
+                    current_score=coin.get('score', position.get('current_score')))
+            updated = dict(position, **adaptive_fields, current_price=market,peak_price=peak_price,
                 pnl_usd=round(pnl,8),pnl_pct=round(pct,8),peak_net_pnl_pct=peak_pct,
                 mfe_net_pct=max(peak_pct,num(position.get('mfe_net_pct'),pct)),
                 mae_net_pct=min(pct,num(position.get('mae_net_pct'),pct)),
@@ -1473,7 +1487,8 @@ class Monitor:
                 conservative_risk_usd=notional+entry_cost, execution_quote_at=quote.get('quoted_at',now_ms()),
                 execution_quote_source=quote.get('execution_source','MODEL_V1'), updated_at=now_ms(),
                 pending_exit_reason=reason,exit_state='PENDING_EXIT' if reason else 'OPEN',exit_retry_count=0,next_exit_retry_at=0,
-                exit_policy_version=exit_policy.ADAPTIVE_VERSION if policy == 'adaptive' else exit_policy.VERSION,
+                exit_policy_version=(oct4.EXIT_POLICY_VERSION if policy == oct4.EXIT_POLICY
+                    else exit_policy.ADAPTIVE_VERSION if policy == 'adaptive' else exit_policy.VERSION),
                 market_context=context, estimated_exit_dex_fee_usd=num(quote.get('dex_fee_usd')),
                 estimated_exit_network_fee_usd=num(quote.get('network_fee_usd')),
                 estimated_exit_price_impact_pct=num(quote.get('impact_pct')),
@@ -1505,14 +1520,15 @@ class Monitor:
     def run_position_guard(self) -> None:
         while not self.stop_event.is_set():
             if STATE.positions: self.fast_position_check()
-            if STATE.running:
+            # ORDER_FLOW_ADAPTIVE evaluates entries once per market scan only.
+            if STATE.running and ENTRY_ON_POSITION_GUARD:
                 with STATE.lock: feed=[dict(c) for c in STATE.feed]
                 self.maybe_open(feed)
             self.stop_event.wait(POSITION_SCAN_SECONDS)
 
     def maybe_open(self, feed: list[dict[str, Any]]) -> None:
         if not STATE.running or not self.entry_lock.acquire(blocking=False): return
-        report = {'policy_version': entry_policy.POLICY_VERSION, 'checked_at': now_ms(),
+        report = {'policy_version': ENTRY_POLICY_VERSION, 'strategy': SIGNAL_STRATEGY, 'checked_at': now_ms(),
                   'candidates': len(feed), 'evaluated': 0, 'signal_passed': 0,
                   'quoted': 0, 'opened': 0, 'rejections': {}, 'examples': [], 'max_positions': MAX_POSITIONS}
         try:
@@ -1556,8 +1572,8 @@ class Monitor:
         now = now_ms()
         # Outcome-aware cooldown: keep sampling many different coins, but avoid
         # immediate revenge loops on the same mint.
-        recent = set()
-        for trade in STATE.history:
+        recent = oct4.cooldown_addresses(STATE.history, now, LOSS_REENTRY_SECONDS) if is_oct4() else set()
+        for trade in ([] if is_oct4() else STATE.history):
             recent_address = trade.get('address')
             closed_at = int(trade.get('closed_at') or 0)
             if not recent_address or closed_at <= 0:
@@ -1584,19 +1600,29 @@ class Monitor:
             market_cap = num(coin.get('marketCap') or coin.get('fdv'))
             liquidity_mc_ratio = liquidity / max(market_cap, 1.0)
 
-            flow_seconds = 10 if age <= 15 else 20 if age <= 45 else 30
+            if is_oct4():
+                flow_seconds = int(oct4.CONFIG['entry_flow_window_seconds'])
+                def signal_check(c, f, ctx):
+                    return oct4.signal_rejections(c, f, ctx, now=now_ms())
+            else:
+                flow_seconds = 10 if age <= 15 else 20 if age <= 45 else 30
+                def signal_check(c, f, ctx):
+                    return entry_policy.signal_rejections(
+                        c, f, ctx, min_score=EFFECTIVE_ENTRY_THRESHOLDS.min_score,
+                        min_liquidity=EFFECTIVE_ENTRY_THRESHOLDS.min_liquidity,
+                        min_conviction=EFFECTIVE_ENTRY_THRESHOLDS.min_conviction, now=now_ms())
             flow = STATE.live_flow(address, flow_seconds, str(coin.get('pairAddress') or ''))
             context = self.market_context(coin)
-            rejected = entry_policy.signal_rejections(
-                coin, flow, context, min_score=EFFECTIVE_ENTRY_THRESHOLDS.min_score,
-                min_liquidity=EFFECTIVE_ENTRY_THRESHOLDS.min_liquidity,
-                min_conviction=EFFECTIVE_ENTRY_THRESHOLDS.min_conviction, now=now_ms(),
-            )
+            rejected = signal_check(coin, flow, context)
             if rejected:
-                reject(report, rejected, coin)
+                reject(report, rejected, coin, {
+                    'score': score, 'liquidity_usd': liquidity, 'conviction': context.get('conviction'),
+                    'flow_trades': flow.get('trades'), 'flow_ratio': flow.get('buy_sell_usd_ratio'),
+                } if is_oct4() else None)
                 continue
             report['signal_passed'] += 1
-            entry_mode = order_flow.entry_mode(coin, flow, context, EFFECTIVE_ENTRY_THRESHOLDS)
+            entry_mode = (oct4.ENTRY_MODE if is_oct4()
+                          else order_flow.entry_mode(coin, flow, context, EFFECTIVE_ENTRY_THRESHOLDS))
             if not entry_mode:
                 reject(report, ['gold_signal'], coin)
                 continue
@@ -1620,13 +1646,18 @@ class Monitor:
             if safety.get('status') != 'pass' or safety.get('provisional_early'):
                 reject(report, safety.get('reasons') or ['risk_check_pending'], coin)
                 continue
-            if report['quoted'] >= entry_policy.MAX_QUOTED_CANDIDATES:
+            if report['quoted'] >= MAX_QUOTED_CANDIDATES:
                 reject(report, ['quote_budget'], coin)
                 continue
-            strategy_id = 'ORDER_FLOW_EARLY_SCOUT_PAPER_V10'
-            # Learn from mistakes without killing trade frequency: the main journal
-            # adapts only scout size. Threshold/exit experiments remain isolated.
-            learning = adaptive_scout_profile(entry_mode)
+            strategy_id = SIGNAL_STRATEGY
+            if is_oct4():
+                # Fixed historical size: no journal-driven resizing in this strategy.
+                learning = {'sample': 0, 'wins': 0, 'win_rate': 0.0, 'avg_pnl_pct': 0.0, 'profit_factor': None,
+                            'recent_losses': 0, 'size_multiplier': 1.0, 'bonus': 0.0}
+            else:
+                # Learn from mistakes without killing trade frequency: the main journal
+                # adapts only scout size. Threshold/exit experiments remain isolated.
+                learning = adaptive_scout_profile(entry_mode)
             recovery = False
             price = num(coin.get('priceUsd'))
             if price <= 0:
@@ -1649,14 +1680,18 @@ class Monitor:
             # Reserve each open position's planned stop budget separately from
             # the full-loss exposure used by the capital and position limits.
             open_planned_risk=sum(num(p.get('planned_risk_usd')) for p in STATE.positions)
-            requested_notional = min(early_requested_notional(coin, learning),MAX_POSITION_RISK_USD-fixed_cost_budget)
+            base_notional = TRADE_NOTIONAL_USD if is_oct4() else early_requested_notional(coin, learning)
+            requested_notional = min(base_notional,MAX_POSITION_RISK_USD-fixed_cost_budget)
+            # With budget sizing off the daily limit stays a hard gate above
+            # and never shrinks the position.
+            sizing_day_limit = MAX_DAILY_LOSS_USD if DAILY_BUDGET_SIZING else 0.0
             notional = runtime.plan_notional(
-                requested_notional,available_before,MAX_DAILY_LOSS_USD,
+                requested_notional,available_before,sizing_day_limit,
                 STATE.risk_day_pnl()-open_planned_risk,
                 STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
             )
             if notional < 10:
-                reject(report,['risk_budget_unavailable'],coin); return
+                reject(report,['risk_budget_unavailable' if DAILY_BUDGET_SIZING else 'balance'],coin); return
             report['quoted'] += 1
             dex_id = str(coin.get('dexId') or '').lower()
             if dex_id == 'pumpswap':
@@ -1734,18 +1769,18 @@ class Monitor:
                 current_coin = next((c for c in STATE.feed if c.get('address') == address and c.get('pairAddress') == coin.get('pairAddress')), coin)
                 final_flow = STATE.live_flow(address, flow_seconds, str(coin.get('pairAddress') or ''))
                 final_context = self.market_context(current_coin)
-                final_rejections = entry_policy.signal_rejections(current_coin,final_flow,final_context,
-                    min_score=EFFECTIVE_ENTRY_THRESHOLDS.min_score,min_liquidity=EFFECTIVE_ENTRY_THRESHOLDS.min_liquidity,
-                    min_conviction=EFFECTIVE_ENTRY_THRESHOLDS.min_conviction,now=now_ms())
+                final_rejections = signal_check(current_coin,final_flow,final_context)
                 if final_rejections:
                     reject(report,final_rejections,coin)
                     continue
-                if STATE.available_balance_usd()<entry_quote['capital_committed_usd'] or (MAX_DAILY_LOSS_USD > 0 and STATE.risk_day_pnl()<=-MAX_DAILY_LOSS_USD):
+                if MAX_DAILY_LOSS_USD > 0 and STATE.risk_day_pnl()<=-MAX_DAILY_LOSS_USD:
+                    reject(report,['daily_limit'],coin); return
+                if STATE.available_balance_usd()<entry_quote['capital_committed_usd']:
                     reject(report,['balance'],coin); return
                 live_open_risk=sum(num(p.get('planned_risk_usd')) for p in STATE.positions)
                 current_exposure_available=max(0,STATE.equity_usd()*MAX_TOTAL_EXPOSURE_PCT/100-STATE.reserved_usd())
                 permitted = runtime.plan_notional(
-                    requested_notional,min(STATE.available_balance_usd(),current_exposure_available),MAX_DAILY_LOSS_USD,
+                    requested_notional,min(STATE.available_balance_usd(),current_exposure_available),sizing_day_limit,
                     STATE.risk_day_pnl()-live_open_risk,
                     STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
                 )
@@ -1757,6 +1792,8 @@ class Monitor:
                     reject(report,['stale_signal'],coin)
                     continue
                 next_trade_no = STATE.trade_seq + 1
+                # ORDER_FLOW_ADAPTIVE records the context re-checked at commit.
+                entry_context = final_context if is_oct4() else context
                 position = {
                     'id': f'{STATE.demo_session_id}:{address}:{next_trade_no}', 'address': address,
                     'pairAddress': coin.get('pairAddress'), 'name': coin.get('name'),
@@ -1767,9 +1804,11 @@ class Monitor:
                     'trade_no': next_trade_no, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
                     'entry_mode': entry_mode,
                     'provisional_early_safety': bool(safety.get('provisional_early')),
-                    'learning_mode': 'HIGH_FREQ_SCOUT_SIZE_LEARNING+SEPARATE_VALIDATED_TRAINING', 'entry_flow': final_flow,
-                    'entry_context': context, 'entry_conviction': context.get('conviction'),
-                    'entry_hold_mode': context.get('mode'), 'learning_sample': learning['sample'],
+                    'strategy_profile': STRATEGY_PROFILE, 'strategy_version': STRATEGY_VERSION,
+                    'learning_mode': LEARNING_MODE, 'entry_flow': final_flow,
+                    'entry_flow_window_seconds': flow_seconds, 'stop_loss_pct': STOP_LOSS_PCT,
+                    'entry_context': entry_context, 'entry_conviction': entry_context.get('conviction'),
+                    'entry_hold_mode': entry_context.get('mode'), 'learning_sample': learning['sample'],
                     'learning_win_rate': learning['win_rate'], 'learning_profit_factor': learning['profit_factor'],
                     'learning_recent_losses': learning['recent_losses'], 'learning_bonus': learning['bonus'],
                     'learning_avg_pnl_pct': learning.get('avg_pnl_pct'),
@@ -1798,11 +1837,12 @@ class Monitor:
                     'jupiter_entry_price_impact_pct': impact_pct,
                     'jupiter_slippage_bps': int(live_quote.get('slippage_bps') or paper_quotes.SLIPPAGE_BPS),
                     'entry_roundtrip_pnl_pct': round(immediate_roundtrip_pct, 4),
-                    'entry_policy_version': entry_policy.POLICY_VERSION,
-                    'exit_policy': 'fixed', 'exit_policy_version': exit_policy.VERSION,
+                    'entry_policy_version': ENTRY_POLICY_VERSION,
+                    'exit_policy': EXIT_POLICY, 'exit_policy_version': EXIT_POLICY_VERSION,
                     'effective_config_hash': effective_config_hash(),
-                    'effective_entry_thresholds': EFFECTIVE_ENTRY_THRESHOLDS.as_dict(),
-                    'signal_source_commit': order_flow.SOURCE_COMMIT,
+                    'effective_entry_thresholds': (dict(oct4.ENTRY_LIMITS) if is_oct4()
+                                                   else EFFECTIVE_ENTRY_THRESHOLDS.as_dict()),
+                    'signal_source_commit': SIGNAL_SOURCE,
                     'execution_verification_version': 'QUOTE_EVIDENCE_V9',
                     'entry_quote': live_quote.get('raw_quote'),
                     'preflight_buy_quote': live_quote.get('preflight_buy_quote'),
@@ -1816,7 +1856,9 @@ class Monitor:
                     'entry_dex_fee_usd': round(entry_quote['dex_fee_usd'], 8),
                     'entry_network_fee_usd': round(entry_quote['network_fee_usd'], 8),
                     'entry_account_reserve_usd': entry_rent, 'token_decimals': decimals,
-                    'risk_check': safety, 'take_profit_net_pct': TAKE_PROFIT_PCT,
+                    'risk_check': safety,
+                    # Adaptive holds carry their target in the live hold mode (None = trail only).
+                    'take_profit_net_pct': entry_context.get('target_pct') if is_oct4() else TAKE_PROFIT_PCT,
                     'cost_assumptions': 'Jupiter AMM fees included; 10bps/leg buffer, network budget, account rent reserve',
                     'entry_price_impact_pct': round(entry_quote['impact_pct'], 6),
                     'entry_slippage_pct': round(entry_quote['slippage_pct'] + entry_quote['latency_pct'], 6),

@@ -19,6 +19,12 @@ import engine_exit_policy as exit_policy
 
 A, B, C = 'A'*44, 'B'*44, 'C'*44
 
+def setUpModule():
+    # These suites pin the 2026-10-05 EARLY_SCOUT_V10 profile they were written for.
+    import market_monitor
+    market_monitor.apply_strategy_profile(market_monitor.V10_PROFILE)
+
+
 class MainPaperRepair(unittest.TestCase):
     def test_non_utf8_locale_restart_retains_multilingual_history(self):
         # A real child with UTF-8 mode disabled reproduces Windows cp1251 and
