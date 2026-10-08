@@ -656,11 +656,12 @@ class EffectiveConfig(EngineHarness):
 
     def test_profile_selection_is_explicit_and_fails_closed(self):
         self.addCleanup(m.apply_strategy_profile, oct4.PROFILE)
-        self.assertEqual(m.DEFAULT_STRATEGY_PROFILE, 'ORDER_FLOW_ADAPTIVE_OCT4')
+        self.assertEqual(m.DEFAULT_STRATEGY_PROFILE, 'ORDER_FLOW_ADAPTIVE_LEARNING')
+        self.assertEqual(oct4.PROFILE, 'ORDER_FLOW_ADAPTIVE_OCT4')
         with patch.dict(os.environ, {'NEO_STRATEGY_PROFILE': 'something-else'}):
             with self.assertRaisesRegex(ValueError, 'refusing to start'):
                 m.apply_strategy_profile()
-        self.assertTrue(m.is_oct4())
+        self.assertTrue(m.is_adaptive() and not m.is_learner())
         adaptive_hash = m.effective_config_hash()
         with patch.dict(os.environ, {'NEO_STRATEGY_PROFILE': 'early_scout_v10'}):
             self.assertEqual(m.apply_strategy_profile(), 'EARLY_SCOUT_V10')
