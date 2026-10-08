@@ -23,7 +23,8 @@ The result of the last run is in `/var/lib/neo-market/deploy/status.json`.
 | --- | --- |
 | `backend/*.py` used by the engine (anything not listed below) | `neo-user-angel-paper.service` |
 | `backend/user_gateway.py`, `backend/engine_runtime.py` | `neo-user-gateway.service` (after the engine is healthy) |
-| `backend/live_tape.py`, `strategy_lab.py`, `lab_*.py`, `astra*.py`, `fomo_monitor.py`, `main_replay.py` | nothing — those services run from `/root/neomemecoins` |
+| `backend/strategy_lab.py`, `lab_activity.py`, the lab bridges and their shared modules | `neo-strategy-lab.service`, but only if that unit's `ExecStart` points into this checkout; a lab running from another tree is left alone and the log says so |
+| `backend/live_tape.py`, `lab_paired_*.py`, `astra6_brain.py`, `fomo_monitor.py`, `main_replay.py` | nothing — those services are not managed here |
 | frontend, docs, tests, scripts | nothing — the files are only pulled |
 
 A new backend module that is not on the exclusion list restarts the engine, so engine code can never be skipped by omission.
