@@ -13,6 +13,7 @@ import gold_order_flow as order_flow
 import pair_price_integrity as price_integrity
 import pumpswap_stop_quote as pumpswap_stop
 import coin_flow
+import coin_wallets
 import engine_runtime as runtime
 import engine_exit_policy as exit_policy
 import order_flow_adaptive_oct4 as oct4
@@ -403,6 +404,36 @@ def read_coin_flow(address: str, pair: str) -> dict[str, Any]:
             pair = str(coin.get('pairAddress') or '')
         coin = dict(coin) if coin else None
     return coin_flow.build(address, pair, coin=coin, tape=read_live_tape(), fetch=_gecko_json)
+
+
+def _dashboard_rpc(method: str, params: list[Any]) -> Any:
+    """Read-only Solana RPC for dashboard lookups; slower budget than the stop guard's."""
+    last_error: Exception | None = None
+    for url in dict.fromkeys([pumpswap_stop.RPC_URL, pumpswap_stop.RPC_FALLBACK_URL]):
+        if not url:
+            continue
+        try:
+            response = SESSION.post(url, json={'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}, timeout=(1.0, 6.0))
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get('error'):
+                raise RuntimeError(str(payload['error'])[:180])
+            return payload.get('result')
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            last_error = exc
+    raise RuntimeError(str(last_error or 'RPC unavailable'))
+
+
+def read_coin_wallets(address: str, pair: str) -> dict[str, Any]:
+    """Dashboard-only wallet activity and top holders for one token."""
+    address, pair = str(address or '')[:64], str(pair or '')[:64]
+    if not address:
+        return {'error': 'address_required'}
+    if not pair:
+        with STATE.lock:
+            coin = next((c for c in STATE.feed if c.get('address') == address), None)
+            pair = str((coin or {}).get('pairAddress') or '')
+    return coin_wallets.build(address, pair, tape=read_live_tape(), fetch=_gecko_json, rpc=_dashboard_rpc)
 
 
 def read_live_tape() -> dict[str, Any]:
@@ -2189,6 +2220,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == '/lab-book':
             self.send_json(read_lab_book((parse_qs(parsed.query).get('id') or [''])[0]))
+            return
+        if parsed.path == '/coin-wallets':
+            query = parse_qs(parsed.query)
+            self.send_json(read_coin_wallets((query.get('address') or [''])[0], (query.get('pair') or [''])[0]))
             return
         if parsed.path == '/coin-flow':
             query = parse_qs(parsed.query)
