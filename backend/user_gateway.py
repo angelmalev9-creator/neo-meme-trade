@@ -10,7 +10,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 from engine_runtime import atomic_json
@@ -454,6 +454,11 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/user/token":
                 suffix = f"?{parsed.query}" if parsed.query else ""
                 self.json_response(proxy_user_engine(user, "GET", f"/token{suffix}"))
+                return
+            if parsed.path == "/user/lab-book":
+                # Only the book id is forwarded; the engine reads the lab's own file.
+                book_id = (parse_qs(parsed.query).get("id") or [""])[0]
+                self.json_response(proxy_user_engine(user, "GET", "/lab-book?" + urlencode({"id": book_id[:64]})))
                 return
             self.json_response({"error": "not_found"}, 404)
         except Exception as exc:

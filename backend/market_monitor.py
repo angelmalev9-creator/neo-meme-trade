@@ -17,7 +17,7 @@ import engine_exit_policy as exit_policy
 import order_flow_adaptive_oct4 as oct4
 import adaptive_learning as learner
 import training_bridge
-from lab_dashboard_projection import compact_strategy_lab
+from lab_dashboard_projection import book_trades, compact_strategy_lab
 
 HOST = os.getenv('NEO_MONITOR_HOST', '127.0.0.1')
 PORT = int(os.getenv('NEO_MONITOR_PORT', '8788'))
@@ -376,6 +376,14 @@ def read_strategy_lab() -> dict[str, Any]:
         return compact_strategy_lab(data)
     except Exception:
         return {'status': 'offline', 'books': {}, 'stats': {}}
+
+def read_lab_book(book_id: str) -> dict[str, Any]:
+    """Full trade list of one Strategy Lab book, read from the lab's own state file."""
+    try:
+        data = json.loads(STRATEGY_LAB_PATH.read_text(encoding='utf-8'))
+    except Exception:
+        data = {}
+    return book_trades(data, book_id)
 
 def read_live_tape() -> dict[str, Any]:
     try:
@@ -2158,6 +2166,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             address = (parse_qs(parsed.query).get('address') or [''])[0]
             result = STATE.token_snapshot(address)
             self.send_json(result if result else {'error': 'token_not_found'}, 200 if result else 404)
+            return
+        if parsed.path == '/lab-book':
+            self.send_json(read_lab_book((parse_qs(parsed.query).get('id') or [''])[0]))
             return
         self.send_json({'error': 'not_found'}, 404)
 
