@@ -91,7 +91,8 @@
     "backend/user_gateway.py": "e51ce4a6e0077df26d0804356dc463ba0350bb3904c7b24291d12892bbfc70f3",
     "backend/lab_activity.py": "deb81c318f6c0419ed6237a40288cbb175bd8f7c1fca42adc431029ec06a1c14",
     "backend/x_signal_monitor.py": "eb7c3f952a8f4048ebfd956c2d6a479fb04c31c83b9925b2a3ebb691a138298a",
-    "backend/discovery_universe.py": "17072087527fa3adef5ab27df64b132bd8310892ac65773b3b9f175486a170b4"
+    "backend/discovery_universe.py": "17072087527fa3adef5ab27df64b132bd8310892ac65773b3b9f175486a170b4",
+    "backend/hype_radar.py": "3b3e8520e26ee7eb6c65f76d14f7f7fd55ffd837b668fefdc69d8d174918aca0"
   },
   "runtime_version": "RUNTIME_DURABLE_PAPER_V2",
   "runtime_note": "Primary PAPER engine holds up to eight liquidity-scaled positions across CORE and EXPLORE tiers. Positions opened under an earlier profile keep the stop and exit policy recorded at entry.",
@@ -162,7 +163,8 @@
     "backend/order_flow_adaptive_oct4.py": "Pure module: owned configuration, conviction model, hold modes and exit priority. 2026-10-08: entry filter changed from ORDER_FLOW_BALANCED_V4 to the GOLD rule of tag strategy-gold-v1-2026-10-04 (score 85, liquidity $15k, 5m -5..25, 3 flow trades, ratio 1.30, 1 wallet, large-sell guard, conviction 75).",
     "backend/adaptive_learning.py": "New pure module (2026-10-08): owned configuration, CORE/EXPLORE tiers, liquidity-scaled sizing and time-decayed per-context learning of size and avoid/allow.",
     "backend/lab_activity.py": "2026-10-08: adds X_SIGNAL PAPER entry/risk configuration only; shared safety and execution-cost logic remain unchanged. 2026-10-08: EntryRule.failures() names the failing conditions for diagnostics; matches() is unchanged. 2026-10-08: HYPE_RADAR rule/overrides and two diagnostic labels.",
-    "backend/x_signal_monitor.py": "2026-10-08: budget-capped xAI X Search collector for PAPER signals; allowed handles only, literal addresses only, no order execution, atomic state output."
+    "backend/x_signal_monitor.py": "2026-10-08: budget-capped xAI X Search collector for PAPER signals; allowed handles only, literal addresses only, no order execution, atomic state output.",
+    "backend/hype_radar.py": "2026-10-08: Hype Radar PAPER collector and pure token/theme matcher used by HYPE_RADAR entry gating; locked because match_token() and active_themes() influence lab entry eligibility."
   },
   "strategy_profile": "ORDER_FLOW_ADAPTIVE_LEARNING",
   "strategy_version": "learner-2026-10-08",
