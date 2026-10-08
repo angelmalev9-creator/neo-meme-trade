@@ -455,6 +455,9 @@ class Handler(BaseHTTPRequestHandler):
                 suffix = f"?{parsed.query}" if parsed.query else ""
                 self.json_response(proxy_user_engine(user, "GET", f"/token{suffix}"))
                 return
+            if parsed.path == "/user/hype-radar":
+                self.json_response(proxy_user_engine(user, "GET", "/hype-radar"))
+                return
             if parsed.path == "/user/coin-wallets":
                 query = parse_qs(parsed.query)
                 forwarded = {"address": (query.get("address") or [""])[0][:64], "pair": (query.get("pair") or [""])[0][:64]}

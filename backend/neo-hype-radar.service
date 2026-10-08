@@ -1,0 +1,27 @@
+[Unit]
+Description=NEO Hype Radar (news + memes -> themes) for PAPER Strategy Lab
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/neo-meme-trade
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/etc/neo/neo-hype-radar.env
+ExecStart=/usr/bin/python3 /root/neo-meme-trade/backend/hype_radar.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/neo-market
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=160M
+CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target

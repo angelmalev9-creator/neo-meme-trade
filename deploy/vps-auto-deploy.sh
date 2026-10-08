@@ -194,7 +194,7 @@ PY
   # Any backend module restarts the engine unless it is known to belong to
   # another process, so a new engine module can never be silently skipped.
   if printf '%s\n' "$changed" | grep -E '^backend/[^/]+\.py$' \
-      | grep -Ev '^backend/(user_gateway|live_tape|strategy_lab|lab_activity|lab_paired_[a-z_]+|astra[a-z0-9_]*|fomo_monitor|main_replay)\.py$' \
+      | grep -Ev '^backend/(user_gateway|live_tape|strategy_lab|lab_activity|lab_paired_[a-z_]+|astra[a-z0-9_]*|fomo_monitor|main_replay|x_signal_monitor)\.py$' \
       | grep -q .; then engine_changed=1; fi
   if printf '%s\n' "$changed" | grep -Eq '^backend/(user_gateway|engine_runtime)\.py$'; then gateway_changed=1; fi
   if [ "$engine_changed" = 1 ] && [ "$GATEWAY_ON_ENGINE_CHANGE" = 1 ]; then gateway_changed=1; fi
