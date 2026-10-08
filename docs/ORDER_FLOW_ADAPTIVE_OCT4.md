@@ -2,17 +2,17 @@
 
 Status: **PAPER only.** No signing, no swap submission, no live-money path. Nothing here promises a win rate, a trade frequency, a stop fill or a maximum realized loss.
 
-The primary engine strategy is again the 2026-10-04 `ORDER_FLOW_ADAPTIVE` decision policy (entry `ORDER_FLOW_BALANCED_V4`, hold `ADAPTIVE_CONTEXT_HOLD`), running on the current durable, exact-pool, honest-accounting runtime. The 2026-10-05 high-frequency scout remains available as an explicit second profile.
+The primary engine strategy is again the 2026-10-04 `ORDER_FLOW_ADAPTIVE` decision policy (entry `ORDER_FLOW_GOLD_V1`, hold `ADAPTIVE_CONTEXT_HOLD`), running on the current durable, exact-pool, honest-accounting runtime. The 2026-10-05 high-frequency scout remains available as an explicit second profile.
 
 | Identity | Value |
 | --- | --- |
 | `signal_strategy` | `ORDER_FLOW_ADAPTIVE` |
 | `strategy_profile` | `ORDER_FLOW_ADAPTIVE_OCT4` |
 | `strategy_version` | `gold-2026-10-04` |
-| `entry_policy_version` | `ORDER_FLOW_BALANCED_V4` |
+| `entry_policy_version` | `ORDER_FLOW_GOLD_V1` |
 | `learning_mode` | `ADAPTIVE_CONTEXT_HOLD` |
 | `exit_policy` / `exit_policy_version` | `oct4_adaptive` / `ADAPTIVE_CONTEXT_HOLD_NET_V1` |
-| Recovered from | commit `5b78efd` (2026-10-04 22:25) |
+| Recovered from | tag `strategy-gold-v1-2026-10-04` (`44a7a09`), locked again in `da4a219` |
 
 ## Where each setting comes from
 
@@ -24,7 +24,17 @@ Effective values: scan 15 s, position scan 2 s, 1 position, $200 notional, $100 
 
 ## Entry — all must pass
 
-Valid mint and exact pair; price > 0; feed ≤ 30 s old; complete verified order-flow coverage for the exact pool; NEO score ≥ 85; liquidity ≥ $30,000; 5m change −3%…+25%; 1h change −30%…+150%; 5m market buys/sells ≥ 1.0; liquidity/market cap ≥ 0.03; ≥ 4 verified flow trades; flow buy/sell USD ≥ 1.30; verified buy USD ≥ $150; ≥ 4 unique wallets; ≥ 3 buyer wallets; wallet buyer/seller ratio ≥ 1.0; largest sell < max($250, 50% of buy USD); conviction ≥ 72.
+Valid mint and exact pair; price > 0; feed ≤ 30 s old; complete verified order-flow coverage for the exact pool; NEO score ≥ 85; liquidity ≥ $15,000; 5m change −5%…+25%; in the last 60 s at least 3 verified trades, buy/sell USD ≥ 1.30 and at least 1 wallet; largest sell < max($750, 80% of buy USD); conviction ≥ 75.
+
+### Which 4 October filter this is
+
+Two different entry filters carried the `ORDER_FLOW_ADAPTIVE` name that day. The GOLD rule above ran from 2026-10-03 20:08 until 2026-10-04 21:35 and produced the day's activity. `ORDER_FLOW_BALANCED_V4` replaced it at 22:25 and added eight more requirements (liquidity $30k, 1h trend, market buyers, liquidity/market cap, 4 trades, $150 buy volume, 4 wallets, 3 buyers, wallet ratio); the archived sample holds two trades from it. The first restore used V4 and the engine went quiet for the same reason it had on the evening of the 4th. The GOLD rule is the one in force now.
+
+Three things still make the engine trade less than it did then, and none of them is the entry rule:
+
+- **Costs are real now.** On 4 October a fill was booked at the chart price with no fee, impact or slippage, so a $200 position in a $15k pool looked free. With real quotes that round trip costs several percent and is refused by the cost caps (impact ≤ 2.0%, round trip ≤ 2.75%, worst case ≤ 4.50%), which have to sit inside the 5% stop. In practice entries need a pool deep and cheap enough for $200.
+- **The daily gate is enforced.** That day's code carried a $30 daily limit that nothing checked. The $100 gate here stops new entries for the rest of the UTC day once reached.
+- **Flow must be verified for the exact pool.** A pool the shared live tape does not cover is rejected as `flow_quality` instead of being read as "no sellers".
 
 Then the modern checks, unchanged: independent price integrity (with exact-pool Jupiter tie-break), rug guard, consistent entry + immediate-exit quotes for the exact pool, cost caps, signal freshness at commit. Missing evidence is a rejection, never a pass.
 
@@ -108,7 +118,7 @@ print({'history': len(d['history']), 'balance': s['demo_balance_usd'], 'open': s
 curl -s http://127.0.0.1:8789/user/health
 ```
 
-Expect `ORDER_FLOW_ADAPTIVE` / `ORDER_FLOW_BALANCED_V4`, `paper_only: true`, the same port, a history count and balance that did not fall, and `ignored_env_overrides` naming the old strategy variables still present in the unit. The strategy change itself needs no gateway restart. The gateway is restarted only for the Vercel hosting move (`docs/HOSTING_VERCEL.md`), which changes its CORS allowlist and nothing else.
+Expect `ORDER_FLOW_ADAPTIVE` / `ORDER_FLOW_GOLD_V1`, `paper_only: true`, the same port, a history count and balance that did not fall, and `ignored_env_overrides` naming the old strategy variables still present in the unit. The strategy change itself needs no gateway restart. The gateway is restarted only for the Vercel hosting move (`docs/HOSTING_VERCEL.md`), which changes its CORS allowlist and nothing else.
 
 ## Roll back
 

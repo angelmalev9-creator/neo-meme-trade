@@ -43,7 +43,7 @@ def context(conviction, **extra):
 
 
 class EntryFilter(unittest.TestCase):
-    """Handoff tests 1-7: ORDER_FLOW_BALANCED_V4."""
+    """ORDER_FLOW_GOLD_V1: the entry rule in force through the 2026-10-04 trading day."""
 
     def rejected(self, coin=None, flow=None, conviction=80):
         return oct4.signal_rejections(coin or good_coin(), flow or good_flow(),
@@ -56,60 +56,68 @@ class EntryFilter(unittest.TestCase):
         self.assertEqual(self.rejected({**good_coin(), 'score': 84}), ['score'])
         self.assertEqual(self.rejected({**good_coin(), 'score': 85}), [])
 
-    def test_03_liquidity_below_30k_rejects(self):
-        coin = {**good_coin(), 'liquidityUsd': 29_999, 'marketCap': 100_000}
-        self.assertEqual(self.rejected(coin), ['liquidity'])
-        self.assertEqual(self.rejected({**coin, 'liquidityUsd': 30_000}), [])
+    def test_03_liquidity_below_15k_rejects(self):
+        self.assertEqual(self.rejected({**good_coin(), 'liquidityUsd': 14_999}), ['liquidity'])
+        self.assertEqual(self.rejected({**good_coin(), 'liquidityUsd': 15_000}), [])
 
-    def test_04_conviction_71_rejects_and_72_passes(self):
-        self.assertEqual(self.rejected(conviction=71), ['conviction'])
-        self.assertEqual(self.rejected(conviction=72), [])
+    def test_04_conviction_below_75_rejects(self):
+        self.assertEqual(self.rejected(conviction=74.9), ['conviction'])
+        self.assertEqual(self.rejected(conviction=75), [])
 
     def test_05_flow_ratio_below_1_30_rejects(self):
         self.assertEqual(self.rejected(flow={**good_flow(), 'buy_sell_usd_ratio': 1.29}), ['flow_ratio'])
         self.assertEqual(self.rejected(flow={**good_flow(), 'buy_sell_usd_ratio': 1.30}), [])
 
-    def test_06_fewer_than_four_unique_wallets_rejects(self):
-        self.assertEqual(self.rejected(flow={**good_flow(), 'unique_wallets': 3}), ['wallet_count'])
+    def test_06_flow_needs_three_trades_and_one_wallet(self):
+        self.assertEqual(self.rejected(flow={**good_flow(), 'trades': 2}), ['flow_count'])
+        self.assertEqual(self.rejected(flow={**good_flow(), 'trades': 3}), [])
+        self.assertEqual(self.rejected(flow={**good_flow(), 'unique_wallets': 0}), ['wallet_count'])
+        self.assertEqual(self.rejected(flow={**good_flow(), 'unique_wallets': 1}), [])
 
     def test_07_large_sell_protection(self):
-        # Limit is max($250, 50% of verified buy USD); the sell must be strictly below it.
-        self.assertEqual(self.rejected(flow={**good_flow(), 'max_sell_usd': 250}), ['large_sells'])
-        self.assertEqual(self.rejected(flow={**good_flow(), 'max_sell_usd': 249.99}), [])
-        big = {**good_flow(), 'buy_usd': 1000}
-        self.assertEqual(self.rejected(flow={**big, 'max_sell_usd': 499}), [])
-        self.assertEqual(self.rejected(flow={**big, 'max_sell_usd': 500}), ['large_sells'])
+        # Limit is max($750, 80% of verified buy USD); the sell must be strictly below it.
+        self.assertEqual(self.rejected(flow={**good_flow(), 'max_sell_usd': 750}), ['large_sells'])
+        self.assertEqual(self.rejected(flow={**good_flow(), 'max_sell_usd': 749.99}), [])
+        big = {**good_flow(), 'buy_usd': 2000}
+        self.assertEqual(self.rejected(flow={**big, 'max_sell_usd': 1599}), [])
+        self.assertEqual(self.rejected(flow={**big, 'max_sell_usd': 1600}), ['large_sells'])
 
-    def test_every_remaining_named_check(self):
+    def test_remaining_named_checks_and_boundaries(self):
         coin, flow = good_coin(), good_flow()
         cases = {
             'invalid_pair': ({**coin, 'pairAddress': 'not-a-pool'}, flow),
             'invalid_price': ({**coin, 'priceUsd': 0}, flow),
             'stale_feed': ({**coin, 'updatedAt': NOW - 30_001}, flow),
-            'momentum': ({**coin, 'priceChange': {'m5': 25.1, 'h1': 8}}, flow),
-            'hour_trend': ({**coin, 'priceChange': {'m5': 5, 'h1': -30.1}}, flow),
-            'market_buyers': ({**coin, 'txns': {'m5': {'buys': 2, 'sells': 3}}}, flow),
-            'liquidity_ratio': ({**coin, 'marketCap': 7_000_000}, flow),
-            'flow_count': (coin, {**flow, 'trades': 3}),
-            'buy_volume': (coin, {**flow, 'buy_usd': 149.99}),
-            'buyer_count': (coin, {**flow, 'buyer_wallets': 2}),
-            'wallet_ratio': (coin, {**flow, 'wallet_buy_sell_ratio': .99}),
+            'momentum': ({**coin, 'priceChange': {'m5': 25.1}}, flow),
         }
         for reason, (c, f) in cases.items():
             with self.subTest(reason=reason):
                 self.assertEqual(self.rejected(c, f), [reason])
-        self.assertEqual(self.rejected({**coin, 'priceChange': {'m5': -3, 'h1': 150}}), [])
+        self.assertEqual(self.rejected({**coin, 'priceChange': {'m5': -5.1}}), ['momentum'])
+        for m5 in (-5, 25):
+            self.assertEqual(self.rejected({**coin, 'priceChange': {'m5': m5}}), [])
         self.assertEqual(self.rejected({**coin, 'updatedAt': NOW - 30_000}), [])
+
+    def test_checks_that_belonged_only_to_the_late_evening_filter_are_gone(self):
+        # ORDER_FLOW_BALANCED_V4 also demanded these; the trading-day rule never did.
+        coin = {**good_coin(), 'liquidityUsd': 15_000, 'marketCap': 50_000_000,       # liquidity/mcap 0.0003
+                'priceChange': {'m5': 5, 'h1': -80}, 'txns': {'m5': {'buys': 1, 'sells': 9}}}
+        flow = {'quality': 'COMPLETE', 'trades': 3, 'buy_usd': 20, 'sell_usd': 10, 'buy_sell_usd_ratio': 1.3,
+                'unique_wallets': 1, 'buyer_wallets': 1, 'wallet_buy_sell_ratio': .2, 'max_sell_usd': 10}
+        self.assertEqual(self.rejected(coin, flow, conviction=75), [])
+        self.assertEqual(set(oct4.ENTRY_LIMITS), {
+            'min_score', 'min_liquidity_usd', 'min_conviction', 'min_m5_pct', 'max_m5_pct', 'min_flow_trades',
+            'min_flow_buy_sell_usd_ratio', 'min_unique_wallets', 'large_sell_floor_usd', 'large_sell_buy_fraction'})
 
     def test_27_missing_evidence_fails_closed(self):
         self.assertIn('flow_quality', self.rejected(flow={**good_flow(), 'quality': 'DEGRADED'}))
         self.assertIn('flow_quality', self.rejected(flow={k: v for k, v in good_flow().items() if k != 'quality'}))
         coin = good_coin()
-        del coin['priceChange'], coin['marketCap']
-        self.assertEqual(self.rejected(coin), ['momentum', 'hour_trend', 'liquidity_ratio'])
+        del coin['priceChange']
+        self.assertEqual(self.rejected(coin), ['momentum'])
         self.assertEqual(oct4.signal_rejections(good_coin(), good_flow(), {}, now=NOW), ['conviction'])
         empty = oct4.signal_rejections({}, {}, {}, now=NOW)
-        self.assertEqual(len(empty), 18)
+        self.assertEqual(len(empty), 12)
 
 
 class ConvictionModel(unittest.TestCase):
@@ -333,7 +341,7 @@ class EngineEntries(EngineHarness):
         self.assertEqual(pos['notional_usd'], 200)
         self.assertEqual(pos['strategy_id'], 'ORDER_FLOW_ADAPTIVE')
         self.assertEqual(pos['strategy_version'], 'gold-2026-10-04')
-        self.assertEqual(pos['entry_policy_version'], 'ORDER_FLOW_BALANCED_V4')
+        self.assertEqual(pos['entry_policy_version'], 'ORDER_FLOW_GOLD_V1')
         self.assertEqual(pos['learning_mode'], 'ADAPTIVE_CONTEXT_HOLD')
         self.assertEqual(pos['exit_policy'], oct4.EXIT_POLICY)
         self.assertEqual(pos['exit_policy_version'], oct4.EXIT_POLICY_VERSION)
@@ -344,13 +352,13 @@ class EngineEntries(EngineHarness):
         self.assertIsNone(pos['take_profit_net_pct'])
         self.assertLess(pos['entry_roundtrip_pnl_pct'], 0)
         self.assertEqual(m.STATE.entry_diagnostics['status'], 'opened')
-        self.assertEqual(m.STATE.entry_diagnostics['policy_version'], 'ORDER_FLOW_BALANCED_V4')
+        self.assertEqual(m.STATE.entry_diagnostics['policy_version'], 'ORDER_FLOW_GOLD_V1')
         self.assertEqual(self.mocks['flow'].call_args.args[1], 60)
 
     def test_filter_rejections_are_named_in_diagnostics_before_any_quote(self):
         self.coin['score'] = 84
-        self.flow['unique_wallets'] = 3
-        self.context = context(71)
+        self.flow['unique_wallets'] = 0
+        self.context = context(74)
         self.monitor.maybe_open([self.coin])
         self.assertFalse(m.STATE.positions)
         self.mocks['prepare'].assert_not_called()
@@ -359,7 +367,7 @@ class EngineEntries(EngineHarness):
         self.assertEqual((diagnostics['candidates'], diagnostics['evaluated'], diagnostics['signal_passed'],
                           diagnostics['quoted'], diagnostics['opened']), (1, 1, 0, 0, 0))
         self.assertEqual(diagnostics['examples'][0]['reasons'], ['score', 'wallet_count', 'conviction'])
-        self.assertEqual(diagnostics['examples'][0]['metrics']['conviction'], 71)
+        self.assertEqual(diagnostics['examples'][0]['metrics']['conviction'], 74)
         self.assertEqual(set(diagnostics['reason_labels']), {'score', 'wallet_count', 'conviction'})
         self.assertIn('Откази', diagnostics['message'])
 
@@ -513,11 +521,11 @@ class EngineExits(EngineHarness):
         self.assertEqual(trade['exit_reason'], 'ADAPTIVE_TRAILING')
         self.assertAlmostEqual(trade['pnl_usd'], 279.0 - 200.23)
         self.assertEqual((trade['strategy_id'], trade['entry_policy_version'], trade['exit_policy_version']),
-                         ('ORDER_FLOW_ADAPTIVE', 'ORDER_FLOW_BALANCED_V4', oct4.EXIT_POLICY_VERSION))
+                         ('ORDER_FLOW_ADAPTIVE', 'ORDER_FLOW_GOLD_V1', oct4.EXIT_POLICY_VERSION))
         self.assertAlmostEqual(m.STATE.demo_balance_usd, 1000 + 279.0 - 200.23)
         public = m.STATE.snapshot()['history'][0]
         self.assertEqual((public['strategy_id'], public['entry_policy_version'], public['exit_reason']),
-                         ('ORDER_FLOW_ADAPTIVE', 'ORDER_FLOW_BALANCED_V4', 'ADAPTIVE_TRAILING'))
+                         ('ORDER_FLOW_ADAPTIVE', 'ORDER_FLOW_GOLD_V1', 'ADAPTIVE_TRAILING'))
 
     def test_13_gap_through_the_stop_is_booked_uncapped(self):
         self.position()
@@ -612,14 +620,14 @@ class EffectiveConfig(EngineHarness):
         expected = {
             'signal_strategy': 'ORDER_FLOW_ADAPTIVE', 'strategy_profile': 'ORDER_FLOW_ADAPTIVE_OCT4',
             'strategy_version': 'gold-2026-10-04', 'learning_mode': 'ADAPTIVE_CONTEXT_HOLD',
-            'entry_policy_version': 'ORDER_FLOW_BALANCED_V4', 'exit_policy': 'oct4_adaptive',
+            'entry_policy_version': 'ORDER_FLOW_GOLD_V1', 'exit_policy': 'oct4_adaptive',
             'exit_policy_version': 'ADAPTIVE_CONTEXT_HOLD_NET_V1',
             'scan_seconds': 15, 'position_scan_seconds': 2.0, 'max_positions': 1,
             'trade_notional_usd': 200.0, 'max_daily_loss_usd': 100.0, 'daily_loss_cap_enabled': True,
             'stop_loss_pct': 5.0, 'take_profit_pct': 18.0, 'trailing_pct': 4.0, 'max_hold_minutes': 7,
             'same_token_cooldown_seconds': 1200, 'entry_flow_window_seconds': 60,
-            'entry_score': 85.0, 'min_liquidity_usd': 30_000.0,
-            'strict_entry_score': 85.0, 'strict_min_conviction': 72.0, 'strict_min_liquidity_usd': 30_000.0,
+            'entry_score': 85.0, 'min_liquidity_usd': 15_000.0,
+            'strict_entry_score': 85.0, 'strict_min_conviction': 75.0, 'strict_min_liquidity_usd': 15_000.0,
             'strict_max_entry_impact_pct': 2.0, 'strict_max_roundtrip_cost_pct': 2.75,
             'strict_max_worst_case_cost_pct': 4.5, 'max_quoted_candidates_per_scan': 2,
             'daily_budget_sizing': False, 'entry_on_position_guard': False,
