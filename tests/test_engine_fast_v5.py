@@ -11,6 +11,13 @@ import engine_rug_guard as rg
 import engine_execution as ex
 
 A='A'*44; B='B'*44
+
+def setUpModule():
+    # These suites pin the 2026-10-05 EARLY_SCOUT_V10 profile they were written for.
+    import market_monitor
+    market_monitor.apply_strategy_profile(market_monitor.V10_PROFILE)
+
+
 class RiskTests(unittest.TestCase):
  def setUp(self):
   self.account={'owner':next(iter(rg.TOKEN_PROGRAMS)),'data':{'parsed':{'type':'mint','info':{'isInitialized':True,'supply':'1000000000','decimals':6,'mintAuthority':None,'freezeAuthority':None,'extensions':[]}}}}

@@ -57,7 +57,7 @@ type MonitorState = {
   strategy_lab: StrategyLab;
   paper_training?: PaperTrainingSnapshot;
   stats: { feed_count: number; open_positions: number; closed_trades: number; wins: number; win_rate: number; realized_today_usd: number; demo_starting_balance_usd: number; demo_balance_usd: number; demo_equity_usd: number; demo_available_usd: number; demo_reserved_usd: number; unrealized_pnl_usd: number; realized_total_usd: number; return_pct: number; demo_started_at: number; demo_session_id: string; metrics?: { lifetime?: { net_pnl_usd?: number } } };
-  config: { signal_strategy?: string; risk_overlay?: string; execution_verification_version?: string; scan_seconds: number; position_scan_seconds?: number; entry_score: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trailing_pct: number; max_hold_minutes: number; min_liquidity_usd: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number };
+  config: { signal_strategy?: string; entry_policy_version?: string; exit_policy?: string; learning_mode?: string; risk_overlay?: string; execution_verification_version?: string; scan_seconds: number; position_scan_seconds?: number; entry_score: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trailing_pct: number; max_hold_minutes: number; min_liquidity_usd: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number };
 };
 type TokenDetail = { coin: Coin; history: PricePoint[]; position: Position | null; trades: Position[]; live_tape?: LiveTrade[]; flow?: FlowStats };
 type Filter = 'ALL' | 'SETUP' | 'WATCH' | 'NEW' | 'BOOSTED';
@@ -417,7 +417,7 @@ export default function App() {
 
       <section data-testid="execution-integrity" className="mt-4 rounded-2xl border border-sky-400/20 bg-sky-400/[0.04] p-4 text-xs leading-6 text-slate-300">
         <div className="font-bold text-white">Order Flow · стратегията и изпълнението се проверяват отделно</div>
-        <p>Сигнал: {state?.config.signal_strategy ?? 'Зареждане…'} · Стоп −{state?.config.stop_loss_pct ?? 3}% нето · Цел +{state?.config.take_profit_pct ?? 10}% нето.</p>
+        <p>Сигнал: {state?.config.signal_strategy ?? 'Зареждане…'}{state?.config.entry_policy_version ? ` · ${state?.config.entry_policy_version}` : ''} · Стоп −{state?.config.stop_loss_pct ?? 3}% нето · {state?.config.exit_policy === 'oct4_adaptive' ? `Адаптивен изход по conviction (${state?.config.learning_mode ?? 'ADAPTIVE_CONTEXT_HOLD'})` : `Цел +${state?.config.take_profit_pct ?? 10}% нето`}.</p>
         <p>Цените по-долу са от симулираното изпълнение, когато са налични, а не от графиката. Котировката не е изпълнена транзакция. Мрежовите разходи и допълнителният буфер остават оценки.</p>
         <p className="mt-1 text-amber-200">При reset старата PAPER история се архивира и започва нова сесия. Архивните и симулираните резултати не доказват бъдеща доходност.</p>
       </section>

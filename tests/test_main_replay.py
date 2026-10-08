@@ -59,6 +59,11 @@ def production_preflight(final_output=99_600_000):
     assert result is not None
     return result
 
+def setUpModule():
+    # These suites pin the 2026-10-05 EARLY_SCOUT_V10 profile they were written for.
+    import market_monitor
+    market_monitor.apply_strategy_profile(market_monitor.V10_PROFILE)
+
 
 class MainReplayTests(unittest.TestCase):
     def test_actual_production_preflight_adjustment_replays_final_fill_not_initial(self):
@@ -76,7 +81,9 @@ class MainReplayTests(unittest.TestCase):
                 'fill_price':1.6,'impact_pct':.2,'quoted_at':NOW+1000,'from_cache':False,
                 'execution_source':'SYNTHETIC_TEST_ONLY',
                 'raw_quote':raw_quote(A,execution.USDC,entry['token_raw_amount'],160030000,NOW+1000)}
-            with MainReplay(Path(tmp)) as replay:
+            # The recorded evidence is a $200 round trip; pin the V10 scout size to it.
+            with MainReplay(Path(tmp)) as replay, \
+                    patch.object(replay.market,'early_requested_notional',return_value=200.0):
                 result=replay.replay([first,last])
                 self.assertEqual(result['stats']['closed_trades'],1)
                 trade=result['history'][0]
@@ -154,7 +161,9 @@ class MainReplayTests(unittest.TestCase):
                 'slippage_pct':.1,'latency_pct':0,'quoted_at':NOW+1000,'from_cache':False,
                 'execution_source':'SYNTHETIC_TEST_ONLY',
                 'raw_quote':raw_quote(A,usdc,100000000,160030000,NOW+1000)}
-            with MainReplay(Path(tmp)) as replay:
+            # The recorded evidence is a $200 round trip; pin the V10 scout size to it.
+            with MainReplay(Path(tmp)) as replay, \
+                    patch.object(replay.market,'early_requested_notional',return_value=200.0):
                 result=replay.replay([first,last])
                 self.assertEqual(result['stats']['closed_trades'],1)
                 self.assertLess(result['history'][0]['pnl_usd'],-40)

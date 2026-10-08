@@ -18,6 +18,11 @@ for key in ['NEO_TRADE_NOTIONAL_USD', 'NEO_MAX_DAILY_LOSS_USD', 'NEO_STRICT_ENTR
 import market_monitor as m
 import engine_entry_policy as policy
 
+def setUpModule():
+    # These suites pin the 2026-10-05 EARLY_SCOUT_V10 profile they were written for.
+    import market_monitor
+    market_monitor.apply_strategy_profile(market_monitor.V10_PROFILE)
+
 
 class EngineEntryTests(unittest.TestCase):
     def setUp(self):
@@ -81,6 +86,8 @@ class EngineEntryTests(unittest.TestCase):
         self.assertEqual(m.TAKE_PROFIT_PCT, 10)
 
     def test_valid_formerly_overfiltered_entry_reaches_quote_and_opens(self):
+        # V10 sizes this scout at $90, so the sell fixture is a $90 round trip.
+        self.exit.update(expected_usdc=89.1, floor_usdc=88.56, provider_expected_usdc=89.1)
         self.monitor.maybe_open([self.coin])
         self.assertEqual(len(m.STATE.positions), 1)
         pos = m.STATE.positions[0]
@@ -131,7 +138,8 @@ class EngineEntryTests(unittest.TestCase):
         self.assertEqual(m.STATE.entry_diagnostics['rejections']['quote_inconsistent'], 1)
 
     def test_costs_above_cap_are_still_rejected(self):
-        self.exit.update(expected_usdc=190.0, floor_usdc=188.0)
+        # -5% on the $90 V10 scout: above the 2.75% round-trip cost cap.
+        self.exit.update(expected_usdc=85.5, floor_usdc=84.6)
         self.monitor.maybe_open([self.coin])
         self.assertFalse(m.STATE.positions)
         self.assertIn('roundtrip_cost', m.STATE.entry_diagnostics['rejections'])
@@ -176,7 +184,7 @@ class EngineEntryTests(unittest.TestCase):
     def test_quote_attempts_are_bounded(self):
         self.mocks[2].return_value = None
         self.monitor.maybe_open([dict(self.coin, address=x*44) for x in 'ACDEFGH'])
-        self.assertEqual(self.mocks[2].call_count, policy.MAX_QUOTED_CANDIDATES)
+        self.assertEqual(self.mocks[2].call_count, min(7, policy.MAX_QUOTED_CANDIDATES))
         self.assertEqual(m.STATE.entry_diagnostics['signal_passed'], 7)
 
     def test_reported_thresholds_match_real_policy(self):
