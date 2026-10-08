@@ -42,6 +42,27 @@ class EntryRule:
     max_sell: float = math.inf
     market_cap: float = 0
 
+    def failures(self, f: dict[str, Any]) -> list[str]:
+        """Names of the conditions this candidate fails, in rule order."""
+        flow = f.get('flow') or {}
+        checks = (
+            ('score', number(f.get('score')) >= self.score),
+            ('liquidity', number(f.get('liq')) >= max(10_000, self.liquidity)),
+            ('move_5m', self.move[0] <= number(f.get('m5'), -math.inf) <= self.move[1]),
+            ('buy_sell', number(f.get('bs')) >= self.buy_sell),
+            ('liquidity_cap', number(f.get('lmc')) >= self.liquidity_cap),
+            ('age', self.age[0] <= number(f.get('age'), math.inf) <= self.age[1]),
+            ('move_1h', self.hour[0] <= number(f.get('h1'), -math.inf) <= self.hour[1]),
+            ('volume_liquidity', self.volume_liquidity[0] <= number(f.get('vol_liq')) <= self.volume_liquidity[1]),
+            ('flow_trades', number(flow.get('trades')) >= self.flow_trades),
+            ('flow_ratio', number(flow.get('ratio')) >= self.flow_ratio),
+            ('flow_buy', number(flow.get('buy_usd')) >= self.flow_buy),
+            ('wallets', number(flow.get('unique_wallets')) >= self.wallets),
+            ('max_sell', number(flow.get('max_sell')) <= self.max_sell),
+            ('market_cap', number(f.get('mc')) >= self.market_cap),
+        )
+        return [name for name, ok in checks if not ok]
+
     def matches(self, f: dict[str, Any]) -> bool:
         flow = f.get('flow') or {}
         return (
@@ -125,6 +146,19 @@ SNIPER_IDS = frozenset({'TIKTOK', 'X_SIGNAL'})
 # market sale and is always booked at the observed mark, including any gap.
 LIMIT_TAKE_PROFIT_IDS = frozenset({'TIKTOK', 'X_SIGNAL'})
 SNIPER_POLL_SECONDS = 1.0
+
+
+# Human labels for the diagnostics shown on the dashboard.
+REJECTION_LABELS = {
+    'score': 'NEO score под прага', 'liquidity': 'ликвидност под прага', 'move_5m': '5м движение извън прозореца',
+    'buy_sell': 'buy/sell под прага', 'liquidity_cap': 'ликвидност/MC под прага', 'age': 'възраст извън прозореца',
+    'move_1h': '1ч движение извън прозореца', 'volume_liquidity': 'обем/ликвидност извън прозореца',
+    'flow_trades': 'малко on-chain сделки (60с)', 'flow_ratio': 'on-chain buy/sell под прага',
+    'flow_buy': 'on-chain покупки под прага', 'wallets': 'малко портфейли (60с)', 'max_sell': 'голяма продажба (60с)',
+    'market_cap': 'market cap под прага', 'no_x_signal': 'няма скорошен X сигнал',
+    'price_verification': 'цената не мина проверката от втори източник', 'cooldown': 'cooldown след сделка',
+    'cost': 'разходите за вход са над лимита', 'rank': 'рангът е под минимума',
+}
 
 
 def exit_rules(strategy_id: str, stop_loss: float, take_profit: float, max_hold_minutes: float) -> dict:
@@ -231,5 +265,5 @@ def policy_config() -> dict:
             'max_entry_roundtrip_cost_pct': MAX_ENTRY_COST_PCT,
             'feed_max_age_seconds': MAX_FEED_AGE_MS / 1000,
             'exit_overrides': EXIT_OVERRIDES, 'entry_cost_caps': ENTRY_COST_CAPS,
-            'sniper_ids': sorted(SNIPER_IDS), 'limit_take_profit_ids': sorted(LIMIT_TAKE_PROFIT_IDS), 'sniper_poll_seconds': SNIPER_POLL_SECONDS,
+            'rejection_labels': REJECTION_LABELS, 'sniper_ids': sorted(SNIPER_IDS), 'limit_take_profit_ids': sorted(LIMIT_TAKE_PROFIT_IDS), 'sniper_poll_seconds': SNIPER_POLL_SECONDS,
             'execution_basis': 'ESTIMATED_PAPER_COSTS_NOT_LIVE_FILLS'}

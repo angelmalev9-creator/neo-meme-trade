@@ -12,6 +12,7 @@ import engine_entry_policy as entry_policy
 import gold_order_flow as order_flow
 import pair_price_integrity as price_integrity
 import pumpswap_stop_quote as pumpswap_stop
+import coin_flow
 import engine_runtime as runtime
 import engine_exit_policy as exit_policy
 import order_flow_adaptive_oct4 as oct4
@@ -384,6 +385,25 @@ def read_lab_book(book_id: str) -> dict[str, Any]:
     except Exception:
         data = {}
     return book_trades(data, book_id)
+
+def _gecko_json(url: str) -> dict[str, Any]:
+    response = SESSION.get(url, headers=coin_flow.GECKO_HEADERS, timeout=(1.0, 4.0))
+    response.raise_for_status()
+    return response.json()
+
+
+def read_coin_flow(address: str, pair: str) -> dict[str, Any]:
+    """Dashboard-only buyers/sellers windows for one pool (verified tape + GeckoTerminal)."""
+    address, pair = str(address or '')[:64], str(pair or '')[:64]
+    if not address:
+        return {'error': 'address_required'}
+    with STATE.lock:
+        coin = next((c for c in STATE.feed if c.get('address') == address), None)
+        if coin and not pair:
+            pair = str(coin.get('pairAddress') or '')
+        coin = dict(coin) if coin else None
+    return coin_flow.build(address, pair, coin=coin, tape=read_live_tape(), fetch=_gecko_json)
+
 
 def read_live_tape() -> dict[str, Any]:
     try:
@@ -2169,6 +2189,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == '/lab-book':
             self.send_json(read_lab_book((parse_qs(parsed.query).get('id') or [''])[0]))
+            return
+        if parsed.path == '/coin-flow':
+            query = parse_qs(parsed.query)
+            self.send_json(read_coin_flow((query.get('address') or [''])[0], (query.get('pair') or [''])[0]))
             return
         self.send_json({'error': 'not_found'}, 404)
 

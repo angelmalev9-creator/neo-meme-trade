@@ -330,3 +330,42 @@ class XSignalStrategyTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class WhyQuietTests(unittest.TestCase):
+    def setUp(self):
+        guard=patch.object(lab.price_integrity,'check',return_value={'status':'pass','version':'OFFLINE_FIXTURE'})
+        guard.start();self.addCleanup(guard.stop)
+        lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
+
+    def test_failures_name_every_condition_that_fails(self):
+        rule=a.RULES['ULTRA_PRECISION']
+        weak={'score':70,'liq':12000,'m5':40,'bs':.5,'lmc':.01,'age':1,'h1':0,'vol_liq':0,'mc':1e6,
+              'flow':{'trades':0,'ratio':0,'buy_usd':0,'unique_wallets':0,'max_sell':0}}
+        self.assertEqual(rule.failures(weak),['score','liquidity','move_5m','buy_sell','liquidity_cap','age'])
+        self.assertEqual(a.RULES['ORDER_FLOW'].failures({**weak,'score':90,'liq':20000,'m5':5,'bs':1,'lmc':.1,'age':30}),
+                         ['flow_trades','flow_ratio','wallets'])
+        self.assertEqual(rule.failures({**weak,'score':95,'liq':30000,'m5':10,'bs':1.2,'lmc':.2,'age':30}),[])
+        for key in a.REJECTION_LABELS: self.assertTrue(a.REJECTION_LABELS[key])
+
+    def test_rejection_totals_accumulate_across_scans(self):
+        feed=[{**coin(),'score':70,'liquidityUsd':12000,'updatedAt':NOW}]
+        with patch.object(lab,'now_ms',return_value=NOW):
+            lab.maybe_open(feed,{}); lab.maybe_open(feed,{})
+        book=lab.STATE['books']['ULTRA_PRECISION']
+        total=book['rejection_totals']
+        self.assertEqual((total['scans'],total['candidates']),(2,2))
+        self.assertEqual(total['reasons']['score'],2); self.assertEqual(total['reasons']['liquidity'],2)
+        self.assertNotIn('last_rule_match_at',total)
+        self.assertEqual(book['entry_diagnostics']['scan_rejections']['score'],1)
+        view=lab.compact_strategy_lab(lab.STATE)['books']['ULTRA_PRECISION']['why_quiet']
+        self.assertEqual(view['candidates'],2)
+        self.assertEqual(view['reasons'][0],{'reason':'score','count':2,'share':1.0})
+        self.assertNotIn('astra',lab.compact_strategy_lab({**lab.STATE,'astra':{'book':{}}}))
+        # The X Signal book counts the missing signal, not the rule.
+        self.assertEqual(lab.STATE['books']['X_SIGNAL']['rejection_totals']['reasons'],{'no_x_signal':2})
+
+    def test_totals_reset_when_the_policy_version_changes(self):
+        lab.STATE['books']['TIKTOK']['rejection_totals']={'version':'OLD','scans':99,'candidates':99,'reasons':{'score':99}}
+        with patch.object(lab,'now_ms',return_value=NOW): lab.maybe_open([],{})
+        self.assertEqual(lab.STATE['books']['TIKTOK']['rejection_totals']['scans'],1)
