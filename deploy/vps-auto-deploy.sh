@@ -6,7 +6,8 @@
 #   2. archives the target PAPER ledger before any engine restart,
 #   3. fast-forwards the checkout,
 #   4. restarts only the services whose code changed,
-#   5. checks health and that the ledger identity survived,
+#   5. checks health, that systemd really owns the running engine, and that
+#      the ledger identity survived,
 #   6. rolls back to the previous commit if any of that fails.
 #
 # It never resets an account, never touches the central engine or the labs
@@ -30,6 +31,7 @@ main() {
   local GATEWAY_URL="${NEO_DEPLOY_GATEWAY_URL:-http://127.0.0.1:8789}"
   local ENGINE_STATE_PATH="${NEO_DEPLOY_ENGINE_STATE_PATH:-}"
   local HEALTH_TIMEOUT="${NEO_DEPLOY_HEALTH_TIMEOUT_SECONDS:-90}"
+  local SETTLE_SECONDS="${NEO_DEPLOY_SETTLE_SECONDS:-5}"
   local KEEP_ARCHIVES="${NEO_DEPLOY_KEEP_ARCHIVES:-10}"
   # Gateway-spawned account engines only pick up new engine code when the
   # gateway restarts. Set to 1 to restart the gateway on every engine change.
@@ -122,14 +124,27 @@ PY
     printf '%s\n' "$archive"
   }
 
-  restart_changed_services() {  # start the engine first so the gateway reuses its port
+  # A unit can answer on its port while systemd's own process has died (for
+  # example when another process grabbed the port first). Health alone is not
+  # proof, so the unit must also still be active a few seconds later.
+  unit_settled() {  # unit
+    sleep "$SETTLE_SECONDS"
+    "$SYSTEMCTL" is-active --quiet "$1"
+  }
+
+  # One `restart` keeps the gap short: while the engine is down the gateway
+  # could otherwise start its own copy on the same port. The engine goes
+  # first so the gateway finds it healthy and reuses it.
+  restart_changed_services() {
     if [ "$engine_changed" = 1 ]; then
-      "$SYSTEMCTL" start "$ENGINE_UNIT" || return 1
+      "$SYSTEMCTL" restart "$ENGINE_UNIT" || return 1
       wait_healthy "$ENGINE_URL/health" || return 1
+      unit_settled "$ENGINE_UNIT" || return 1
     fi
     if [ "$gateway_changed" = 1 ]; then
       "$SYSTEMCTL" restart "$GATEWAY_UNIT" || return 1
       wait_healthy "$GATEWAY_URL/user/health" || return 1
+      unit_settled "$GATEWAY_UNIT" || return 1
     fi
   }
 
@@ -206,18 +221,17 @@ PY
   find "$STATE_DIR" -maxdepth 1 -name 'verify-*.log' ! -name "verify-${target:0:12}.log" -delete
   log "commit ${target:0:12} passed its checks"
 
-  # ---- 2. stop the engine and archive its ledger -----------------------------
+  # ---- 2. archive the ledger while the old engine still runs ------------------
+  # state.json is replaced atomically and audit.jsonl is append-only, so a copy
+  # taken from the running engine is consistent. The ledger itself is not touched.
   local before="" state_file="" archive=""
   if [ "$engine_changed" = 1 ]; then
     before="$(engine_facts)"
     state_file="$(engine_state_path)"
     [ -n "$state_file" ] && [ -f "$state_file" ] \
       || fail blocked_no_ledger_path "cannot locate the engine ledger (set NEO_DEPLOY_ENGINE_STATE_PATH); refusing to restart the engine without an archive"
-    "$SYSTEMCTL" stop "$ENGINE_UNIT"
-    if ! archive="$(archive_ledger "$state_file")"; then
-      "$SYSTEMCTL" start "$ENGINE_UNIT" || true
-      fail blocked_archive_failed "could not archive the ledger; engine restarted on the old commit, nothing deployed"
-    fi
+    archive="$(archive_ledger "$state_file")" \
+      || fail blocked_archive_failed "could not archive the ledger; nothing was deployed"
     restarted="$ENGINE_UNIT"
     log "ledger archived to $archive (before: ${before:-engine was not reachable})"
   fi

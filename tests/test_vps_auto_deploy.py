@@ -25,6 +25,7 @@ STUB_SYSTEMCTL = r'''#!/usr/bin/env bash
 echo "$*" >> "$STUB_DIR/calls"
 case "$1" in
   show) [ "$3" = MainPID ] && echo 0; exit 0 ;;
+  is-active) [ ! -f "$STUB_DIR/dead_unit" ] || [ "$(cat "$STUB_DIR/dead_unit")" != "$3" ]; exit ;;
   start|restart)
     head="$(git -C "$NEO_DEPLOY_REPO" rev-parse HEAD)"
     if [ -f "$STUB_DIR/unhealthy_commit" ] && [ "$(cat "$STUB_DIR/unhealthy_commit")" = "$head" ]; then
@@ -101,7 +102,8 @@ class VpsAutoDeploy(unittest.TestCase):
                     'NEO_DEPLOY_ENGINE_URL': url, 'NEO_DEPLOY_GATEWAY_URL': url,
                     'NEO_DEPLOY_ENGINE_STATE_PATH': str(self.account / 'state.json'),
                     'NEO_DEPLOY_VERIFY_CMD': f'echo run >> "{self.stub}/verify_runs"; test ! -f BROKEN',
-                    'NEO_DEPLOY_HEALTH_TIMEOUT_SECONDS': '2', 'NEO_DEPLOY_INSTALLED_COPY': '',
+                    'NEO_DEPLOY_HEALTH_TIMEOUT_SECONDS': '2', 'NEO_DEPLOY_SETTLE_SECONDS': '0',
+                    'NEO_DEPLOY_INSTALLED_COPY': '',
                     'NEO_DEPLOY_RESTART_GATEWAY_ON_ENGINE_CHANGE': '0', 'TMPDIR': str(root)}
 
     # ---- helpers ---------------------------------------------------------
@@ -129,7 +131,9 @@ class VpsAutoDeploy(unittest.TestCase):
 
     def calls(self):
         path = self.stub / 'calls'
-        return [line for line in path.read_text().splitlines() if not line.startswith('show')] if path.exists() else []
+        if not path.exists():
+            return []
+        return [line for line in path.read_text().splitlines() if not line.startswith(('show', 'is-active'))]
 
     def status(self):
         return json.loads((self.deploy_state / 'status.json').read_text())
@@ -155,7 +159,7 @@ class VpsAutoDeploy(unittest.TestCase):
         result = self.run_deploy()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.head(self.live), target)
-        self.assertEqual(self.calls(), [f'stop {ENGINE}', f'start {ENGINE}'])
+        self.assertEqual(self.calls(), [f'restart {ENGINE}'])
         archive, = self.archives()
         self.assertEqual((archive / 'state.json').read_text(), '{"ledger": "precious"}')
         self.assertTrue((archive / 'audit.jsonl').exists())
@@ -172,7 +176,7 @@ class VpsAutoDeploy(unittest.TestCase):
     def test_engine_is_healthy_before_the_gateway_restarts(self):
         self.push_change('backend/market_monitor.py', 'backend/engine_runtime.py')
         self.assertEqual(self.run_deploy().returncode, 0)
-        self.assertEqual(self.calls(), [f'stop {ENGINE}', f'start {ENGINE}', f'restart {GATEWAY}'])
+        self.assertEqual(self.calls(), [f'restart {ENGINE}', f'restart {GATEWAY}'])
 
     def test_other_process_modules_do_not_restart_the_engine_but_unknown_ones_do(self):
         self.push_change('backend/live_tape.py', 'backend/strategy_lab.py', 'backend/astra6_brain.py',
@@ -181,12 +185,12 @@ class VpsAutoDeploy(unittest.TestCase):
         self.assertEqual(self.calls(), [])
         self.push_change('backend/brand_new_engine_module.py')
         self.assertEqual(self.run_deploy().returncode, 0)
-        self.assertEqual(self.calls(), [f'stop {ENGINE}', f'start {ENGINE}'])
+        self.assertEqual(self.calls(), [f'restart {ENGINE}'])
 
     def test_optional_gateway_restart_on_engine_change(self):
         self.push_change('backend/market_monitor.py')
         self.assertEqual(self.run_deploy(NEO_DEPLOY_RESTART_GATEWAY_ON_ENGINE_CHANGE='1').returncode, 0)
-        self.assertEqual(self.calls(), [f'stop {ENGINE}', f'start {ENGINE}', f'restart {GATEWAY}'])
+        self.assertEqual(self.calls(), [f'restart {ENGINE}', f'restart {GATEWAY}'])
 
     def test_failing_checks_deploy_nothing_and_are_not_retried(self):
         bad = self.push_change('backend/market_monitor.py', 'BROKEN')
@@ -213,13 +217,22 @@ class VpsAutoDeploy(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.head(self.live), self.start)
         self.assertEqual((self.live / 'backend/market_monitor.py').read_text(), 'v1\n')
-        self.assertEqual(self.calls(), [f'stop {ENGINE}', f'start {ENGINE}', f'start {ENGINE}'])
+        self.assertEqual(self.calls(), [f'restart {ENGINE}', f'restart {ENGINE}'])
         self.assertEqual(self.status()['result'], 'rolled_back')
         self.assertEqual((self.stub / 'health').read_text().strip(), 'ok')
         self.assertEqual((self.account / 'state.json').read_text(), '{"ledger": "precious"}')
         self.assertEqual(len(self.archives()), 1)
         self.assertEqual(self.run_deploy().returncode, 0)        # the bad commit is not retried
         self.assertEqual(self.head(self.live), self.start)
+
+    def test_port_answering_while_the_systemd_unit_is_dead_is_a_failure(self):
+        # Another process holds the engine port: /health is fine, the unit is not.
+        self.push_change('backend/market_monitor.py')
+        (self.stub / 'dead_unit').write_text(ENGINE)
+        result = self.run_deploy()
+        self.assertEqual((result.returncode, self.head(self.live)), (1, self.start))
+        self.assertEqual(self.status()['result'], 'rollback_unhealthy')
+        self.assertIn('NOT healthy', result.stdout)
 
     def test_ledger_identity_change_rolls_back(self):
         cases = {'history shrank': {**STATE, 'history': [{'id': 1}]},

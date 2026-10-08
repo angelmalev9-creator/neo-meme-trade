@@ -9,10 +9,10 @@ PAPER only. The deploy never resets an account and never edits a ledger.
 1. **Fetch** `origin/main`. If the checkout is already there, stop.
 2. **Refuse unsafe states.** Tracked local changes in `/root/neo-meme-trade`, or a checkout that is not simply behind `origin/main`, block the deploy. Nothing is overwritten.
 3. **Test the exact commit** in a temporary worktree, with the live tree untouched: `py_compile`, the strategy lock, and `scripts/run_python_checks.py`. A commit that fails is not deployed and is not retried; the next newer commit is.
-4. **Stop the target engine and archive its ledger** (only when engine code changed) to `<account>/archives/pre-deploy-<time>-<commit>/` with checksums. The newest 10 such archives are kept; other archives are never touched.
+4. **Archive the target ledger** (only when engine code changed) to `<account>/archives/pre-deploy-<time>-<commit>/` with checksums, while the old engine is still running. The newest 10 such archives are kept; other archives are never touched.
 5. **Fast-forward** the checkout.
-6. **Restart only what changed**, engine first, then gateway.
-7. **Verify**: `/health` answers; the engine reports `paper_only: true`; the PAPER session id and starting balance are unchanged; the history count did not fall.
+6. **Restart only what changed**, engine first, then gateway. Each is a single `systemctl restart`, to keep the gap as short as a manual restart.
+7. **Verify**: `/health` answers; the systemd unit is still active a few seconds later (so the answer really comes from it); the engine reports `paper_only: true`; the PAPER session id and starting balance are unchanged; the history count did not fall.
 8. **Roll back** to the previous commit and restart again if step 5, 6 or 7 fails.
 
 The result of the last run is in `/var/lib/neo-market/deploy/status.json`.
