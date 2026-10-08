@@ -31,11 +31,11 @@ import requests
 
 LLM_URL = os.getenv('NEO_HYPE_LLM_URL', 'https://api.x.ai/v1/chat/completions')
 LLM_KEY = (os.getenv('NEO_HYPE_LLM_KEY') or os.getenv('XAI_API_KEY') or '').strip()
-LLM_MODEL = os.getenv('NEO_HYPE_LLM_MODEL', 'grok-4.1-fast-non-reasoning').strip() or 'grok-4.1-fast-non-reasoning'
+LLM_MODEL = os.getenv('NEO_HYPE_LLM_MODEL', 'grok-4.20-0309-non-reasoning').strip() or 'grok-4.20-0309-non-reasoning'
 POLL_SECONDS = max(120.0, float(os.getenv('NEO_HYPE_POLL_SECONDS', '900')))
 DAILY_BUDGET_USD = max(0.0, float(os.getenv('NEO_HYPE_DAILY_BUDGET_USD', '1.00')))
-INPUT_MTOKEN_USD = float(os.getenv('NEO_HYPE_INPUT_MTOKEN_USD', '0.20'))
-OUTPUT_MTOKEN_USD = float(os.getenv('NEO_HYPE_OUTPUT_MTOKEN_USD', '0.50'))
+INPUT_MTOKEN_USD = float(os.getenv('NEO_HYPE_INPUT_MTOKEN_USD', '1.25'))
+OUTPUT_MTOKEN_USD = float(os.getenv('NEO_HYPE_OUTPUT_MTOKEN_USD', '2.50'))
 TIMEOUT = max(5.0, float(os.getenv('NEO_HYPE_REQUEST_TIMEOUT_SECONDS', '40')))
 STATE_PATH = Path(os.getenv('NEO_HYPE_STATE_PATH', '/var/lib/neo-market/hype_radar.json'))
 X_SIGNAL_PATH = Path(os.getenv('NEO_X_SIGNAL_STATE_PATH', '/var/lib/neo-market/x_signal.json'))

@@ -92,7 +92,7 @@
     "backend/lab_activity.py": "deb81c318f6c0419ed6237a40288cbb175bd8f7c1fca42adc431029ec06a1c14",
     "backend/x_signal_monitor.py": "eb7c3f952a8f4048ebfd956c2d6a479fb04c31c83b9925b2a3ebb691a138298a",
     "backend/discovery_universe.py": "17072087527fa3adef5ab27df64b132bd8310892ac65773b3b9f175486a170b4",
-    "backend/hype_radar.py": "3b3e8520e26ee7eb6c65f76d14f7f7fd55ffd837b668fefdc69d8d174918aca0"
+    "backend/hype_radar.py": "5b98237a7a7915c39dbd6b1471840d979e423cf13c853093e071818c33803543"
   },
   "runtime_version": "RUNTIME_DURABLE_PAPER_V2",
   "runtime_note": "Primary PAPER engine holds up to eight liquidity-scaled positions across CORE and EXPLORE tiers. Positions opened under an earlier profile keep the stop and exit policy recorded at entry.",
