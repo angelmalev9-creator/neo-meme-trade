@@ -15,6 +15,7 @@ import pumpswap_stop_quote as pumpswap_stop
 import engine_runtime as runtime
 import engine_exit_policy as exit_policy
 import order_flow_adaptive_oct4 as oct4
+import adaptive_learning as learner
 import training_bridge
 from lab_dashboard_projection import compact_strategy_lab
 
@@ -73,12 +74,13 @@ if MAX_POSITION_RISK_USD <= 0 or not 0 < MAX_TOTAL_EXPOSURE_PCT <= 100 or not 0 
 
 # --- Strategy profile -------------------------------------------------------
 # Exactly one versioned profile decides entries and exits for this process.
-# ORDER_FLOW_ADAPTIVE_OCT4 (the primary strategy) owns its whole configuration
-# in order_flow_adaptive_oct4.CONFIG and ignores same-named environment
-# variables; EARLY_SCOUT_V10 keeps the 2026-10-05 environment-driven values
-# captured above. An unknown profile refuses to start.
+# ORDER_FLOW_ADAPTIVE_LEARNING (the primary strategy) and ORDER_FLOW_ADAPTIVE_OCT4
+# own their whole configuration in adaptive_learning.CONFIG and
+# order_flow_adaptive_oct4.CONFIG and ignore same-named environment variables;
+# EARLY_SCOUT_V10 keeps the 2026-10-05 environment-driven values captured
+# above. An unknown profile refuses to start.
 V10_PROFILE = 'EARLY_SCOUT_V10'
-DEFAULT_STRATEGY_PROFILE = oct4.PROFILE
+DEFAULT_STRATEGY_PROFILE = learner.PROFILE
 _V10_SETTINGS = dict(
     SCAN_SECONDS=SCAN_SECONDS, POSITION_SCAN_SECONDS=POSITION_SCAN_SECONDS, MAX_POSITIONS=MAX_POSITIONS,
     WIN_REENTRY_SECONDS=WIN_REENTRY_SECONDS, LOSS_REENTRY_SECONDS=LOSS_REENTRY_SECONDS,
@@ -97,7 +99,7 @@ _V10_SETTINGS = dict(
     EXIT_POLICY='fixed', EXIT_POLICY_VERSION=exit_policy.VERSION,
     LEARNING_MODE='HIGH_FREQ_SCOUT_SIZE_LEARNING+SEPARATE_VALIDATED_TRAINING',
     MAX_QUOTED_CANDIDATES=entry_policy.MAX_QUOTED_CANDIDATES,
-    ENTRY_ON_POSITION_GUARD=True, DAILY_BUDGET_SIZING=True,
+    ENTRY_ON_POSITION_GUARD=True, DAILY_BUDGET_SIZING=True, UNSELLABLE_BLOCKS_ENTRIES=True,
     CONFIG_SOURCE='environment+market_monitor defaults', IGNORED_ENV_OVERRIDES=(),
 )
 
@@ -127,9 +129,42 @@ def _oct4_settings() -> dict[str, Any]:
         LEARNING_MODE=oct4.LEARNING_MODE,
         MAX_QUOTED_CANDIDATES=c['max_quoted_candidates_per_scan'],
         ENTRY_ON_POSITION_GUARD=c['entry_on_position_guard'],
-        DAILY_BUDGET_SIZING=c['daily_budget_sizing'],
+        DAILY_BUDGET_SIZING=c['daily_budget_sizing'], UNSELLABLE_BLOCKS_ENTRIES=True,
         CONFIG_SOURCE='order_flow_adaptive_oct4.CONFIG',
         IGNORED_ENV_OVERRIDES=tuple(sorted(name for name in oct4.OWNED_ENV if os.getenv(name) is not None)),
+    )
+
+
+def _learner_settings() -> dict[str, Any]:
+    c, loosest = learner.CONFIG, learner.TIER_LIMITS['EXPLORE']
+    return dict(
+        _oct4_settings(),
+        SCAN_SECONDS=c['scan_seconds'], POSITION_SCAN_SECONDS=c['position_scan_seconds'],
+        MAX_POSITIONS=c['max_positions'],
+        WIN_REENTRY_SECONDS=c['win_reentry_seconds'], LOSS_REENTRY_SECONDS=c['loss_reentry_seconds'],
+        STOP_LOSS_PCT=c['stop_loss_pct'], TAKE_PROFIT_PCT=c['take_profit_pct'],
+        TRAILING_PCT=c['trailing_pct'], MAX_HOLD_MINUTES=c['max_hold_minutes'],
+        TRADE_NOTIONAL_USD=c['trade_notional_usd'], MAX_DAILY_LOSS_USD=c['max_daily_loss_usd'],
+        MAX_POSITION_RISK_USD=c['max_position_full_loss_usd'],
+        MAX_TOTAL_EXPOSURE_PCT=c['max_total_exposure_pct'], MAX_DRAWDOWN_PCT=c['max_drawdown_pct'],
+        # The loosest tier decides what is worth pre-warming and evaluating.
+        STRICT_ENTRY_SCORE=loosest['min_score'], STRICT_MIN_CONVICTION=loosest['min_conviction'],
+        STRICT_MIN_LIQUIDITY_USD=loosest['min_liquidity_usd'],
+        STRICT_MAX_ENTRY_IMPACT_PCT=c['max_entry_impact_pct'],
+        STRICT_MAX_ROUNDTRIP_COST_PCT=c['max_roundtrip_cost_pct'],
+        STRICT_MAX_WORST_CASE_COST_PCT=c['max_worst_case_cost_pct'],
+        EFFECTIVE_ENTRY_THRESHOLDS=order_flow.EntryThresholds(
+            loosest['min_score'], loosest['min_liquidity_usd'], loosest['min_conviction']),
+        SIGNAL_STRATEGY=learner.STRATEGY_ID, STRATEGY_VERSION=learner.STRATEGY_VERSION,
+        ENTRY_POLICY_VERSION=learner.ENTRY_POLICY_VERSION, SIGNAL_SOURCE=learner.STRATEGY_VERSION,
+        EXIT_POLICY=learner.EXIT_POLICY, EXIT_POLICY_VERSION=learner.EXIT_POLICY_VERSION,
+        LEARNING_MODE=learner.LEARNING_MODE,
+        MAX_QUOTED_CANDIDATES=c['max_quoted_candidates_per_scan'],
+        ENTRY_ON_POSITION_GUARD=c['entry_on_position_guard'],
+        DAILY_BUDGET_SIZING=c['daily_budget_sizing'],
+        UNSELLABLE_BLOCKS_ENTRIES=c['unsellable_blocks_entries'],
+        CONFIG_SOURCE='adaptive_learning.CONFIG',
+        IGNORED_ENV_OVERRIDES=tuple(sorted(name for name in learner.OWNED_ENV if os.getenv(name) is not None)),
     )
 
 
@@ -137,7 +172,9 @@ def apply_strategy_profile(name: str | None = None) -> str:
     """Select the strategy profile. Production calls this once, at import."""
     global STRATEGY_PROFILE
     profile = str(name or os.getenv('NEO_STRATEGY_PROFILE') or DEFAULT_STRATEGY_PROFILE).strip().upper()
-    if profile == oct4.PROFILE:
+    if profile == learner.PROFILE:
+        settings = _learner_settings()
+    elif profile == oct4.PROFILE:
         settings = _oct4_settings()
     elif profile == V10_PROFILE:
         settings = _V10_SETTINGS
@@ -148,8 +185,35 @@ def apply_strategy_profile(name: str | None = None) -> str:
     return profile
 
 
-def is_oct4() -> bool:
-    return STRATEGY_PROFILE == oct4.PROFILE
+def is_learner() -> bool:
+    return STRATEGY_PROFILE == learner.PROFILE
+
+
+def is_adaptive() -> bool:
+    """Profiles that use the conviction model and adaptive exits."""
+    return STRATEGY_PROFILE in (oct4.PROFILE, learner.PROFILE)
+
+
+def policy_module():
+    return learner if is_learner() else oct4
+
+
+def slots_in_use(positions) -> int:
+    """Open positions that count against MAX_POSITIONS."""
+    if UNSELLABLE_BLOCKS_ENTRIES:
+        return len(positions)
+    return sum(1 for p in positions if p.get('exit_state') != 'UNSELLABLE')
+
+
+_LEARNING_CACHE: dict[str, Any] = {'key': None, 'table': None}
+
+
+def learning_table(history, now: int) -> dict[str, Any]:
+    """Per-bucket results of recent closed trades; rebuilt when history or the minute changes."""
+    key = (len(history), (history[0].get('id') if history else None), now // 60_000)
+    if _LEARNING_CACHE['key'] != key:
+        _LEARNING_CACHE.update(key=key, table=learner.build_table(history, now))
+    return _LEARNING_CACHE['table']
 
 
 apply_strategy_profile()
@@ -678,6 +742,7 @@ class State:
                 'events': self.events[:30],
                 'source_status': self.source_status,
                 'entry_diagnostics': self.entry_diagnostics,
+                'learning': learner.summary(learning_table(self.history, now_ms())) if is_learner() else None,
                 'live_tape': [],
                 'live_tape_status': {k: tape.get(k) for k in ('status','tracked_pairs','updated_at','source','error')},
                 'strategy_lab': read_strategy_lab(),
@@ -729,10 +794,11 @@ class State:
                     'learning_mode': LEARNING_MODE,
                     'config_source': CONFIG_SOURCE,
                     'ignored_env_overrides': list(IGNORED_ENV_OVERRIDES),
-                    'same_token_cooldown_seconds': LOSS_REENTRY_SECONDS if is_oct4() else None,
-                    'entry_flow_window_seconds': oct4.CONFIG['entry_flow_window_seconds'] if is_oct4() else None,
+                    'same_token_cooldown_seconds': LOSS_REENTRY_SECONDS if is_adaptive() and not is_learner() else None,
+                    'entry_flow_window_seconds': policy_module().CONFIG['entry_flow_window_seconds'] if is_adaptive() else None,
                     'entry_on_position_guard': ENTRY_ON_POSITION_GUARD,
-                    'adaptive_strategy': oct4.describe() if is_oct4() else None,
+                    'unsellable_blocks_entries': UNSELLABLE_BLOCKS_ENTRIES,
+                    'adaptive_strategy': policy_module().describe() if is_adaptive() else None,
                     'risk_overlay': 'PLANNED_NET_STOP_NO_FILL_GUARANTEE',
                     'execution_verification_version': 'QUOTE_EVIDENCE_V9',
                     'rug_guard': rug_guard.VERSION,
@@ -755,15 +821,18 @@ class State:
                     'starting_balance_usd': STARTING_BALANCE_USD,
                     'execution_mode': 'PAPER_QUOTE_OR_OBSERVED_POOL_MODEL',
                     'execution_note': (
+                        'PAPER only; tiered high-frequency entries, liquidity-scaled size and size/avoid learning from closed trades, '
+                        'with ORDER_FLOW_ADAPTIVE conviction exits. Observed quotes with modeled fills, full fees and uncapped gap losses; '
+                        'learned results are small paper samples, not a forecast.'
+                        if is_learner() else
                         'PAPER only; 2026-10-04 ORDER_FLOW_ADAPTIVE decisions with adaptive conviction holds. '
                         'Observed quotes with modeled fills, full fees and uncapped gap losses; a planned stop is not a guaranteed fill.'
-                        if is_oct4() else
+                        if is_adaptive() else
                         'PAPER only; high-frequency early micro scouts, observed quotes with modeled fills, full fees and uncapped gap losses. Main journal learns scout size; validated strategy experiments remain separate.'),
                     'entry_policy_version': ENTRY_POLICY_VERSION,
                     'exit_policy': EXIT_POLICY, 'exit_policy_version': EXIT_POLICY_VERSION,
                     'effective_config_hash': effective_config_hash(),
-                    'effective_entry_thresholds': (dict(oct4.ENTRY_LIMITS) if is_oct4()
-                                                   else EFFECTIVE_ENTRY_THRESHOLDS.as_dict()),
+                    'effective_entry_thresholds': effective_entry_thresholds(),
                     'signal_source_commit': SIGNAL_SOURCE,
                     'max_quoted_candidates_per_scan': MAX_QUOTED_CANDIDATES,
                     'strict_entry_score': STRICT_ENTRY_SCORE,
@@ -850,11 +919,17 @@ def effective_config_hash():
               'assumed_execution_buffer_bps': paper_quotes.BUFFER_BPS,
               'simulated_execution_delay_ms': paper_quotes.SIMULATED_DELAY_MS,
               'max_signal_age_ms': paper_quotes.MAX_SIGNAL_AGE_MS}
-    if is_oct4():
+    if is_adaptive():
         # The whole owned policy is part of the identity of an ORDER_FLOW_ADAPTIVE run.
         for key in ('micro_flow_seconds', 'ultra_flow_seconds'): config.pop(key)
-        config['adaptive_strategy'] = oct4.describe()
+        config['adaptive_strategy'] = policy_module().describe()
     return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+
+
+def effective_entry_thresholds() -> dict[str, Any]:
+    if is_learner():
+        return {tier: dict(limits) for tier, limits in learner.TIER_LIMITS.items()}
+    return dict(oct4.ENTRY_LIMITS) if is_adaptive() else EFFECTIVE_ENTRY_THRESHOLDS.as_dict()
 
 
 def adaptive_scout_profile(entry_mode: str) -> dict[str, Any]:
@@ -1258,7 +1333,7 @@ class Monitor:
         candidates = []
         for coin in feed:
             age = num(coin.get('ageMinutes'), 999999)
-            if num(coin.get('score')) < STRICT_ENTRY_SCORE or num(coin.get('liquidityUsd')) < STRICT_MIN_LIQUIDITY_USD or (age > 360 and not is_oct4()):
+            if num(coin.get('score')) < STRICT_ENTRY_SCORE or num(coin.get('liquidityUsd')) < STRICT_MIN_LIQUIDITY_USD or (age > 360 and not is_adaptive()):
                 continue
             tx = (coin.get('txns') or {}).get('m5') or {}
             activity = num(tx.get('buys')) + num(tx.get('sells'))
@@ -1437,13 +1512,14 @@ class Monitor:
             signal_ok = fresh_market and num(coin.get('priceUsd')) > 0 and entry > 0
             signal_pct = (market-entry)/entry*100 if signal_ok else None
             peak_signal_pct = (peak_price-entry)/entry*100 if signal_ok else None
+            # The stop recorded at entry stays with the position when the profile changes.
+            own_stop = num(position.get('stop_loss_pct'), 0.0) or oct4.CONFIG['stop_loss_pct']
             def decide(net_now, peak_now):
                 if policy == oct4.EXIT_POLICY:
                     return oct4.exit_reason(context, net_pct=net_now, peak_net_pct=peak_now, hold_minutes=hold,
-                        signal_pct=signal_pct, peak_signal_pct=peak_signal_pct,
-                        stop_pct=num(position.get('stop_loss_pct'), oct4.CONFIG['stop_loss_pct']))
+                        signal_pct=signal_pct, peak_signal_pct=peak_signal_pct, stop_pct=own_stop)
                 return exit_policy.exit_reason(position, context, net_pct=net_now, peak_net_pct=peak_now,
-                    hold_minutes=hold, stop_pct=STOP_LOSS_PCT,
+                    hold_minutes=hold, stop_pct=own_stop,
                     take_profit_pct=num(position.get('take_profit_net_pct'), TAKE_PROFIT_PCT) if policy == 'fixed' else TAKE_PROFIT_PCT,
                     policy=policy)
             reason = reason or decide(pct, peak_pct)
@@ -1481,7 +1557,7 @@ class Monitor:
                 mae_net_pct=min(pct,num(position.get('mae_net_pct'),pct)),
                 signal_pnl_pct=(market-entry)/entry*100 if entry else None,
                 active_stop_signal_trigger_pct=None, legacy_chart_stop_ignored=position.get('stop_signal_trigger_pct'),
-                planned_stop_net_pct=-STOP_LOSS_PCT,hard_stop_net_pct=None,paper_stop_capped=False,
+                planned_stop_net_pct=-own_stop,hard_stop_net_pct=None,paper_stop_capped=False,
                 current_execution_price=quote.get('fill_price'), quote_status='fresh', valuation_status='available',
                 valuation_age_ms=max(0,now_ms()-num(quote.get('quoted_at'),now_ms())), last_known_pnl_usd=pnl,
                 conservative_risk_usd=notional+entry_cost, execution_quote_at=quote.get('quoted_at',now_ms()),
@@ -1556,13 +1632,17 @@ class Monitor:
         if MAX_DAILY_LOSS_USD > 0 and STATE.risk_day_pnl() <= -MAX_DAILY_LOSS_USD:
             reject(report, ['daily_limit'])
             return
-        if any(p.get('valuation_status') == 'unavailable' for p in STATE.positions):
+        # A route that is briefly missing blocks new exposure. One that stayed
+        # missing through every retry is written off as reserved capital instead
+        # of freezing the engine, when the profile says so.
+        if any(p.get('valuation_status') == 'unavailable'
+               and (UNSELLABLE_BLOCKS_ENTRIES or p.get('exit_state') != 'UNSELLABLE') for p in STATE.positions):
             reject(report,['liquidation_unavailable'])
             return
         if MAX_DRAWDOWN_PCT > 0 and (1-STATE.equity_usd()/max(STATE.equity_peak_usd,1))*100 >= MAX_DRAWDOWN_PCT:
             reject(report,['drawdown_limit'])
             return
-        if len(STATE.positions) >= MAX_POSITIONS:
+        if slots_in_use(STATE.positions) >= MAX_POSITIONS:
             reject(report, ['position_open'])
             return
         if STATE.available_balance_usd() < min(TRADE_NOTIONAL_USD, 10.0):
@@ -1572,8 +1652,10 @@ class Monitor:
         now = now_ms()
         # Outcome-aware cooldown: keep sampling many different coins, but avoid
         # immediate revenge loops on the same mint.
-        recent = oct4.cooldown_addresses(STATE.history, now, LOSS_REENTRY_SECONDS) if is_oct4() else set()
-        for trade in ([] if is_oct4() else STATE.history):
+        fixed_cooldown = is_adaptive() and not is_learner()
+        recent = oct4.cooldown_addresses(STATE.history, now, LOSS_REENTRY_SECONDS) if fixed_cooldown else set()
+        learned = learning_table(STATE.history, now) if is_learner() else None
+        for trade in ([] if fixed_cooldown else STATE.history):
             recent_address = trade.get('address')
             closed_at = int(trade.get('closed_at') or 0)
             if not recent_address or closed_at <= 0:
@@ -1582,7 +1664,7 @@ class Monitor:
             if now - closed_at < cooldown * 1000:
                 recent.add(recent_address)
         for coin in feed:
-            if len(STATE.positions) >= MAX_POSITIONS:
+            if slots_in_use(STATE.positions) >= MAX_POSITIONS:
                 break
             address = coin.get('address')
             if not address or address in open_addresses or address in recent:
@@ -1600,7 +1682,19 @@ class Monitor:
             market_cap = num(coin.get('marketCap') or coin.get('fdv'))
             liquidity_mc_ratio = liquidity / max(market_cap, 1.0)
 
-            if is_oct4():
+            tier_seen: dict[str, str] = {}
+            if is_learner():
+                flow_seconds = int(learner.CONFIG['entry_flow_window_seconds'])
+                def signal_check(c, f, ctx):
+                    tier, why = learner.entry_tier(c, f, ctx, now=now_ms())
+                    if why:
+                        return why
+                    # A candidate sized as CORE must still be CORE when it is committed.
+                    if tier_seen.get('tier') == 'CORE' and tier != 'CORE':
+                        return ['gold_signal']
+                    tier_seen.setdefault('tier', tier)
+                    return []
+            elif is_adaptive():
                 flow_seconds = int(oct4.CONFIG['entry_flow_window_seconds'])
                 def signal_check(c, f, ctx):
                     return oct4.signal_rejections(c, f, ctx, now=now_ms())
@@ -1618,10 +1712,10 @@ class Monitor:
                 reject(report, rejected, coin, {
                     'score': score, 'liquidity_usd': liquidity, 'conviction': context.get('conviction'),
                     'flow_trades': flow.get('trades'), 'flow_ratio': flow.get('buy_sell_usd_ratio'),
-                } if is_oct4() else None)
+                } if is_adaptive() else None)
                 continue
             report['signal_passed'] += 1
-            entry_mode = (oct4.ENTRY_MODE if is_oct4()
+            entry_mode = (tier_seen.get('tier') if is_learner() else oct4.ENTRY_MODE if is_adaptive()
                           else order_flow.entry_mode(coin, flow, context, EFFECTIVE_ENTRY_THRESHOLDS))
             if not entry_mode:
                 reject(report, ['gold_signal'], coin)
@@ -1650,7 +1744,21 @@ class Monitor:
                 reject(report, ['quote_budget'], coin)
                 continue
             strategy_id = SIGNAL_STRATEGY
-            if is_oct4():
+            learn_features = None
+            if is_learner():
+                # Size follows what similar closed trades actually returned; a context
+                # that keeps losing is skipped until that evidence has aged out.
+                learn_features = learner.features(coin, flow, context, entry_mode)
+                verdict = learner.assess(learned, learn_features)
+                if verdict['avoid']:
+                    reject(report, ['learned_avoid'], coin, {'bucket': verdict['avoid'], 'edge_pct': verdict['edge_pct']})
+                    continue
+                learning = {'sample': verdict['sample'], 'wins': 0, 'win_rate': 0.0,
+                            'avg_pnl_pct': verdict['edge_pct'], 'profit_factor': None,
+                            'recent_losses': learned['loss_streak'], 'size_multiplier': verdict['size_multiplier'],
+                            'bonus': round((verdict['size_multiplier'] - 1.0) * 100, 1),
+                            'evidence': verdict['evidence'], 'loss_streak_brake': verdict['loss_streak_brake']}
+            elif is_adaptive():
                 # Fixed historical size: no journal-driven resizing in this strategy.
                 learning = {'sample': 0, 'wins': 0, 'win_rate': 0.0, 'avg_pnl_pct': 0.0, 'profit_factor': None,
                             'recent_losses': 0, 'size_multiplier': 1.0, 'bonus': 0.0}
@@ -1680,7 +1788,12 @@ class Monitor:
             # Reserve each open position's planned stop budget separately from
             # the full-loss exposure used by the capital and position limits.
             open_planned_risk=sum(num(p.get('planned_risk_usd')) for p in STATE.positions)
-            base_notional = TRADE_NOTIONAL_USD if is_oct4() else early_requested_notional(coin, learning)
+            if is_learner():
+                sizing = learner.SIZING
+                base_notional = max(sizing['min_notional_usd'], min(
+                    sizing['max_notional_usd'], learner.base_notional(coin, entry_mode) * learning['size_multiplier']))
+            else:
+                base_notional = TRADE_NOTIONAL_USD if is_adaptive() else early_requested_notional(coin, learning)
             requested_notional = min(base_notional,MAX_POSITION_RISK_USD-fixed_cost_budget)
             # With budget sizing off the daily limit stays a hard gate above
             # and never shrinks the position.
@@ -1764,7 +1877,7 @@ class Monitor:
                         'exit':dict(initial_exit,exit_network_fee_usd=entry_network_fee)},
                 context=context,now=now_ms())
             with STATE.lock:
-                if STATE.demo_session_id!=session_at_check or not STATE.running or len(STATE.positions)>=MAX_POSITIONS:
+                if STATE.demo_session_id!=session_at_check or not STATE.running or slots_in_use(STATE.positions)>=MAX_POSITIONS:
                     return
                 current_coin = next((c for c in STATE.feed if c.get('address') == address and c.get('pairAddress') == coin.get('pairAddress')), coin)
                 final_flow = STATE.live_flow(address, flow_seconds, str(coin.get('pairAddress') or ''))
@@ -1793,7 +1906,7 @@ class Monitor:
                     continue
                 next_trade_no = STATE.trade_seq + 1
                 # ORDER_FLOW_ADAPTIVE records the context re-checked at commit.
-                entry_context = final_context if is_oct4() else context
+                entry_context = final_context if is_adaptive() else context
                 position = {
                     'id': f'{STATE.demo_session_id}:{address}:{next_trade_no}', 'address': address,
                     'pairAddress': coin.get('pairAddress'), 'name': coin.get('name'),
@@ -1803,6 +1916,8 @@ class Monitor:
                     'current_price': price, 'peak_price': price,
                     'trade_no': next_trade_no, 'session_id': STATE.demo_session_id, 'strategy_id': strategy_id,
                     'entry_mode': entry_mode,
+                    'learn_features': learn_features, 'learning_evidence': learning.get('evidence'),
+                    'learning_loss_streak_brake': learning.get('loss_streak_brake'),
                     'provisional_early_safety': bool(safety.get('provisional_early')),
                     'strategy_profile': STRATEGY_PROFILE, 'strategy_version': STRATEGY_VERSION,
                     'learning_mode': LEARNING_MODE, 'entry_flow': final_flow,
@@ -1840,8 +1955,7 @@ class Monitor:
                     'entry_policy_version': ENTRY_POLICY_VERSION,
                     'exit_policy': EXIT_POLICY, 'exit_policy_version': EXIT_POLICY_VERSION,
                     'effective_config_hash': effective_config_hash(),
-                    'effective_entry_thresholds': (dict(oct4.ENTRY_LIMITS) if is_oct4()
-                                                   else EFFECTIVE_ENTRY_THRESHOLDS.as_dict()),
+                    'effective_entry_thresholds': effective_entry_thresholds(),
                     'signal_source_commit': SIGNAL_SOURCE,
                     'execution_verification_version': 'QUOTE_EVIDENCE_V9',
                     'entry_quote': live_quote.get('raw_quote'),
@@ -1858,7 +1972,7 @@ class Monitor:
                     'entry_account_reserve_usd': entry_rent, 'token_decimals': decimals,
                     'risk_check': safety,
                     # Adaptive holds carry their target in the live hold mode (None = trail only).
-                    'take_profit_net_pct': entry_context.get('target_pct') if is_oct4() else TAKE_PROFIT_PCT,
+                    'take_profit_net_pct': entry_context.get('target_pct') if is_adaptive() else TAKE_PROFIT_PCT,
                     'cost_assumptions': 'Jupiter AMM fees included; 10bps/leg buffer, network budget, account rent reserve',
                     'entry_price_impact_pct': round(entry_quote['impact_pct'], 6),
                     'entry_slippage_pct': round(entry_quote['slippage_pct'] + entry_quote['latency_pct'], 6),

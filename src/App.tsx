@@ -56,6 +56,11 @@ type MonitorState = {
   live_tape: LiveTrade[]; live_tape_status: TapeStatus;
   strategy_lab: StrategyLab;
   paper_training?: PaperTrainingSnapshot;
+  learning?: {
+    mode: string; trades_used: number; loss_streak: number; loss_streak_brake: boolean; avoided: string[];
+    best: { bucket: string; trades: number; mean_pct: number; win_rate: number; avoided: boolean }[];
+    worst: { bucket: string; trades: number; mean_pct: number; win_rate: number; avoided: boolean }[];
+  } | null;
   stats: { feed_count: number; open_positions: number; closed_trades: number; wins: number; win_rate: number; realized_today_usd: number; demo_starting_balance_usd: number; demo_balance_usd: number; demo_equity_usd: number; demo_available_usd: number; demo_reserved_usd: number; unrealized_pnl_usd: number; realized_total_usd: number; return_pct: number; demo_started_at: number; demo_session_id: string; metrics?: { lifetime?: { net_pnl_usd?: number } } };
   config: { signal_strategy?: string; entry_policy_version?: string; exit_policy?: string; learning_mode?: string; risk_overlay?: string; execution_verification_version?: string; scan_seconds: number; position_scan_seconds?: number; entry_score: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trailing_pct: number; max_hold_minutes: number; min_liquidity_usd: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number };
 };
@@ -414,6 +419,22 @@ export default function App() {
           </table>
         </div>
       </section>
+
+      {state?.learning && (
+        <section data-testid="engine-learning" className="mt-4 rounded-2xl border border-emerald-400/20 bg-emerald-400/[0.04] p-4 text-xs leading-6 text-slate-300">
+          <div className="font-bold text-white">Какво е научил engine-ът от затворените си сделки</div>
+          <p>Използвани сделки: {state.learning.trades_used} · поредни загуби: {state.learning.loss_streak}{state.learning.loss_streak_brake ? ' · размерът е намален наполовина' : ''}. Резултатите тежат наполовина след 24 часа.</p>
+          {state.learning.best.length === 0 && <p className="text-slate-500">Още няма достатъчно сделки в нито един контекст.</p>}
+          {state.learning.best.length > 0 && (
+            <p>Най-добри контексти: {state.learning.best.slice(0, 5).map(row => `${row.bucket} ${row.mean_pct >= 0 ? '+' : ''}${row.mean_pct.toFixed(2)}% (${row.trades})`).join(' · ')}</p>
+          )}
+          {state.learning.worst.length > 0 && (
+            <p>Най-слаби: {state.learning.worst.slice(0, 5).map(row => `${row.bucket} ${row.mean_pct >= 0 ? '+' : ''}${row.mean_pct.toFixed(2)}% (${row.trades})`).join(' · ')}</p>
+          )}
+          {state.learning.avoided.length > 0 && <p className="text-amber-200">Временно избягвани: {state.learning.avoided.join(' · ')}</p>}
+          <p className="mt-1 text-slate-500">Това са малки PAPER извадки, а не прогноза. Учи се размерът и кои контексти да се пропускат; праговете и изходите са фиксирани.</p>
+        </section>
+      )}
 
       <section data-testid="execution-integrity" className="mt-4 rounded-2xl border border-sky-400/20 bg-sky-400/[0.04] p-4 text-xs leading-6 text-slate-300">
         <div className="font-bold text-white">Order Flow · стратегията и изпълнението се проверяват отделно</div>
