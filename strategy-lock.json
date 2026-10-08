@@ -85,10 +85,12 @@
     "backend/paper_state_reset.py": "72a270787ca7af6af6b7d3883aae3e09cba3e5a7bc73359f56ec33e14b7b828b",
     "backend/paper_training.py": "c560ec945c210663b00617780f71c93cf76f08538b4fcb7af2815d163af9df48",
     "backend/pumpswap_stop_quote.py": "518f607710ea738edd94d5e6040fcd0ec8bc5521f6f20814ad20967c8be4be61",
-    "backend/strategy_lab.py": "695acbb4b86f22fc1758ea099e910a5577b558cd6c44b5a6dbc650ead4bbb473",
+    "backend/strategy_lab.py": "04bcc35fc4592a3d7ff2dd36d7938c31b44a85a7d44feff2e409777713d5ecea",
     "backend/training_bridge.py": "f25d6bc763c801bbaa4c65c05869921b471885b46ca6187ed81ad2a39ac0c08d",
     "backend/training_worker.py": "75a48c03cbdf7274a74d6701f8e2f45ce618337caf135fde9dfe05bc3bbeba81",
-    "backend/user_gateway.py": "cd74b96d05b8a1383234274be8b42554439710980e63467f09aeaf16db358a2a"
+    "backend/user_gateway.py": "cd74b96d05b8a1383234274be8b42554439710980e63467f09aeaf16db358a2a",
+    "backend/lab_activity.py": "48682bd6b8c0a52dbfebb0d564fd2e724123a9a01dd85726bd2679c08d16b2d0",
+    "backend/x_signal_monitor.py": "eb7c3f952a8f4048ebfd956c2d6a479fb04c31c83b9925b2a3ebb691a138298a"
   },
   "runtime_version": "RUNTIME_DURABLE_PAPER_V2",
   "runtime_note": "Primary PAPER engine holds up to eight liquidity-scaled positions across CORE and EXPLORE tiers. Positions opened under an earlier profile keep the stop and exit policy recorded at entry.",
@@ -152,12 +154,14 @@
     "backend/training_worker.py": "Independent process, durable reset boundary and restart",
     "backend/paper_state_reset.py": "User-authorized checksum archives and all PAPER reset/restore",
     "backend/user_gateway.py": "Independent private PAPER accounts with cached Supabase verification and stable configured-port reuse; a slow health probe can no longer churn through new per-user engine ports. 2026-10-08: CORS allowlist adds the Vercel frontend origin and exact extra origins from NEO_ALLOWED_ORIGINS; no account, auth or engine logic changed. Adds the authenticated /user/lab-book route that forwards only a book id.",
-    "backend/strategy_lab.py": "Inert import, complete histories and truthful profit factor Includes the isolated PAPER MOMENTUM_HUNTER challenger and ranking diagnostics. 2026-10-08: adds the isolated PAPER TikTok Strategy book (light filter, min $30k market cap, net stop -12% / target +17%, 1s exit re-check while it holds) through per-strategy exit and cost-cap overrides; all other books keep 3:10 and the shared cost model. 2026-10-08: the TikTok take profit is booked as a limit at exactly +17% net (never above); stops stay market sales at the observed mark, and each exit records the previous mark and the seconds between the two observations.",
+    "backend/strategy_lab.py": "Inert import, complete histories and truthful profit factor Includes the isolated PAPER MOMENTUM_HUNTER challenger and ranking diagnostics. 2026-10-08: adds the isolated PAPER TikTok Strategy book (light filter, min $30k market cap, net stop -12% / target +17%, 1s exit re-check while it holds) through per-strategy exit and cost-cap overrides; all other books keep 3:10 and the shared cost model. 2026-10-08: the TikTok take profit is booked as a limit at exactly +17% net (never above); stops stay market sales at the observed mark, and each exit records the previous mark and the seconds between the two observations. 2026-10-08: adds isolated X_SIGNAL PAPER book; it can enter only when a fresh literal Solana address from x_signal.json matches a normal feed candidate, after the existing price-integrity, liquidity, cost and cooldown checks. It uses the same -12% market-stop trigger and exact +17% limit target as TikTok.",
     "backend/astra6_brain.py": "Shared exit-priority quote transport, cache/backoff, UTF-8 persistence and truthful profit factor",
     "backend/lab_paired_runner.py": "Cross-platform file locking and UTF-8 persistence",
     "backend/main_replay.py": "Actual primary engine recorded-only evidence replay",
     "backend/order_flow_adaptive_oct4.py": "Pure module: owned configuration, conviction model, hold modes and exit priority. 2026-10-08: entry filter changed from ORDER_FLOW_BALANCED_V4 to the GOLD rule of tag strategy-gold-v1-2026-10-04 (score 85, liquidity $15k, 5m -5..25, 3 flow trades, ratio 1.30, 1 wallet, large-sell guard, conviction 75).",
-    "backend/adaptive_learning.py": "New pure module (2026-10-08): owned configuration, CORE/EXPLORE tiers, liquidity-scaled sizing and time-decayed per-context learning of size and avoid/allow."
+    "backend/adaptive_learning.py": "New pure module (2026-10-08): owned configuration, CORE/EXPLORE tiers, liquidity-scaled sizing and time-decayed per-context learning of size and avoid/allow.",
+    "backend/lab_activity.py": "2026-10-08: adds X_SIGNAL PAPER entry/risk configuration only; shared safety and execution-cost logic remain unchanged.",
+    "backend/x_signal_monitor.py": "2026-10-08: budget-capped xAI X Search collector for PAPER signals; allowed handles only, literal addresses only, no order execution, atomic state output."
   },
   "strategy_profile": "ORDER_FLOW_ADAPTIVE_LEARNING",
   "strategy_version": "learner-2026-10-08",
