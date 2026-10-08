@@ -1,7 +1,6 @@
 import LabPairedPanel, { type LabPairedSnapshot } from './components/LabPairedPanel';
 import PaperTrainingPanel, { type PaperTrainingSnapshot } from './components/PaperTrainingPanel';
-import AstraBrainPanel, { type AstraSnapshot } from './components/AstraBrainPanel';
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import {
   Activity, Bot, ChevronRight, CircleDollarSign, Clock3, ExternalLink,
   Flame, Gauge, Pause, Play, RefreshCw, Search, ShieldCheck, Sparkles,
@@ -43,8 +42,16 @@ type Position = {
 type PricePoint = { ts: number; price: number; liquidity: number; volumeH1: number; score: number };
 type LabPosition = { symbol: string; address: string; strategy_id: string; opened_at: number; pnl_pct: number; notional_usd: number };
 type LabBook = { id: string; name: string; starting_balance: number; balance: number; position: LabPosition | null; history: Position[] };
+type LabTrade = {
+  trade_no: number | null; symbol: string | null; address: string | null; open: boolean;
+  opened_at: number | null; closed_at: number | null; hold_seconds: number | null;
+  entry_price: number | null; execution_entry_price: number | null;
+  exit_price: number | null; execution_exit_price: number | null; current_price: number | null;
+  notional_usd: number | null; pnl_usd: number | null; pnl_pct: number | null; exit_reason: string | null;
+};
+type LabBookTrades = { found: boolean; id: string; name?: string; trades: LabTrade[]; total: number; shown: number };
 type LabStats = { trades: number; wins: number; losses: number; win_rate: number; profit_factor: number | null; realized_pnl: number; equity: number; return_pct: number; open: boolean };
-type StrategyLab = { paired?: LabPairedSnapshot; astra?: AstraSnapshot; status: string; updated_at: number; started_at: number; books: Record<string, LabBook>; stats: Record<string, LabStats>; error?: string };
+type StrategyLab = { paired?: LabPairedSnapshot; status: string; updated_at: number; started_at: number; books: Record<string, LabBook>; stats: Record<string, LabStats>; error?: string };
 type LiveTrade = { ts: number; direction: 'BUY' | 'SELL'; token_amount: number; usd_amount: number; wallet: string; note: string; address: string; pairAddress: string; symbol: string; signature: string; slot: number };
 type FlowStats = { seconds: number; trades: number; buys: number; sells: number; buy_usd: number; sell_usd: number; buy_sell_usd_ratio: number; unique_wallets: number; max_buy_usd: number; max_sell_usd: number };
 type TapeStatus = { status?: string; tracked_pairs?: number; updated_at?: number; source?: string; error?: string | null };
@@ -73,6 +80,12 @@ const shortAddress = (value: string) => `${value.slice(0, 4)}…${value.slice(-4
 const timeLabel = (stamp: number) => stamp ? new Date(stamp).toLocaleTimeString('bg-BG', { hour: '2-digit', minute: '2-digit' }) : '—';
 const tapeTimeLabel = (stamp: number) => stamp ? new Date(stamp).toLocaleTimeString('bg-BG', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
 const fullTimeLabel = (stamp: number) => stamp ? new Date(stamp).toLocaleString('bg-BG', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
+const holdLabel = (seconds: number | null) => {
+  if (seconds == null) return '—';
+  const total = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(total / 3600), minutes = Math.floor((total % 3600) / 60), rest = total % 60;
+  return hours ? `${hours}ч ${minutes}м ${rest}с` : minutes ? `${minutes}м ${rest}с` : `${rest}с`;
+};
 const durationLabel = (start?: number, end?: number) => !start || !end ? '—' : `${Math.max(0, Math.round((end - start) / 60000))}m`;
 function ScoreBadge({ coin }: { coin: Coin }) {
   const cls = coin.posture === 'SETUP' ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300' : coin.posture === 'WATCH' ? 'border-sky-400/20 bg-sky-400/10 text-sky-300' : coin.posture === 'WAIT' ? 'border-amber-400/20 bg-amber-400/10 text-amber-200' : 'border-red-400/20 bg-red-400/10 text-red-300';
@@ -102,6 +115,9 @@ export default function App() {
   const [state, setState] = useState<MonitorState | null>(null);
   const [error, setError] = useState('');
   const [selectedAddress, setSelectedAddress] = useState('');
+  const [openBook, setOpenBook] = useState('');
+  const [bookTrades, setBookTrades] = useState<LabBookTrades | null>(null);
+  const [bookTradesError, setBookTradesError] = useState('');
   const [detail, setDetail] = useState<TokenDetail | null>(null);
   const [filter, setFilter] = useState<Filter>('ALL');
   const [search, setSearch] = useState('');
@@ -210,6 +226,33 @@ export default function App() {
     const timer = window.setInterval(loadToken, 2000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [selectedAddress]);
+
+  useEffect(() => {
+    setBookTrades(null);
+    setBookTradesError('');
+    if (!openBook) return;
+    let cancelled = false;
+    const loadBook = async () => {
+      try {
+        if (!supabase) return;
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token;
+        if (!token) return;
+        const response = await fetch(`${API}/user/lab-book?id=${encodeURIComponent(openBook)}`, {
+          cache: 'no-store',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const next = await response.json() as LabBookTrades;
+        if (!cancelled) { setBookTrades(next); setBookTradesError(''); }
+      } catch {
+        if (!cancelled) setBookTradesError('Сделките не могат да се заредят в момента.');
+      }
+    };
+    void loadBook();
+    const timer = window.setInterval(loadBook, 10000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [openBook]);
   const selectedCoin = useMemo(() => state?.feed.find(c => c.address === selectedAddress) || detail?.coin || state?.feed[0] || null, [state, selectedAddress, detail]);
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -391,11 +434,10 @@ export default function App() {
 
       <section className="mt-4 overflow-hidden rounded-3xl border border-cyan-400/15 bg-[#0b0e11]">
         <div className="flex flex-col gap-3 border-b border-white/[0.07] p-4 sm:flex-row sm:items-center sm:justify-between">
-          <div><div className="text-[9px] font-black uppercase tracking-[0.18em] text-cyan-300">MULTI-STRATEGY LAB</div><h2 className="mt-1 text-lg font-black text-white">33 стратегии + Astra 6 Brain · Fast Scalper $100 · останалите $500</h2><div className="mt-1 text-[9px] text-slate-600">Старите 33 теста: −3% / +10% с разходен модел. Astra 6 Brain: −2% / +10–20% с Jupiter котировки и отделен капитал.</div></div>
+          <div><div className="text-[9px] font-black uppercase tracking-[0.18em] text-cyan-300">MULTI-STRATEGY LAB</div><h2 className="mt-1 text-lg font-black text-white">Тестови стратегии · Fast Scalper $100 · останалите $500</h2><div className="mt-1 text-[9px] text-slate-600">Изход −3% / +10% нето с разходен модел; TikTok Strategy: −12% / +17%. Натисни стратегия, за да видиш всяка нейна сделка.</div></div>
           <div className={`rounded-lg border px-2.5 py-1.5 text-[9px] font-black ${state?.strategy_lab?.status === 'online' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>{(state?.strategy_lab?.status || 'CONNECTING').toUpperCase()}</div>
         </div>
         <div data-testid="lab-integrity-warning" className="mx-4 mt-3 rounded-xl border border-amber-400/20 bg-amber-400/[0.04] px-4 py-3 text-xs leading-5 text-amber-100">В историята на Lab има несъответстващи цени, включително XFUN. Сумите не са пренаписани. Новите входове изискват проверка на точния pool от втори източник.</div>
-        <AstraBrainPanel data={state?.strategy_lab?.astra} />
         <LabPairedPanel data={state?.strategy_lab?.paired} />
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1050px] text-left">
@@ -404,8 +446,9 @@ export default function App() {
               {Object.values(state?.strategy_lab?.books || {}).filter(book => book.id !== 'ASTRA_6_BRAIN').sort((a,b) => (state?.strategy_lab?.stats?.[b.id]?.equity ?? b.balance) - (state?.strategy_lab?.stats?.[a.id]?.equity ?? a.balance)).map(book => {
                 const st = state?.strategy_lab?.stats?.[book.id];
                 const pnl = st?.realized_pnl ?? (book.balance - book.starting_balance);
-                return <tr key={book.id} className="border-b border-white/[0.04] text-xs hover:bg-white/[0.02]">
-                  <td className="px-4 py-3"><div className="font-black text-white">{book.name}</div>{book.id === 'FLOW_MOMENTUM_SCALE_OUT' && <div className="mt-1 text-[9px] text-amber-200/80">Общ изход −3/+10; близките входове могат да дадат еднакви сделки.</div>}<div className="mt-1 text-[8px] font-mono text-slate-700">{book.id}</div></td>
+                const expanded = openBook === book.id;
+                return <Fragment key={book.id}><tr className={`border-b border-white/[0.04] text-xs hover:bg-white/[0.02] ${expanded ? 'bg-white/[0.03]' : ''}`}>
+                  <td className="px-4 py-3"><button type="button" aria-expanded={expanded} onClick={() => setOpenBook(expanded ? '' : book.id)} className="flex items-center gap-2 text-left font-black text-white hover:text-cyan-200"><span className="text-cyan-300">{expanded ? '▾' : '▸'}</span>{book.name}</button>{book.id === 'FLOW_MOMENTUM_SCALE_OUT' && <div className="mt-1 text-[9px] text-amber-200/80">Общ изход −3/+10; близките входове могат да дадат еднакви сделки.</div>}<div className="mt-1 text-[8px] font-mono text-slate-700">{book.id}</div></td>
                   <td className="px-4 py-3 font-black text-white">${book.balance.toFixed(2)}</td>
                   <td className="px-4 py-3 text-slate-300">${(st?.equity ?? book.balance).toFixed(2)}</td>
                   <td className={`px-4 py-3 font-black ${pnl >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}<div className="mt-1 text-[9px]">{(st?.return_pct ?? 0) >= 0 ? '+' : ''}{(st?.return_pct ?? 0).toFixed(2)}%</div></td>
@@ -414,6 +457,28 @@ export default function App() {
                   <td className="px-4 py-3 text-slate-300">{st?.profit_factor != null ? st.profit_factor.toFixed(2) : st?.wins && !st.losses ? '∞ (няма загуби)' : '—'}</td>
                   <td className="px-4 py-3">{book.position ? <button onClick={() => setSelectedAddress(book.position!.address)} className="rounded-xl border border-cyan-400/15 bg-cyan-400/[0.05] px-3 py-2 text-left"><div className="font-black text-cyan-200">${book.position.symbol}</div><div className={`mt-1 text-[9px] font-black ${(book.position.pnl_pct || 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{(book.position.pnl_pct || 0) >= 0 ? '+' : ''}{(book.position.pnl_pct || 0).toFixed(2)}% · ${book.position.notional_usd.toFixed(0)}</div></button> : <span className="text-[9px] text-slate-700">чака setup</span>}</td>
                 </tr>
+                {expanded && <tr className="border-b border-cyan-400/10 bg-black/20"><td colSpan={8} className="px-4 py-3">
+                  {bookTradesError && <div className="text-xs text-amber-200">{bookTradesError}</div>}
+                  {!bookTradesError && !bookTrades && <div className="text-xs text-slate-500">Зареждане на сделките…</div>}
+                  {bookTrades && bookTrades.trades.length === 0 && <div className="text-xs text-slate-500">Тази стратегия още няма сделки.</div>}
+                  {bookTrades && bookTrades.trades.length > 0 && <div className="overflow-x-auto">
+                    <div className="mb-2 text-[9px] text-slate-600">{bookTrades.total} затворени сделки{bookTrades.shown < bookTrades.total ? ` · показани последните ${bookTrades.shown}` : ''} · цените са симулираното изпълнение, когато е налично</div>
+                    <table data-testid="lab-book-trades" className="w-full min-w-[900px] text-left">
+                      <thead><tr className="border-b border-white/[0.06] text-[8px] font-black uppercase tracking-[0.14em] text-slate-700"><th className="px-3 py-2"># / Монета</th><th className="px-3 py-2">Вход — време</th><th className="px-3 py-2">Вход — цена</th><th className="px-3 py-2">Изход — време</th><th className="px-3 py-2">Изход — цена</th><th className="px-3 py-2">Задържане</th><th className="px-3 py-2">Резултат</th><th className="px-3 py-2">Причина</th></tr></thead>
+                      <tbody>{bookTrades.trades.map((trade, index) => <tr key={`${trade.trade_no ?? index}-${trade.opened_at ?? index}`} className="border-b border-white/[0.04] text-[11px]">
+                        <td className="px-3 py-2"><span className="font-black text-white">#{trade.trade_no ?? '—'} · ${trade.symbol ?? '—'}</span></td>
+                        <td className="px-3 py-2 text-slate-400">{fullTimeLabel(trade.opened_at ?? 0)}</td>
+                        <td className="px-3 py-2 text-slate-300">{fmtPrice(trade.execution_entry_price ?? trade.entry_price ?? 0)}</td>
+                        <td className="px-3 py-2 text-slate-400">{trade.open ? <span className="font-black text-cyan-300">отворена</span> : fullTimeLabel(trade.closed_at ?? 0)}</td>
+                        <td className="px-3 py-2 text-slate-300">{trade.open ? `${fmtPrice(trade.current_price ?? 0)} сега` : fmtPrice(trade.execution_exit_price ?? trade.exit_price ?? 0)}</td>
+                        <td className="px-3 py-2 text-slate-400">{holdLabel(trade.hold_seconds)}</td>
+                        <td className={`px-3 py-2 font-black ${(trade.pnl_pct ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{(trade.pnl_usd ?? 0) >= 0 ? '+' : ''}${(trade.pnl_usd ?? 0).toFixed(2)} · {(trade.pnl_pct ?? 0) >= 0 ? '+' : ''}{(trade.pnl_pct ?? 0).toFixed(2)}%</td>
+                        <td className="px-3 py-2 text-slate-500">{trade.open ? '—' : trade.exit_reason ?? '—'}</td>
+                      </tr>)}</tbody>
+                    </table>
+                  </div>}
+                </td></tr>}
+                </Fragment>
               })}
             </tbody>
           </table>

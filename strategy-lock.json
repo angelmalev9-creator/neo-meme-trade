@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-08",
   "source_commit": "ADAPTIVE_LEARNING_20261008",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "e3b17aca3271537c70b93e6665b01b4206beba28029d494626f020a964581c55",
+  "sha256": "20bdc4f44dadf2dcfa3ae6cbc3a0fee26c53da8226de42a4d164f9a8c8e8f601",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE_LEARNING",
   "rules": {
     "max_positions": 8,
@@ -88,7 +88,7 @@
     "backend/strategy_lab.py": "5265b517584477cf30d0e81c723f8cb945bf5eda789336b9fec758ea48c997ea",
     "backend/training_bridge.py": "f25d6bc763c801bbaa4c65c05869921b471885b46ca6187ed81ad2a39ac0c08d",
     "backend/training_worker.py": "75a48c03cbdf7274a74d6701f8e2f45ce618337caf135fde9dfe05bc3bbeba81",
-    "backend/user_gateway.py": "aeeba9e72a7c35399c43bf1f14d1d78c5a543e96c3242746d7fb8ec81bc46ebc"
+    "backend/user_gateway.py": "cd74b96d05b8a1383234274be8b42554439710980e63467f09aeaf16db358a2a"
   },
   "runtime_version": "RUNTIME_DURABLE_PAPER_V2",
   "runtime_note": "Primary PAPER engine holds up to eight liquidity-scaled positions across CORE and EXPLORE tiers. Positions opened under an earlier profile keep the stop and exit policy recorded at entry.",
@@ -134,7 +134,7 @@
   "hash_basis": "UTF8_LF",
   "exit_policy_version": "ADAPTIVE_CONTEXT_HOLD_NET_V1",
   "hash_change_reasons": {
-    "backend/market_monitor.py": "2026-10-08: explicit strategy profile selection; ORDER_FLOW_ADAPTIVE (2026-10-04) is the primary profile with module-owned configuration, BALANCED_V4 entry filter, 60s flow window, fixed $200 size, $100 daily gate, 20-minute same-token cooldown, one position and adaptive conviction exits. EARLY_SCOUT_V10 behavior is unchanged when selected. Open positions keep the exit policy recorded at entry. ORDER_FLOW_ADAPTIVE_LEARNING becomes the default profile: eight positions, tiered entries, learned sizing, outcome-aware cooldown; an unsellable position no longer freezes entries under this profile; every position keeps the stop recorded at entry.",
+    "backend/market_monitor.py": "2026-10-08: explicit strategy profile selection; ORDER_FLOW_ADAPTIVE (2026-10-04) is the primary profile with module-owned configuration, BALANCED_V4 entry filter, 60s flow window, fixed $200 size, $100 daily gate, 20-minute same-token cooldown, one position and adaptive conviction exits. EARLY_SCOUT_V10 behavior is unchanged when selected. Open positions keep the exit policy recorded at entry. ORDER_FLOW_ADAPTIVE_LEARNING becomes the default profile: eight positions, tiered entries, learned sizing, outcome-aware cooldown; an unsellable position no longer freezes entries under this profile; every position keeps the stop recorded at entry. Adds the read-only /lab-book endpoint (trade list of one Strategy Lab book); no trading logic changed.",
     "backend/engine_entry_policy.py": "Raised validated quote throughput to 12 candidates per scan and versioned V10 high-frequency scout policy. Unchanged on 2026-10-08; used only by the EARLY_SCOUT_V10 profile. 2026-10-08: adds the learned_avoid rejection label only.",
     "backend/gold_order_flow.py": "Added MICRO_SCOUT before ULTRA_EARLY with lower early thresholds while leaving safety/price/execution vetoes outside and mandatory. Unchanged on 2026-10-08; used only by the EARLY_SCOUT_V10 profile.",
     "backend/engine_exit_policy.py": "Versioned net fixed policy and original adaptive candidate, no chart stop",
@@ -151,7 +151,7 @@
     "backend/training_bridge.py": "Bounded no-API journal bridge with actual evidence timestamps",
     "backend/training_worker.py": "Independent process, durable reset boundary and restart",
     "backend/paper_state_reset.py": "User-authorized checksum archives and all PAPER reset/restore",
-    "backend/user_gateway.py": "Independent private PAPER accounts with cached Supabase verification and stable configured-port reuse; a slow health probe can no longer churn through new per-user engine ports. 2026-10-08: CORS allowlist adds the Vercel frontend origin and exact extra origins from NEO_ALLOWED_ORIGINS; no account, auth or engine logic changed.",
+    "backend/user_gateway.py": "Independent private PAPER accounts with cached Supabase verification and stable configured-port reuse; a slow health probe can no longer churn through new per-user engine ports. 2026-10-08: CORS allowlist adds the Vercel frontend origin and exact extra origins from NEO_ALLOWED_ORIGINS; no account, auth or engine logic changed. Adds the authenticated /user/lab-book route that forwards only a book id.",
     "backend/strategy_lab.py": "Inert import, complete histories and truthful profit factor Includes the isolated PAPER MOMENTUM_HUNTER challenger and ranking diagnostics. 2026-10-08: adds the isolated PAPER TikTok Strategy book (light filter, min $30k market cap, net stop -12% / target +17%, 1s exit re-check while it holds) through per-strategy exit and cost-cap overrides; all other books keep 3:10 and the shared cost model.",
     "backend/astra6_brain.py": "Shared exit-priority quote transport, cache/backoff, UTF-8 persistence and truthful profit factor",
     "backend/lab_paired_runner.py": "Cross-platform file locking and UTF-8 persistence",

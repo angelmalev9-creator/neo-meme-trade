@@ -27,4 +27,4 @@ The Python regression suite does not run on Vercel. Run `python3 scripts/run_pyt
 
 ## GitHub Pages
 
-`.github/workflows/deploy-pages.yml` now runs only when started manually. The existing `gh-pages` site stays online with its last build and is not updated by pushes.
+`.github/workflows/deploy-pages.yml` deploys the same build to GitHub Pages on every push to `main`, so `https://angelmalev9-creator.github.io/neo-meme-trade/` keeps showing the current dashboard next to the Vercel address. It depends on GitHub Actions being able to run; Vercel does not.
