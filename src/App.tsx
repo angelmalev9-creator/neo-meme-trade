@@ -48,6 +48,7 @@ type LabTrade = {
   entry_price: number | null; execution_entry_price: number | null;
   exit_price: number | null; execution_exit_price: number | null; current_price: number | null;
   notional_usd: number | null; pnl_usd: number | null; pnl_pct: number | null; exit_reason: string | null;
+  observed_exit_pnl_pct?: number | null; pre_exit_pnl_pct?: number | null; pre_exit_gap_seconds?: number | null; exit_fill_model?: string | null;
 };
 type LabBookTrades = { found: boolean; id: string; name?: string; trades: LabTrade[]; total: number; shown: number };
 type LabStats = { trades: number; wins: number; losses: number; win_rate: number; profit_factor: number | null; realized_pnl: number; equity: number; return_pct: number; open: boolean };
@@ -473,7 +474,7 @@ export default function App() {
                         <td className="px-3 py-2 text-slate-300">{trade.open ? `${fmtPrice(trade.current_price ?? 0)} сега` : fmtPrice(trade.execution_exit_price ?? trade.exit_price ?? 0)}</td>
                         <td className="px-3 py-2 text-slate-400">{holdLabel(trade.hold_seconds)}</td>
                         <td className={`px-3 py-2 font-black ${(trade.pnl_pct ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{(trade.pnl_usd ?? 0) >= 0 ? '+' : ''}${(trade.pnl_usd ?? 0).toFixed(2)} · {(trade.pnl_pct ?? 0) >= 0 ? '+' : ''}{(trade.pnl_pct ?? 0).toFixed(2)}%</td>
-                        <td className="px-3 py-2 text-slate-500">{trade.open ? '—' : trade.exit_reason ?? '—'}</td>
+                        <td className="px-3 py-2 text-slate-500">{trade.open ? '—' : trade.exit_reason ?? '—'}{!trade.open && trade.exit_fill_model === 'LIMIT_AT_TARGET' && trade.observed_exit_pnl_pct != null && <div className="mt-0.5 text-[9px] text-slate-600">лимит на целта · пазарът беше {trade.observed_exit_pnl_pct >= 0 ? '+' : ''}{trade.observed_exit_pnl_pct.toFixed(2)}%</div>}{!trade.open && (trade.exit_reason ?? '').startsWith('STOP_LOSS') && trade.pre_exit_pnl_pct != null && trade.pre_exit_gap_seconds != null && <div className="mt-0.5 text-[9px] text-slate-600">скок от {trade.pre_exit_pnl_pct >= 0 ? '+' : ''}{trade.pre_exit_pnl_pct.toFixed(2)}% за {trade.pre_exit_gap_seconds.toFixed(1)}с</div>}</td>
                       </tr>)}</tbody>
                     </table>
                   </div>}

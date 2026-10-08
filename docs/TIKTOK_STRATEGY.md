@@ -41,7 +41,8 @@ Consequences worth knowing:
 
 - Near a $30k market cap a round trip costs roughly 3% before price impact. The stop and target are net of that, so +17% net needs about a +20% price move, and −12% net is reached at about a −9% move.
 - That is why this book alone may enter with up to 4.0% round-trip cost. Under the lab's 2.75% default a pool in PumpSwap's top fee tiers (1.20–1.25% per side) can never be entered, whatever the size.
-- A gap through the stop is booked at the observed loss, not clamped to −12%.
+- **Take profit is a limit at exactly +17% net.** When the net mark is at or above +17% the sale is booked at +17%, never higher; the market value seen at that moment is kept as `observed_exit_pnl_pct`.
+- **The stop triggers at −12% net and sells at the market.** A gap through the stop is booked at the observed loss, not clamped to −12%: a constant-product pool has no order that guarantees a price, so a booked −12% would be a result no real sale could deliver. Each exit keeps the previous mark and the seconds between the two observations (`pre_exit_pnl_pct`, `pre_exit_gap_seconds`), shown under the reason in the trade list.
 
 ## Where the numbers live
 

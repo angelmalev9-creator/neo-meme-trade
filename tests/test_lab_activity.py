@@ -198,9 +198,31 @@ class TikTokStrategyTests(unittest.TestCase):
                     self.assertAlmostEqual(book['balance'],500+net-100)
 
     def test_gap_through_the_stop_is_booked_in_full(self):
-        self.position('TIKTOK');self.mark(60)
+        self.position('TIKTOK');self.mark(95);self.mark(60)
         trade=lab.STATE['books']['TIKTOK']['history'][0]
         self.assertEqual((trade['exit_reason'],trade['pnl_pct']),('STOP_LOSS_12_NET',-40))
+        self.assertEqual((trade['exit_fill_model'],trade['observed_exit_pnl_pct']),('MARKET_AT_OBSERVED_MARK',-40))
+        # The previous mark is kept so the jump is visible afterwards.
+        self.assertEqual((trade['pre_exit_pnl_pct'],trade['pre_exit_gap_seconds']),(-5,0))
+        self.assertAlmostEqual(lab.STATE['books']['TIKTOK']['balance'],460)
+
+    def test_take_profit_is_a_limit_booked_at_exactly_17(self):
+        self.position('TIKTOK');self.mark(131)
+        book=lab.STATE['books']['TIKTOK'];trade=book['history'][0]
+        self.assertEqual((trade['exit_reason'],trade['pnl_pct'],trade['pnl_usd']),('TAKE_PROFIT_17_NET',17,17))
+        self.assertEqual((trade['exit_fill_model'],trade['observed_exit_pnl_pct']),('LIMIT_AT_TARGET',31))
+        self.assertAlmostEqual(book['balance'],517)
+        self.assertAlmostEqual(trade['execution_exit_price'],1.17)
+
+    def test_limit_never_improves_a_result(self):
+        # Other exits and other books stay at the observed mark.
+        self.position('TIKTOK',opened_at=NOW-61*60000);self.mark(110)
+        trade=lab.STATE['books']['TIKTOK']['history'][0]
+        self.assertEqual((trade['exit_reason'],trade['pnl_pct'],trade['exit_fill_model']),
+                         ('ABSOLUTE_MAX_HOLD_60',10,'MARKET_AT_OBSERVED_MARK'))
+        self.position('SCALPER');self.mark(125)
+        trade=lab.STATE['books']['SCALPER']['history'][0]
+        self.assertEqual((trade['exit_reason'],trade['pnl_pct']),('TAKE_PROFIT_10_NET',25))
 
     def test_other_books_keep_3_10(self):
         self.position('SCALPER');self.position('TIKTOK');self.mark(96)

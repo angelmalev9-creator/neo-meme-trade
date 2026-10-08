@@ -86,6 +86,12 @@ def _trade_row(trade, open_position=False):
         'pnl_usd': _finite(trade.get('open_pnl_usd') if open_position else trade.get('pnl_usd')),
         'pnl_pct': _finite(trade.get('pnl_pct')),
         'exit_reason': None if open_position else trade.get('exit_reason'),
+        # The mark seen just before the exit and how long before: a stop that
+        # booked far past its level shows here as a jump, not as a late check.
+        'observed_exit_pnl_pct': None if open_position else _finite(trade.get('observed_exit_pnl_pct')),
+        'pre_exit_pnl_pct': None if open_position else _finite(trade.get('pre_exit_pnl_pct')),
+        'pre_exit_gap_seconds': None if open_position else _finite(trade.get('pre_exit_gap_seconds')),
+        'exit_fill_model': None if open_position else trade.get('exit_fill_model'),
     }
 
 
