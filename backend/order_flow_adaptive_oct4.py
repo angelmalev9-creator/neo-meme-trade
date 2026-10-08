@@ -1,8 +1,9 @@
 """ORDER_FLOW_ADAPTIVE — the 2026-10-04 PAPER decision policy, restored as one unit.
 
 This module is pure: no network, no clock, no account state, no swap
-submission. It owns exactly four things, each recovered from the 2026-10-04
-engine (`5b78efd`, entry policy ORDER_FLOW_BALANCED_V4):
+submission. It owns exactly four things, each recovered from the engine that
+ran through 2026-10-04 (tag `strategy-gold-v1-2026-10-04`, locked again in
+`da4a219`):
 
 1. the effective configuration (so systemd environment cannot drift it),
 2. the entry filter and its named rejection reasons,
@@ -13,6 +14,14 @@ Everything about *execution* stays in the modern engine: exact pool and mint
 validation, rug guard, price integrity, quote evidence, uncapped modeled
 losses and the durable ledger. A decision made here is an intent, never a
 fill; a planned stop does not promise the proceeds through a price gap.
+
+Entry-filter history, because it matters: the account's activity on
+2026-10-04 came from the GOLD entry rule below, which was in force from
+2026-10-03 20:08 until 2026-10-04 21:35. The much stricter
+ORDER_FLOW_BALANCED_V4 (score 85, liquidity $30k, conviction 72 plus eight
+more flow and market checks) only replaced it at 22:25 that evening and
+recorded two trades. Restoring V4 first reproduced the late-evening silence,
+not the trading day; this module now carries the GOLD rule.
 """
 import math
 import re
@@ -21,14 +30,14 @@ from types import MappingProxyType
 PROFILE = 'ORDER_FLOW_ADAPTIVE_OCT4'
 STRATEGY_ID = 'ORDER_FLOW_ADAPTIVE'
 STRATEGY_VERSION = 'gold-2026-10-04'
-ENTRY_POLICY_VERSION = 'ORDER_FLOW_BALANCED_V4'
-ENTRY_MODE = 'BALANCED_V4'
+ENTRY_POLICY_VERSION = 'ORDER_FLOW_GOLD_V1'
+ENTRY_MODE = 'GOLD_V1'
 LEARNING_MODE = 'ADAPTIVE_CONTEXT_HOLD'
 EXIT_POLICY = 'oct4_adaptive'
 # Historical decision order, evaluated on honest net executable marks for the
 # stop and on the exact-pool observed price for the context triggers.
 EXIT_POLICY_VERSION = 'ADAPTIVE_CONTEXT_HOLD_NET_V1'
-SOURCE_COMMIT = '5b78efdba8121f2a8ce11e8ecc400a3e97443ad5'
+SOURCE_COMMIT = '44a7a09b019f068a97c2165068a556cadcc6bfc4'
 
 # One owner for every effective setting. The engine copies these values and
 # ignores same-named environment variables while this profile is active.
@@ -63,22 +72,15 @@ CONFIG = MappingProxyType({
 
 ENTRY_LIMITS = MappingProxyType({
     'min_score': 85.0,
-    'min_liquidity_usd': 30_000.0,
-    'min_conviction': 72.0,
-    'min_m5_pct': -3.0,
+    'min_liquidity_usd': 15_000.0,
+    'min_conviction': 75.0,
+    'min_m5_pct': -5.0,
     'max_m5_pct': 25.0,
-    'min_h1_pct': -30.0,
-    'max_h1_pct': 150.0,
-    'min_market_buy_sell_ratio': 1.0,
-    'min_liquidity_market_cap_ratio': 0.03,
-    'min_flow_trades': 4,
+    'min_flow_trades': 3,
     'min_flow_buy_sell_usd_ratio': 1.30,
-    'min_buy_usd': 150.0,
-    'min_unique_wallets': 4,
-    'min_buyer_wallets': 3,
-    'min_wallet_buy_sell_ratio': 1.0,
-    'large_sell_floor_usd': 250.0,
-    'large_sell_buy_fraction': 0.50,
+    'min_unique_wallets': 1,
+    'large_sell_floor_usd': 750.0,
+    'large_sell_buy_fraction': 0.80,
 })
 
 # (name, minimum conviction, max hold minutes, fixed target %, trail arm %, trail %)
@@ -130,18 +132,16 @@ def _n(value, default=0.0):
 
 def signal_rejections(coin, flow, context, *, now, limits=ENTRY_LIMITS,
                       max_feed_age_ms=CONFIG['max_feed_age_ms']):
-    """Return every failed ORDER_FLOW_BALANCED_V4 check, in a stable order.
+    """Return every failed ORDER_FLOW_GOLD_V1 check, in a stable order.
 
-    Missing or non-finite inputs fail their check: absent evidence never
-    counts as clearance. Rug, price-integrity and quote checks run afterwards
-    in the engine and are not replaced by this filter.
+    The GOLD rule: score, liquidity, 5-minute move, then 60 seconds of
+    verified order flow (trade count, buy/sell USD ratio, at least one wallet,
+    no outsized sell) and conviction. Missing or non-finite inputs fail their
+    check: absent evidence never counts as clearance. Rug, price-integrity and
+    quote checks run afterwards in the engine and are not replaced by this.
     """
     changes = coin.get('priceChange') or {}
-    tx = (coin.get('txns') or {}).get('m5') or {}
-    liquidity = _n(coin.get('liquidityUsd'))
-    market_cap = _n(coin.get('marketCap') or coin.get('fdv'))
     observed = _n(coin.get('updatedAt'))
-    market_ratio = _n(tx.get('buys')) / max(_n(tx.get('sells')), 1.0)
     buy_usd = _n(flow.get('buy_usd'))
     quality = str(flow.get('quality', flow.get('status', 'UNKNOWN'))).upper()
     checks = (
@@ -151,18 +151,11 @@ def signal_rejections(coin, flow, context, *, now, limits=ENTRY_LIMITS,
         ('stale_feed', observed > 0 and 0 <= now - observed <= max_feed_age_ms),
         ('flow_quality', quality in _FLOW_QUALITY_OK),
         ('score', _n(coin.get('score')) >= limits['min_score']),
-        ('liquidity', liquidity >= limits['min_liquidity_usd']),
+        ('liquidity', _n(coin.get('liquidityUsd')) >= limits['min_liquidity_usd']),
         ('momentum', limits['min_m5_pct'] <= _n(changes.get('m5'), -999.0) <= limits['max_m5_pct']),
-        ('hour_trend', limits['min_h1_pct'] <= _n(changes.get('h1'), -999.0) <= limits['max_h1_pct']),
-        ('market_buyers', market_ratio >= limits['min_market_buy_sell_ratio']),
-        ('liquidity_ratio', market_cap > 0
-                            and liquidity / market_cap >= limits['min_liquidity_market_cap_ratio']),
         ('flow_count', _n(flow.get('trades')) >= limits['min_flow_trades']),
         ('flow_ratio', _n(flow.get('buy_sell_usd_ratio')) >= limits['min_flow_buy_sell_usd_ratio']),
-        ('buy_volume', buy_usd >= limits['min_buy_usd']),
         ('wallet_count', _n(flow.get('unique_wallets')) >= limits['min_unique_wallets']),
-        ('buyer_count', _n(flow.get('buyer_wallets')) >= limits['min_buyer_wallets']),
-        ('wallet_ratio', _n(flow.get('wallet_buy_sell_ratio')) >= limits['min_wallet_buy_sell_ratio']),
         ('large_sells', _n(flow.get('max_sell_usd'), math.inf)
                         < max(limits['large_sell_floor_usd'], buy_usd * limits['large_sell_buy_fraction'])),
         ('conviction', _n(context.get('conviction'), -1.0) >= limits['min_conviction']),

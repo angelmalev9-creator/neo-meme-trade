@@ -15,8 +15,8 @@
     "starting_balance_usd": 1000,
     "trade_notional_usd": 200,
     "max_daily_loss_usd": 100,
-    "min_liquidity_usd": 30000,
-    "min_conviction": 72,
+    "min_liquidity_usd": 15000,
+    "min_conviction": 75,
     "scan_seconds": 15,
     "position_scan_seconds": 2,
     "same_token_cooldown_seconds": 1200,
@@ -30,25 +30,18 @@
   "policy": "Owner-requested restore of the 2026-10-04 ORDER_FLOW_ADAPTIVE decision behavior. Existing PAPER account history, balance, trade sequence and audit are preserved; no reset, no live execution and no automatic live-money promotion.",
   "integrity_note": "Historical entry filter, conviction model, hold modes and exit order restored as one pure versioned module. Mandatory validated flow coverage, exact pool/mint checks, complete safety checks, bounded quote age and uncapped actual modeled losses are retained. A planned stop is not a guaranteed fill.",
   "execution_mode": "PAPER_QUOTE_OR_OBSERVED_POOL_MODEL",
-  "entry_policy_version": "ORDER_FLOW_BALANCED_V4",
+  "entry_policy_version": "ORDER_FLOW_GOLD_V1",
   "entry_policy_limits": {
     "min_score": 85.0,
-    "min_liquidity_usd": 30000.0,
-    "min_conviction": 72.0,
-    "min_m5_pct": -3.0,
+    "min_liquidity_usd": 15000.0,
+    "min_conviction": 75.0,
+    "min_m5_pct": -5.0,
     "max_m5_pct": 25.0,
-    "min_h1_pct": -30.0,
-    "max_h1_pct": 150.0,
-    "min_market_buy_sell_ratio": 1.0,
-    "min_liquidity_market_cap_ratio": 0.03,
-    "min_flow_trades": 4,
+    "min_flow_trades": 3,
     "min_flow_buy_sell_usd_ratio": 1.3,
-    "min_buy_usd": 150.0,
-    "min_unique_wallets": 4,
-    "min_buyer_wallets": 3,
-    "min_wallet_buy_sell_ratio": 1.0,
-    "large_sell_floor_usd": 250.0,
-    "large_sell_buy_fraction": 0.5,
+    "min_unique_wallets": 1,
+    "large_sell_floor_usd": 750.0,
+    "large_sell_buy_fraction": 0.8,
     "entry_flow_window_seconds": 60,
     "max_feed_age_ms": 30000,
     "max_entry_quote_age_ms": 10000,
@@ -71,7 +64,7 @@
     "backend/lab_paired_runner.py": "9d58e368a833cb28a6734c8e4f4ca6b260ec481249971ad776db49f01104be86",
     "backend/live_tape.py": "f3f15e0f6e3f6239a3378f19abaadd8af441a4f54365cd2ebdf1242b093d6bea",
     "backend/main_replay.py": "f81e4152a61e00d24a1cb354276aca7ff3fbd4d08c2533d09b1c0c8dc657b6f9",
-    "backend/order_flow_adaptive_oct4.py": "92049f1ad8b25a7af974e3e431d33e54668d1986be5c5cc4225c8ec98ac5089e",
+    "backend/order_flow_adaptive_oct4.py": "e788f0872353161475a2c26860d608d2167e7afe45296ed76d737fb393099697",
     "backend/pair_price_integrity.py": "f301d4adecf6fa3aa93692bf1d4feb250203a4d76db74dce02fc77c57c43f1cb",
     "backend/paper_execution_quotes.py": "fc5b0582c627800a80edc3fd48f24f8c2a9b4460bbf28cb8571493e1568fe2ac",
     "backend/paper_state_reset.py": "72a270787ca7af6af6b7d3883aae3e09cba3e5a7bc73359f56ec33e14b7b828b",
@@ -148,11 +141,11 @@
     "backend/astra6_brain.py": "Shared exit-priority quote transport, cache/backoff, UTF-8 persistence and truthful profit factor",
     "backend/lab_paired_runner.py": "Cross-platform file locking and UTF-8 persistence",
     "backend/main_replay.py": "Actual primary engine recorded-only evidence replay",
-    "backend/order_flow_adaptive_oct4.py": "New pure module: owned configuration, ORDER_FLOW_BALANCED_V4 entry filter, conviction model, hold modes and exit priority recovered from commit 5b78efd."
+    "backend/order_flow_adaptive_oct4.py": "Pure module: owned configuration, conviction model, hold modes and exit priority. 2026-10-08: entry filter changed from ORDER_FLOW_BALANCED_V4 to the GOLD rule of tag strategy-gold-v1-2026-10-04 (score 85, liquidity $15k, 5m -5..25, 3 flow trades, ratio 1.30, 1 wallet, large-sell guard, conviction 75)."
   },
   "strategy_profile": "ORDER_FLOW_ADAPTIVE_OCT4",
   "strategy_version": "gold-2026-10-04",
-  "recovered_from_commit": "5b78efdba8121f2a8ce11e8ecc400a3e97443ad5",
+  "recovered_from_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
   "exit_policy": "oct4_adaptive",
   "accounting_exit_version": "HONEST_NET_EXIT_V1",
   "learning_mode": "ADAPTIVE_CONTEXT_HOLD",
@@ -220,5 +213,9 @@
       "previous_lock_market_monitor_sha256": "ef65970cc02aa94744a72bb21e2114ae1a4f101dbcdb39d5fc60253649c53770"
     }
   },
-  "documentation": "docs/ORDER_FLOW_ADAPTIVE_OCT4.md"
+  "documentation": "docs/ORDER_FLOW_ADAPTIVE_OCT4.md",
+  "recovered_from_tag": "strategy-gold-v1-2026-10-04",
+  "superseded_entry_policies": {
+    "ORDER_FLOW_BALANCED_V4": "In force from 2026-10-04 22:25; restored first on 2026-10-08 and replaced the same day because it was the late-evening filter, not the one that produced the 2026-10-04 activity."
+  }
 }
