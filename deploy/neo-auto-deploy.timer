@@ -1,0 +1,11 @@
+[Unit]
+Description=Check origin/main for NEO Meme Trade updates every two minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=2min
+AccuracySec=15s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

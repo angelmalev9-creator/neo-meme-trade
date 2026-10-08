@@ -1,0 +1,13 @@
+[Unit]
+Description=NEO Meme Trade — deploy new commits from origin/main (tested, archived, rolled back on failure)
+Documentation=file:///root/neo-meme-trade/docs/VPS_AUTO_DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/neo/auto-deploy.env
+ExecStart=/usr/local/sbin/neo-auto-deploy
+TimeoutStartSec=900
+Nice=10
