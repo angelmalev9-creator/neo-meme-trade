@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'deploy' / 'vps-auto-deploy.sh'
-ENGINE, GATEWAY = 'neo-user-angel-paper.service', 'neo-user-gateway.service'
+ENGINE, GATEWAY, LAB = 'neo-user-angel-paper.service', 'neo-user-gateway.service', 'neo-strategy-lab.service'
 STATE = {'history': [{'id': 1}, {'id': 2}],
          'stats': {'demo_session_id': 'S1', 'demo_starting_balance_usd': 1000.0},
          'config': {'paper_only': True, 'signal_strategy': 'ORDER_FLOW_ADAPTIVE'}}
@@ -24,7 +24,10 @@ STUB_SYSTEMCTL = r'''#!/usr/bin/env bash
 # Records calls. A "bad" commit makes the services unhealthy or corrupts state.
 echo "$*" >> "$STUB_DIR/calls"
 case "$1" in
-  show) [ "$3" = MainPID ] && echo 0; exit 0 ;;
+  show)
+    [ "$4" = MainPID ] && echo 0
+    [ "$4" = ExecStart ] && [ -f "$STUB_DIR/lab_execstart" ] && cat "$STUB_DIR/lab_execstart"
+    exit 0 ;;
   is-active) [ ! -f "$STUB_DIR/dead_unit" ] || [ "$(cat "$STUB_DIR/dead_unit")" != "$3" ]; exit ;;
   start|restart)
     head="$(git -C "$NEO_DEPLOY_REPO" rev-parse HEAD)"
@@ -186,6 +189,30 @@ class VpsAutoDeploy(unittest.TestCase):
         self.push_change('backend/brand_new_engine_module.py')
         self.assertEqual(self.run_deploy().returncode, 0)
         self.assertEqual(self.calls(), [f'restart {ENGINE}'])
+
+    def test_lab_is_restarted_only_when_its_unit_runs_this_checkout(self):
+        self.push_change('backend/strategy_lab.py', 'backend/lab_activity.py')
+        (self.stub / 'lab_execstart').write_text(
+            '{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 /root/neomemecoins/backend/strategy_lab.py ; }')
+        result = self.run_deploy()
+        self.assertEqual((result.returncode, self.calls()), (0, []))
+        self.assertIn('is not restarted', result.stdout)
+
+        target = self.push_change('backend/lab_activity.py', content='v3\n')
+        (self.stub / 'lab_execstart').write_text(
+            f'{{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 {self.live}/backend/strategy_lab.py ; }}')
+        result = self.run_deploy()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.calls(), self.head(self.live)), ([f'restart {LAB}'], target))
+        self.assertEqual((self.status()['restarted_services'], self.archives()), ([LAB], []))
+
+    def test_lab_that_dies_after_restart_rolls_back(self):
+        self.push_change('backend/strategy_lab.py')
+        (self.stub / 'lab_execstart').write_text(f'argv[]=/usr/bin/python3 {self.live}/backend/strategy_lab.py')
+        (self.stub / 'dead_unit').write_text(LAB)
+        result = self.run_deploy()
+        self.assertEqual((result.returncode, self.head(self.live)), (1, self.start))
+        self.assertEqual(self.calls(), [f'restart {LAB}', f'restart {LAB}'])
 
     def test_optional_gateway_restart_on_engine_change(self):
         self.push_change('backend/market_monitor.py')

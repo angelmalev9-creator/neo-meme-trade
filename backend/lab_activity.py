@@ -40,6 +40,7 @@ class EntryRule:
     flow_buy: float = 0
     wallets: int = 0
     max_sell: float = math.inf
+    market_cap: float = 0
 
     def matches(self, f: dict[str, Any]) -> bool:
         flow = f.get('flow') or {}
@@ -57,6 +58,7 @@ class EntryRule:
             and number(flow.get('buy_usd')) >= self.flow_buy
             and number(flow.get('unique_wallets')) >= self.wallets
             and number(flow.get('max_sell')) <= self.max_sell
+            and number(f.get('mc')) >= self.market_cap
         )
 
 
@@ -96,7 +98,37 @@ RULES = {
     'SECOND_WAVE': EntryRule(85, 30000, (1, 18), 1.0, .06, (2, 1e7), (5, 180), (.1, 7), flow_trades=3, flow_ratio=1.4),
     'CLEAN_MOMENTUM': EntryRule(87, 30000, (1, 25), 1.05, .06, (2, 1e7), volume_liquidity=(.12, 5), flow_ratio=1.25),
     'CONFLUENCE_MAX': EntryRule(90, 40000, (0, 18), 1.1, .12, (2, 1e7), (-15, 1000), (.12, 6), flow_trades=4, flow_ratio=1.6, wallets=3),
+    # TikTok Strategy: PAPER sniper with the lightest entry filter in the lab.
+    # Any pool from the first minute, market cap of at least $30k, no order-flow
+    # requirement. Feed, price-integrity and liquidity-floor safety are unchanged.
+    'TIKTOK': EntryRule(65, 10000, (-5, 60), .80, .02, (0, 1440), (-50, 1000), market_cap=30000),
 }
+
+# Per-strategy overrides. Everything not listed uses the lab-wide defaults.
+EXIT_OVERRIDES = {
+    'TIKTOK': {'stop_loss': 12.0, 'take_profit': 17.0},
+}
+# Maximum modeled round-trip cost at entry. The pool fee is whatever the pool
+# charges (PumpSwap is about 1.25% per side near a $30k market cap), so a
+# strategy allowed to enter that low needs room above the 2.75% default.
+ENTRY_COST_CAPS = {
+    'TIKTOK': 4.0,
+}
+# Books whose open position is re-checked on the fast interval.
+SNIPER_IDS = frozenset({'TIKTOK'})
+SNIPER_POLL_SECONDS = 1.0
+
+
+def exit_rules(strategy_id: str, stop_loss: float, take_profit: float, max_hold_minutes: float) -> dict:
+    """Net exit thresholds for one book: lab defaults plus its overrides."""
+    override = EXIT_OVERRIDES.get(strategy_id, {})
+    return {'stop_loss': float(override.get('stop_loss', stop_loss)),
+            'take_profit': float(override.get('take_profit', take_profit)),
+            'max_hold_minutes': float(override.get('max_hold_minutes', max_hold_minutes))}
+
+
+def entry_cost_cap(strategy_id: str) -> float:
+    return float(ENTRY_COST_CAPS.get(strategy_id, MAX_ENTRY_COST_PCT))
 
 
 MOMENTUM_HUNTER_MIN_RANK = 32.0
@@ -152,7 +184,8 @@ def usable_feed_coin(coin: dict, now: int) -> bool:
 
 
 def affordable_entry(coin: dict, balance: float, limit: float,
-                     entry: Callable, exit: Callable) -> dict | None:
+                     entry: Callable, exit: Callable,
+                     max_cost_pct: float = MAX_ENTRY_COST_PCT) -> dict | None:
     """Try smaller paper sizes without changing the cost model or using leverage."""
     balance, limit = number(balance), number(limit)
     if min(balance, limit) < MIN_NOTIONAL_USD:
@@ -175,7 +208,7 @@ def affordable_entry(coin: dict, balance: float, limit: float,
         closing = exit(coin, quantity)
         net = number(closing.get('net_proceeds_usd')) - committed
         pct = net / size * 100
-        if quantity > 0 and committed <= balance + 1e-9 and -MAX_ENTRY_COST_PCT <= pct <= 0:
+        if quantity > 0 and committed <= balance + 1e-9 and -max_cost_pct <= pct <= 0:
             return {'notional': size, 'entry': opening, 'mark': closing,
                     'initial_pnl_usd': net, 'initial_pnl_pct': pct}
         if size == MIN_NOTIONAL_USD:
@@ -189,4 +222,6 @@ def policy_config() -> dict:
             'loss_reentry_seconds': LOSS_REENTRY_SECONDS,
             'max_entry_roundtrip_cost_pct': MAX_ENTRY_COST_PCT,
             'feed_max_age_seconds': MAX_FEED_AGE_MS / 1000,
+            'exit_overrides': EXIT_OVERRIDES, 'entry_cost_caps': ENTRY_COST_CAPS,
+            'sniper_ids': sorted(SNIPER_IDS), 'sniper_poll_seconds': SNIPER_POLL_SECONDS,
             'execution_basis': 'ESTIMATED_PAPER_COSTS_NOT_LIVE_FILLS'}

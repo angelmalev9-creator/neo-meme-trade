@@ -32,8 +32,8 @@ class ActivityTests(unittest.TestCase):
         guard.start();self.addCleanup(guard.stop)
         lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
 
-    def test_all_34_rules_exist(self):
-        self.assertEqual(len(a.RULES),34)
+    def test_all_35_rules_exist(self):
+        self.assertEqual(len(a.RULES),35)
         self.assertEqual(set(a.RULES),{s['id'] for s in lab.STRATEGIES})
         for rule in a.RULES.values():self.assertGreaterEqual(rule.liquidity,10000)
 
@@ -59,7 +59,7 @@ class ActivityTests(unittest.TestCase):
             f={'score':100,'liq':max(rule.liquidity,100000),'m5':sum(rule.move)/2,
                'bs':max(2,rule.buy_sell),'lmc':max(.3,rule.liquidity_cap),
                'age':max(10,rule.age[0]),'h1':max(20,rule.hour[0]),
-               'vol_liq':max(1,rule.volume_liquidity[0]),'flow':flows()[ADDRESS]}
+               'vol_liq':max(1,rule.volume_liquidity[0]),'mc':1e6,'flow':flows()[ADDRESS]}
             self.assertTrue(rule.matches(f),key)
 
     def test_no_low_liquidity_or_missing_prices(self):
@@ -115,8 +115,9 @@ class ActivityTests(unittest.TestCase):
             self.assertLess(b['position']['open_pnl_usd'],0)
             self.assertGreaterEqual(b['position']['entry_roundtrip_pnl_pct'],-2.75)
 
-    def test_net_stop_all_34_no_loss_clamping(self):
+    def test_net_stop_all_default_books_no_loss_clamping(self):
         c=coin()
+        lab.STATE['books'].pop('TIKTOK')   # its -12% stop is covered in TikTokStrategyTests
         for b in lab.STATE['books'].values():
             b['position']={'trade_no':1,'address':ADDRESS,'pairAddress':PAIR,'entry_price':1,
                            'current_price':1,'quantity':100,'original_quantity':100,
@@ -136,5 +137,128 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual((lab.STOP_LOSS,lab.TAKE_PROFIT,lab.MAX_HOLD_MIN),(3,10,60))
         self.assertEqual(lab.TRADE_NOTIONAL,150)
         self.assertEqual(lab.STRATEGY_START_BALANCES['SCALPER'],100)
+
+
+
+class TikTokStrategyTests(unittest.TestCase):
+    LIGHT={'score':65,'liq':10000,'mc':30000,'m5':-5,'h1':-50,'bs':.8,'lmc':.02,'age':0,'vol_liq':0,
+           'flow':{'trades':0,'ratio':0,'buy_usd':0,'sell_usd':0,'unique_wallets':0,'max_sell':0}}
+
+    def setUp(self):
+        guard=patch.object(lab.price_integrity,'check',return_value={'status':'pass','version':'OFFLINE_FIXTURE'})
+        guard.start();self.addCleanup(guard.stop)
+        lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
+
+    def position(self,book_id,opened_at=NOW-1000):
+        lab.STATE['books'][book_id]['position']={'trade_no':1,'address':ADDRESS,'pairAddress':PAIR,
+            'entry_price':1,'current_price':1,'quantity':100,'original_quantity':100,'notional_usd':100,
+            'remaining_cost_basis_usd':100,'opened_at':opened_at,'partial_realized_pnl':0,'entry_network_fee_usd':0}
+
+    def mark(self,net):
+        quote={'fill_price':net/100,'net_proceeds_usd':net,'dex_fee_usd':0,'network_fee_usd':0,
+               'impact_pct':0,'slippage_pct':0,'latency_pct':0}
+        with patch.object(lab,'dex_position_prices',return_value={(ADDRESS,PAIR):{**coin(),'priceUsd':1}}),\
+             patch.object(lab,'exit_execution',return_value=quote),patch.object(lab,'now_ms',return_value=NOW):
+            lab.update_positions({})
+
+    def test_named_and_has_the_lightest_filter_in_the_lab(self):
+        book=lab.empty_book(next(s for s in lab.STRATEGIES if s['id']=='TIKTOK'))
+        self.assertEqual((book['name'],book['starting_balance']),('TikTok Strategy',500))
+        self.assertTrue(a.RULES['TIKTOK'].matches(self.LIGHT))
+        for key,rule in a.RULES.items():
+            if key!='TIKTOK':self.assertFalse(rule.matches(self.LIGHT),key)
+        # Nothing else in the lab accepts a lower score, and no flow evidence is required.
+        self.assertEqual(min(r.score for r in a.RULES.values()),a.RULES['TIKTOK'].score)
+
+    def test_enters_only_from_30k_market_cap(self):
+        rule=a.RULES['TIKTOK']
+        self.assertFalse(rule.matches({**self.LIGHT,'mc':29999.99}))
+        self.assertTrue(rule.matches({**self.LIGHT,'mc':30000}))
+        missing={k:v for k,v in self.LIGHT.items() if k!='mc'}
+        self.assertFalse(rule.matches(missing))
+        self.assertEqual(lab.enrich({**coin(),'marketCap':45000},{})['mc'],45000)
+        self.assertEqual(lab.enrich({**coin(),'marketCap':None,'fdv':31000},{})['mc'],31000)
+
+    def test_remaining_light_limits(self):
+        rule=a.RULES['TIKTOK']
+        for change in ({'score':64.9},{'liq':9999},{'m5':-5.1},{'m5':60.1},{'bs':.79},{'lmc':.019},
+                       {'age':1441},{'h1':-50.1}):
+            self.assertFalse(rule.matches({**self.LIGHT,**change}),change)
+
+    def test_stop_is_minus_12_net_and_target_plus_17_net(self):
+        for net,reason in ((88.01,None),(88,'STOP_LOSS_12_NET'),(116.99,None),(117,'TAKE_PROFIT_17_NET')):
+            with self.subTest(net=net):
+                lab.STATE['books']['TIKTOK']=lab.empty_book({'id':'TIKTOK','name':'TikTok Strategy'})
+                self.position('TIKTOK');self.mark(net)
+                book=lab.STATE['books']['TIKTOK']
+                if reason is None:
+                    self.assertIsNotNone(book['position'])
+                else:
+                    self.assertEqual(book['history'][0]['exit_reason'],reason)
+                    self.assertAlmostEqual(book['balance'],500+net-100)
+
+    def test_gap_through_the_stop_is_booked_in_full(self):
+        self.position('TIKTOK');self.mark(60)
+        trade=lab.STATE['books']['TIKTOK']['history'][0]
+        self.assertEqual((trade['exit_reason'],trade['pnl_pct']),('STOP_LOSS_12_NET',-40))
+
+    def test_other_books_keep_3_10(self):
+        self.position('SCALPER');self.position('TIKTOK');self.mark(96)
+        self.assertEqual(lab.STATE['books']['SCALPER']['history'][0]['exit_reason'],'STOP_LOSS_3_NET')
+        self.assertIsNotNone(lab.STATE['books']['TIKTOK']['position'])
+        self.position('SCALPER');self.mark(111)
+        self.assertEqual(lab.STATE['books']['SCALPER']['history'][0]['exit_reason'],'TAKE_PROFIT_10_NET')
+        self.assertIsNotNone(lab.STATE['books']['TIKTOK']['position'])
+        self.assertEqual(lab.book_exit_rules('SCALPER'),{'stop_loss':3,'take_profit':10,'max_hold_minutes':60})
+        self.assertEqual(lab.book_exit_rules('TIKTOK'),{'stop_loss':12,'take_profit':17,'max_hold_minutes':60})
+
+    def test_max_hold_still_applies(self):
+        self.position('TIKTOK',opened_at=NOW-60*60_000);self.mark(101)
+        self.assertEqual(lab.STATE['books']['TIKTOK']['history'][0]['exit_reason'],'ABSOLUTE_MAX_HOLD_60')
+
+    def test_real_pool_fee_is_charged_and_low_cap_entry_fits_only_tiktok(self):
+        # PumpSwap near a $30k market cap: 125 bps per side in the lab cost model.
+        c={**coin(),'dexId':'pumpswap','marketCap':30000,'liquidityUsd':200000,'score':70,
+           'priceChange':{'m5':5,'h1':5}}
+        self.assertEqual(lab.pumpswap_fee_bps(c),125.0)
+        self.assertIsNone(a.affordable_entry(c,500,150,lab.entry_execution,lab.exit_execution))
+        q=a.affordable_entry(c,500,150,lab.entry_execution,lab.exit_execution,a.entry_cost_cap('TIKTOK'))
+        self.assertIsNotNone(q)
+        self.assertEqual(q['entry']['dex_fee_bps'],125.0)
+        self.assertEqual(q['entry']['slippage_pct']+q['entry']['latency_pct'],.2)
+        self.assertLess(q['initial_pnl_pct'],-2.5)            # both pool fees are in the mark
+        self.assertGreaterEqual(q['initial_pnl_pct'],-4.0)
+        with patch.object(lab,'now_ms',return_value=NOW):lab.maybe_open([c],{})
+        opened=[b['id'] for b in lab.STATE['books'].values() if b['position']]
+        self.assertEqual(opened,['TIKTOK'])
+        pos=lab.STATE['books']['TIKTOK']['position']
+        self.assertEqual((pos['stop_loss_net_pct'],pos['take_profit_net_pct']),(12,17))
+        self.assertEqual(a.entry_cost_cap('SCALPER'),a.MAX_ENTRY_COST_PCT)
+
+    def test_cost_cap_still_rejects_expensive_entries(self):
+        c={**coin(),'dexId':'pumpswap','marketCap':30000,'liquidityUsd':10000,'score':70}
+        with patch.object(lab,'now_ms',return_value=NOW):lab.maybe_open([c],{})
+        book=lab.STATE['books']['TIKTOK']
+        if book['position']:   # size was cut until the round trip fits the cap
+            self.assertLess(book['position']['notional_usd'],150)
+            self.assertGreaterEqual(book['position']['entry_roundtrip_pnl_pct'],-4.0)
+        else:
+            self.assertEqual(book['entry_diagnostics']['cost_rejected'],1)
+
+    def test_exit_is_rechecked_faster_only_while_the_sniper_holds(self):
+        self.assertEqual(lab.poll_interval(),lab.POLL_SECONDS)
+        self.position('SCALPER')
+        self.assertEqual(lab.poll_interval(),lab.POLL_SECONDS)
+        self.position('TIKTOK')
+        self.assertEqual(lab.poll_interval(),1.0)
+
+    def test_published_config_and_stats_show_the_overrides(self):
+        config=a.policy_config()
+        self.assertEqual(config['exit_overrides']['TIKTOK'],{'stop_loss':12.0,'take_profit':17.0})
+        self.assertEqual(config['entry_cost_caps'],{'TIKTOK':4.0})
+        stats=lab.stats(lab.STATE['books']['TIKTOK'])
+        self.assertEqual((stats['stop_loss_net_pct'],stats['take_profit_net_pct']),(12,17))
+        self.assertEqual(lab.stats(lab.STATE['books']['SCALPER'])['stop_loss_net_pct'],3)
+
 
 if __name__=='__main__':unittest.main()

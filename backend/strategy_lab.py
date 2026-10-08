@@ -137,7 +137,7 @@ def enrich(c,flows):
     return {
       'score':num(c.get('score')),'liq':liq,'m5':num(pc.get('m5')),'h1':num(pc.get('h1')),
       'bs':b/max(s,1),'lmc':liq/max(mc,1),'age':num(c.get('ageMinutes'),999999),
-      'vol1h':vol1h,'vol_liq':vol1h/max(liq,1),
+      'vol1h':vol1h,'vol_liq':vol1h/max(liq,1),'mc':mc,
       'flow':flows.get(c.get('address'),{'trades':0,'buys':0,'sells':0,'buy_usd':0,'sell_usd':0,'unique_wallets':0,'ratio':0,'max_sell':0})
     }
 
@@ -178,6 +178,8 @@ STRATEGIES=[
  {'id':'FLOW_PULLBACK','name':'Flow Pullback','rule':lambda f: f['score']>=90 and f['liq']>=30000 and -4<=f['m5']<=4 and f['h1']>=0 and f['flow']['trades']>=5 and f['flow']['ratio']>=2.0 and f['flow']['buy_usd']>=250},
  {'id':'SECOND_WAVE','name':'Second Wave','rule':lambda f: f['score']>=90 and f['liq']>=30000 and 2<=f['m5']<=12 and 10<=f['h1']<=120 and f['flow']['ratio']>=1.7 and f['flow']['trades']>=4 and .15<=f['vol_liq']<=5},
  {'id':'CLEAN_MOMENTUM','name':'Clean Momentum','rule':lambda f: f['score']>=92 and f['liq']>=30000 and 3<=f['m5']<=18 and f['bs']>=1.2 and .20<=f['vol_liq']<=3.5 and f['flow']['ratio']>=1.5 and f['flow']['max_sell']<max(250,f['flow']['buy_usd']*.6)},
+ # TikTok Strategy: light-filter PAPER sniper, net stop -12% / net target +17%.
+ {'id':'TIKTOK','name':'TikTok Strategy','rule':lambda f: f['score']>=65 and f['liq']>=10000 and f['mc']>=30000 and -5<=f['m5']<=60 and f['bs']>=.80 and f['lmc']>=.02 and f['age']<=1440 and f['h1']>=-50},
  {'id':'CONFLUENCE_MAX','name':'Confluence Max','rule':lambda f: f['score']>=95 and f['liq']>=40000 and 1<=f['m5']<=12 and f['h1']>-10 and f['bs']>=1.25 and f['lmc']>=.15 and .20<=f['vol_liq']<=4 and f['flow']['trades']>=5 and f['flow']['ratio']>=2.0 and f['flow']['unique_wallets']>=4 and f['flow']['max_sell']<max(200,f['flow']['buy_usd']*.45)},
 ]
 
@@ -208,7 +210,16 @@ STATE={'started_at':now_ms(),'updated_at':now_ms(),'status':'starting',
 if STATE.get('activity_version')!=activity.POLICY_VERSION:
     STATE['activity_version']=activity.POLICY_VERSION
     STATE['activity_started_at']=now_ms()
-assert set(activity.RULES)=={s['id'] for s in STRATEGIES}, 'All 34 entries need a policy'
+assert set(activity.RULES)=={s['id'] for s in STRATEGIES}, 'Every lab strategy needs an entry policy'
+
+def book_exit_rules(strategy_id):
+    return activity.exit_rules(strategy_id,STOP_LOSS,TAKE_PROFIT,MAX_HOLD_MIN)
+
+def poll_interval():
+    """Re-check faster while a sniper book holds a position, so its exit is prompt."""
+    if any((STATE['books'].get(i) or {}).get('position') for i in activity.SNIPER_IDS):
+        return min(POLL_SECONDS,activity.SNIPER_POLL_SECONDS)
+    return POLL_SECONDS
 
 def dex_position_prices(positions):
     if not positions: return {}
@@ -293,15 +304,16 @@ def update_positions(flows):
         total_live_pnl=num(pos.get('partial_realized_pnl'))+open_pnl
         total_live_pct=total_live_pnl/max(num(pos.get('notional_usd')),1e-18)*100
 
-        # Unified 3:10 NET exit framework across all 34 strategies.
-        # Entry logic stays strategy-specific; exits are identical and include
-        # DEX fee, price impact, slippage/latency and network cost.
-        if total_live_pct<=-STOP_LOSS:
-            reason='STOP_LOSS_3_NET'
-        elif total_live_pct>=TAKE_PROFIT:
-            reason='TAKE_PROFIT_10_NET'
-        elif hold>=MAX_HOLD_MIN:
-            reason='ABSOLUTE_MAX_HOLD_60'
+        # NET exit framework: 3:10 for every strategy unless lab_activity lists
+        # an override (TikTok Strategy uses 12:17). Thresholds are compared with
+        # PnL after DEX fee, price impact, slippage/latency and network cost.
+        ex=book_exit_rules(book['id'])
+        if total_live_pct<=-ex['stop_loss']:
+            reason=f"STOP_LOSS_{ex['stop_loss']:g}_NET"
+        elif total_live_pct>=ex['take_profit']:
+            reason=f"TAKE_PROFIT_{ex['take_profit']:g}_NET"
+        elif hold>=ex['max_hold_minutes']:
+            reason=f"ABSOLUTE_MAX_HOLD_{ex['max_hold_minutes']:g}"
 
         pos.update({'current_price':price,'peak_price':peak,'execution_exit_price':round(live_quote['fill_price'],12),
                     'pnl_pct':round(total_live_pct,3),'open_pnl_usd':round(open_pnl,4),
@@ -340,7 +352,8 @@ def maybe_open(feed,flows):
                 continue
             checked+=1
             proposed=activity.affordable_entry(
-                coin,num(book['balance']),TRADE_NOTIONAL,entry_execution,exit_execution
+                coin,num(book['balance']),TRADE_NOTIONAL,entry_execution,exit_execution,
+                activity.entry_cost_cap(strategy['id'])
             )
             if proposed is None:
                 blocked_cost+=1
@@ -389,6 +402,8 @@ def maybe_open(feed,flows):
             'execution_mode':'REALISTIC_COSTS_V1',
             'price_crosscheck':price_integrity.check(coin),
             'entry_policy_version':activity.POLICY_VERSION,
+            'stop_loss_net_pct':book_exit_rules(strategy['id'])['stop_loss'],
+            'take_profit_net_pct':book_exit_rules(strategy['id'])['take_profit'],
             'entry_roundtrip_pnl_pct':round(proposed['initial_pnl_pct'],6),
             'entry_size_reduced':notional+0.02<min(TRADE_NOTIONAL,num(book['balance'])),
             'pnl_pct':round(proposed['initial_pnl_pct'],3),
@@ -416,6 +431,8 @@ def stats(book):
             'realized_pnl':round(num(book.get('balance'))-start,2),
             'equity':round(equity,2),'return_pct':round((equity-start)/max(start,1e-18)*100,2),'open':bool(p),
             'partial_exits':partial_count,'partial_locked_pnl':round(locked_partial,2),
+            'stop_loss_net_pct':book_exit_rules(book.get('id'))['stop_loss'],
+            'take_profit_net_pct':book_exit_rules(book.get('id'))['take_profit'],
             'active_policy_trades':sum(t.get('entry_policy_version')==activity.POLICY_VERSION for t in h),
             'active_policy_wins':sum(t.get('entry_policy_version')==activity.POLICY_VERSION and num(t.get('pnl_usd'))>0 for t in h)}
 
@@ -449,6 +466,6 @@ def main():
             persist('online')
         except Exception as e:
             persist('degraded',e)
-        time.sleep(max(.25,POLL_SECONDS-(time.time()-started)))
+        time.sleep(max(.25,poll_interval()-(time.time()-started)))
 
 if __name__=='__main__': main()

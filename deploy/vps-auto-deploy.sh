@@ -27,6 +27,7 @@ main() {
   local DISABLE_FLAG="${NEO_DEPLOY_DISABLE_FLAG:-/etc/neo/auto-deploy.disabled}"
   local ENGINE_UNIT="${NEO_DEPLOY_ENGINE_UNIT:-neo-user-angel-paper.service}"
   local GATEWAY_UNIT="${NEO_DEPLOY_GATEWAY_UNIT:-neo-user-gateway.service}"
+  local LAB_UNIT="${NEO_DEPLOY_LAB_UNIT:-neo-strategy-lab.service}"
   local ENGINE_URL="${NEO_DEPLOY_ENGINE_URL:-http://127.0.0.1:18804}"
   local GATEWAY_URL="${NEO_DEPLOY_GATEWAY_URL:-http://127.0.0.1:8789}"
   local ENGINE_STATE_PATH="${NEO_DEPLOY_ENGINE_STATE_PATH:-}"
@@ -149,6 +150,10 @@ PY
       wait_healthy "$GATEWAY_URL/user/health" || return 1
       unit_settled "$GATEWAY_UNIT" || return 1
     fi
+    if [ "$lab_changed" = 1 ]; then   # the lab has no HTTP endpoint; it must stay active
+      sc restart "$LAB_UNIT" || return 1
+      unit_settled "$LAB_UNIT" || return 1
+    fi
   }
 
   rollback() {  # reason
@@ -193,7 +198,17 @@ PY
       | grep -q .; then engine_changed=1; fi
   if printf '%s\n' "$changed" | grep -Eq '^backend/(user_gateway|engine_runtime)\.py$'; then gateway_changed=1; fi
   if [ "$engine_changed" = 1 ] && [ "$GATEWAY_ON_ENGINE_CHANGE" = 1 ]; then gateway_changed=1; fi
-  log "new commit ${current:0:12} -> ${target:0:12}; engine_changed=$engine_changed gateway_changed=$gateway_changed"
+  # The Strategy Lab is restarted only when its unit really runs this checkout;
+  # a lab running from another tree is left alone.
+  local lab_changed=0
+  if printf '%s\n' "$changed" | grep -Eq '^backend/(strategy_lab|lab_activity|astra_lab_bridge|lab_paired_bridge|lab_dashboard_projection|pair_price_integrity|compat_file_lock)\.py$'; then
+    if sc show "$LAB_UNIT" -p ExecStart --value 2>/dev/null | grep -Fq "$REPO/"; then
+      lab_changed=1
+    else
+      log "lab code changed, but $LAB_UNIT does not run from $REPO; it is not restarted"
+    fi
+  fi
+  log "new commit ${current:0:12} -> ${target:0:12}; engine_changed=$engine_changed gateway_changed=$gateway_changed lab_changed=$lab_changed"
 
   # ---- 1. test the exact commit before touching the live tree ---------------
   local worktree
@@ -239,6 +254,7 @@ PY
     log "ledger archived to $archive (before: ${before:-engine was not reachable})"
   fi
   [ "$gateway_changed" = 1 ] && restarted="${restarted:+$restarted }$GATEWAY_UNIT"
+  [ "$lab_changed" = 1 ] && restarted="${restarted:+$restarted }$LAB_UNIT"
 
   # ---- 3-5. fast-forward, restart, verify ------------------------------------
   git -C "$REPO" merge --quiet --ff-only "$target" || rollback "fast-forward to ${target:0:12} failed"
