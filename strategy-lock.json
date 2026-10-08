@@ -1,9 +1,9 @@
 {
   "name": "NEO ORDER_FLOW_ADAPTIVE_LEARNING: tiered high-frequency PAPER entries with size/avoid learning, on the durable honest PAPER runtime",
   "locked_at_utc": "2026-10-08",
-  "source_commit": "ADAPTIVE_LEARNING_20261008",
+  "source_commit": "ROLLING_DISCOVERY_20261008",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "dd0b781b0927b46953058197ccc4c4a7b39efd0dced89ebc901e3ba977d572d9",
+  "sha256": "f08fe8379f88b8fe2d9ddf1d1ebc69bf0df84e731e9438edbb2f8b329a34c5ac",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE_LEARNING",
   "rules": {
     "max_positions": 8,
@@ -26,7 +26,7 @@
     "adaptive_exits_override_base_take_profit_trailing_and_hold": true
   },
   "policy": "Owner-requested on 2026-10-08: trade as often as honest costs allow, learn from closed trades and lean toward what has been profitable. PAPER only; existing history, balance, trade sequence and audit are preserved; no reset, no live execution, no automatic live-money promotion.",
-  "integrity_note": "Entry thresholds, exits and cost caps are fixed; only position size and avoid/allow are learned, from quote-evidenced closed trades with a 24-hour half-life. Verified flow coverage, exact pool/mint checks, safety checks, bounded quote age and uncapped modeled losses are retained. A planned stop is not a guaranteed fill.",
+  "integrity_note": "Entry thresholds, exits and cost caps are fixed; only position size and avoid/allow are learned, from quote-evidenced closed trades with a 24-hour half-life. Verified flow coverage, exact pool/mint checks, safety checks, bounded quote age and uncapped modeled losses are retained. A planned stop is not a guaranteed fill. Discovery-only extension: a persistent rotating universe refreshes up to 240 token addresses per scan from up to 5000 recently observed addresses; entry, exit, scoring, sizing, costs and PAPER-only execution rules are unchanged.",
   "execution_mode": "PAPER_QUOTE_OR_OBSERVED_POOL_MODEL",
   "entry_policy_version": "ORDER_FLOW_TIERED_LEARNER_V1",
   "entry_policy_limits": {
@@ -90,7 +90,8 @@
     "backend/training_worker.py": "75a48c03cbdf7274a74d6701f8e2f45ce618337caf135fde9dfe05bc3bbeba81",
     "backend/user_gateway.py": "1c86061e10195ad85fb74bc60eb4d40899dc9f4a3378cf7e90079dde9416ce59",
     "backend/lab_activity.py": "567845a5f6aabe3c941e1e3aaac097e0d7ff951717a329aabdea91f53ffca668",
-    "backend/x_signal_monitor.py": "eb7c3f952a8f4048ebfd956c2d6a479fb04c31c83b9925b2a3ebb691a138298a"
+    "backend/x_signal_monitor.py": "eb7c3f952a8f4048ebfd956c2d6a479fb04c31c83b9925b2a3ebb691a138298a",
+    "backend/discovery_universe.py": "17072087527fa3adef5ab27df64b132bd8310892ac65773b3b9f175486a170b4"
   },
   "runtime_version": "RUNTIME_DURABLE_PAPER_V2",
   "runtime_note": "Primary PAPER engine holds up to eight liquidity-scaled positions across CORE and EXPLORE tiers. Positions opened under an earlier profile keep the stop and exit policy recorded at entry.",
