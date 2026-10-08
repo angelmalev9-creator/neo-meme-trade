@@ -2,7 +2,7 @@ import LabPairedPanel, { type LabPairedSnapshot } from './components/LabPairedPa
 import PaperTrainingPanel, { type PaperTrainingSnapshot } from './components/PaperTrainingPanel';
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  Activity, Bot, CircleDollarSign, ExternalLink, FlaskConical, Gauge, RefreshCw, Search,
+  Activity, Bot, CircleDollarSign, ExternalLink, Flame, FlaskConical, Gauge, RefreshCw, Search,
   ShieldCheck, Sparkles, TrendingDown, TrendingUp, WalletCards, Zap,
 } from 'lucide-react';
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
@@ -91,8 +91,16 @@ type CoinWallets = {
   links: { token: string; pool: string | null };
 };
 type WalletView = 'activity' | 'trades' | 'holders';
+type HypeTheme = { theme: string; keywords: string[]; hype: number; category: string; why: string; sources: number[]; generated_at: number };
+type HypeMatch = { address: string; pairAddress: string; symbol: string; name: string; score: number; liquidityUsd: number; marketCap: number; ageMinutes: number | null; priceChangeM5: number | null; imageUrl: string; theme: string; keyword: string; hype: number; category?: string };
+type HypeRadar = {
+  status: string; updated_at: number | null; last_success_at: number | null; model: string | null; poll_seconds: number | null;
+  daily_budget_usd: number | null; budget: { day: string; spent_usd: number; calls: number } | null; error: string | null;
+  source_status: Record<string, string> | null; theme_ttl_seconds: number | null; min_hype: number | null;
+  themes: HypeTheme[]; stale_themes: number; source_lines: { source: string; text: string }[]; matches: HypeMatch[]; feed_count: number; checked_at: number;
+};
 type Filter = 'ALL' | 'SETUP' | 'WATCH' | 'NEW' | 'BOOSTED';
-type Tab = 'engine' | 'lab' | 'coins';
+type Tab = 'engine' | 'lab' | 'coins' | 'hype';
 const WINDOW_LABELS: Record<string, string> = { m1: '1м', m5: '5м', m15: '15м', m30: '30м', h1: '1ч', h6: '6ч', h24: '24ч' };
 
 const fmtMoney = (value = 0) => value >= 1_000_000 ? `$${(value / 1_000_000).toFixed(2)}M` : value >= 1_000 ? `$${(value / 1_000).toFixed(1)}K` : `$${value.toFixed(0)}`;
@@ -186,6 +194,9 @@ export default function App() {
   const [flowWindow, setFlowWindow] = useState('m5');
   const [wallets, setWallets] = useState<CoinWallets | null>(null);
   const [walletView, setWalletView] = useState<WalletView>('activity');
+  const [hype, setHype] = useState<HypeRadar | null>(null);
+  const [hypeError, setHypeError] = useState('');
+  const [hypeSources, setHypeSources] = useState(false);
   const [filter, setFilter] = useState<Filter>('ALL');
   const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
@@ -259,6 +270,18 @@ export default function App() {
   }, [selectedAddress, tab]);
 
   useEffect(() => {
+    if (tab !== 'hype') return;
+    let cancelled = false;
+    const loadHype = async () => {
+      try { const next = await authedJson<HypeRadar>('/user/hype-radar'); if (!cancelled) { setHype(next); setHypeError(''); } }
+      catch { if (!cancelled) setHypeError('Hype Radar не може да се зареди в момента (нов адрес на сървъра — изчакай рестарта).'); }
+    };
+    void loadHype();
+    const timer = window.setInterval(loadHype, 10000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [tab]);
+
+  useEffect(() => {
     setBookTrades(null);
     setBookTradesError('');
     if (!openBook) return;
@@ -319,7 +342,11 @@ export default function App() {
     { id: 'engine', label: 'Engine', icon: <Bot className="h-3.5 w-3.5" />, badge: state ? `${state.stats.open_positions}/${state.config.max_positions}` : undefined },
     { id: 'lab', label: 'Лаборатория', icon: <FlaskConical className="h-3.5 w-3.5" />, badge: state ? `${activeBooks.length} активни` : undefined },
     { id: 'coins', label: 'Койн фийд', icon: <Activity className="h-3.5 w-3.5" />, badge: state ? `${state.stats.feed_count}` : undefined },
+    { id: 'hype', label: 'Hype', icon: <Flame className="h-3.5 w-3.5" />, badge: hype ? `${hype.themes.length} теми` : undefined },
   ];
+  const hypeBook = state?.strategy_lab?.books?.HYPE_RADAR;
+  const hypeStats = state?.strategy_lab?.stats?.HYPE_RADAR;
+  const hypeStatusLabel: Record<string, string> = { online: 'РАБОТИ', missing_api_key: 'НЯМА API КЛЮЧ', budget_paused: 'ДНЕВНИЯТ БЮДЖЕТ Е ИЗЧЕРПАН', degraded: 'ГРЕШКА', empty_answer: 'ПРАЗЕН ОТГОВОР', no_sources: 'НЯМА ИЗТОЧНИЦИ', offline: 'НЕ Е СТАРТИРАН' };
 
   return <div className="min-h-screen bg-[#07090b] text-slate-200">
     <header className="sticky top-0 z-50 border-b border-white/[0.07] bg-[#07090b]/95 backdrop-blur-xl">
@@ -558,6 +585,61 @@ export default function App() {
           </> : <div className="flex min-h-[500px] items-center justify-center rounded-3xl border border-white/10 bg-[#0b0e11] text-xs text-slate-600">Чакам първия market scan…</div>}
         </div>
       </section>}
+
+      {tab === 'hype' && <>
+        <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+          <Metric label="Събирач" value={hype ? (hypeStatusLabel[hype.status] || hype.status.toUpperCase()) : '—'} hint={hype?.last_success_at ? `теми от ${agoLabel(hype.last_success_at)}` : 'още няма теми'} tone={hype?.status === 'online' ? 'up' : hype ? 'down' : undefined} />
+          <Metric label="Активни теми" value={String(hype?.themes.length ?? 0)} hint={hype?.stale_themes ? `${hype.stale_themes} остарели скрити` : `валидност ${Math.round((hype?.theme_ttl_seconds ?? 10800) / 3600)}ч`} />
+          <Metric label="Съвпадения във фийда" value={String(hype?.matches.length ?? 0)} hint={`от ${hype?.feed_count ?? 0} койна`} />
+          <Metric label="Hype Radar баланс" value={hypeBook ? `$${hypeBook.balance.toFixed(2)}` : '—'} hint={hypeStats ? `${hypeStats.trades} сделки · ${signed(hypeStats.realized_pnl)}$` : 'книгата още не е стартирала'} tone={hypeStats ? (hypeStats.realized_pnl >= 0 ? 'up' : 'down') : undefined} />
+          <Metric label="Разход днес" value={hype?.budget ? `$${hype.budget.spent_usd.toFixed(3)}` : '—'} hint={hype ? `лимит $${(hype.daily_budget_usd ?? 0).toFixed(2)} · ${hype.budget?.calls ?? 0} заявки` : ''} />
+          <Metric label="Модел" value={hype?.model ? hype.model.split('/').pop()!.slice(0, 18) : '—'} hint={hype?.poll_seconds ? `на ${Math.round(hype.poll_seconds / 60)} мин` : ''} />
+        </section>
+        {hypeError && <div className="mt-4 rounded-2xl border border-amber-400/20 bg-amber-400/[0.05] px-4 py-3 text-xs text-amber-100">{hypeError}</div>}
+        {hype?.error && <div className="mt-4 rounded-2xl border border-red-500/20 bg-red-500/[0.06] px-4 py-3 text-xs text-red-200">Събирач: {hype.error}</div>}
+        {hype?.status === 'missing_api_key' && <div className="mt-4 rounded-2xl border border-amber-400/20 bg-amber-400/[0.05] px-4 py-3 text-xs leading-5 text-amber-100">Събирачът работи, но няма API ключ. Сложи ключа в <code>/etc/neo/neo-hype-radar.env</code> (NEO_HYPE_LLM_KEY) и рестартирай <code>neo-hype-radar.service</code>. Виж docs/HYPE_RADAR.md.</div>}
+        <section className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+          <Card kicker="Теми" title="Какво е hype в момента (новини + мемета + trending)" right={<Flame className="h-4 w-4 text-amber-300" />}>
+            <div className="divide-y divide-white/[0.05]">
+              {!hype && !hypeError && <div className="p-6 text-xs text-slate-500">Зареждане…</div>}
+              {hype && hype.themes.length === 0 && <div className="p-6 text-xs text-slate-500">Няма активни теми. {hype.status === 'offline' ? 'Услугата neo-hype-radar още не е стартирана на сървъра.' : ''}</div>}
+              {hype?.themes.map(theme => { const matched = hype.matches.filter(m => m.theme === theme.theme); return <div key={theme.theme} className="p-4">
+                <div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="text-sm font-black text-white">{theme.theme}</span><span className="rounded-md border border-white/[0.07] bg-white/[0.03] px-1.5 py-0.5 text-[8px] font-black uppercase text-slate-500">{theme.category}</span></div><div className="mt-1 text-[10px] leading-4 text-slate-500">{theme.why}</div></div><div className="shrink-0 text-right"><div className={`text-lg font-black ${theme.hype >= 70 ? 'text-amber-300' : theme.hype >= 40 ? 'text-emerald-300' : 'text-slate-500'}`}>{theme.hype.toFixed(0)}</div><div className="text-[8px] font-black uppercase text-slate-700">hype</div></div></div>
+                <div className="mt-2 h-1 rounded-full bg-white/[0.05]"><div className="h-1 rounded-full bg-amber-300/70" style={{ width: `${Math.max(2, theme.hype)}%` }} /></div>
+                <div className="mt-2 flex flex-wrap gap-1">{theme.keywords.map(k => <span key={k} className="rounded-md border border-emerald-400/15 bg-emerald-400/[0.06] px-1.5 py-0.5 font-mono text-[9px] text-emerald-200">{k}</span>)}</div>
+                {matched.length > 0 && <div className="mt-2 flex flex-wrap gap-1.5">{matched.map(m => <button key={m.address} onClick={() => openCoin(m.address)} className="rounded-lg border border-cyan-400/15 bg-cyan-400/[0.05] px-2 py-1 text-left text-[10px] hover:border-cyan-400/40"><span className="font-black text-cyan-200">${m.symbol}</span> <span className="text-slate-500">· {fmtMoney(m.marketCap)} · liq {fmtMoney(m.liquidityUsd)} · {ageLabel(m.ageMinutes)}</span></button>)}</div>}
+                {theme.sources.length > 0 && <div className="mt-2 text-[9px] text-slate-700">{theme.sources.map(i => hype.source_lines[i]?.text).filter(Boolean).slice(0, 3).map((t, i) => <div key={i} className="truncate">↳ {t}</div>)}</div>}
+              </div>; })}
+            </div>
+            {hype && hype.source_lines.length > 0 && <div className="border-t border-white/[0.06] p-3"><button onClick={() => setHypeSources(v => !v)} className="text-[10px] font-black text-slate-400 hover:text-white">{hypeSources ? 'Скрий входните заглавия' : `Покажи ${hype.source_lines.length} входни заглавия и състоянието на източниците`}</button>
+              {hypeSources && <div className="mt-2 space-y-1 text-[9px] text-slate-500"><div className="flex flex-wrap gap-1.5">{Object.entries(hype.source_status || {}).map(([k, v]) => <span key={k} className={`rounded-md border px-1.5 py-0.5 font-mono ${v.startsWith('ok') ? 'border-emerald-400/15 text-emerald-300' : v === 'none' ? 'border-white/[0.07] text-slate-600' : 'border-red-400/20 text-red-300'}`}>{k}: {v}</span>)}</div>{hype.source_lines.map((row, i) => <div key={i} className="truncate"><span className="font-mono text-slate-700">[{i}] {row.source}</span> {row.text}</div>)}</div>}
+            </div>}
+          </Card>
+          <div className="space-y-4">
+            <Card kicker="Съвпадения" title="Койнове във фийда, кръстени на hype тема" right={<Sparkles className="h-4 w-4 text-emerald-300" />}>
+              <div className="max-h-[520px] overflow-y-auto">
+                {hype && hype.matches.length === 0 && <div className="p-6 text-center text-[10px] text-slate-600">В момента нито един койн от фийда не носи име от активна тема. Книгата чака.</div>}
+                {hype?.matches.map(m => <button key={m.address} onClick={() => openCoin(m.address)} className="flex w-full items-center gap-3 border-b border-white/[0.05] px-4 py-3 text-left hover:bg-white/[0.02]">
+                  {m.imageUrl ? <img src={m.imageUrl} alt="" className="h-9 w-9 rounded-xl border border-white/10 object-cover" /> : <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-[10px] font-black text-emerald-300">{(m.symbol || '?').slice(0, 2)}</div>}
+                  <div className="min-w-0 flex-1"><div className="truncate text-xs font-black text-white">${m.symbol} <span className="font-normal text-slate-500">· {m.name}</span></div><div className="mt-0.5 text-[9px] text-slate-500">тема <span className="text-amber-200">{m.theme}</span> · ключова дума <span className="font-mono text-emerald-200">{m.keyword}</span> · MC {fmtMoney(m.marketCap)} · liq {fmtMoney(m.liquidityUsd)} · {ageLabel(m.ageMinutes)}</div></div>
+                  <div className="text-right"><div className="text-sm font-black text-amber-300">{m.score.toFixed(0)}</div><div className="text-[8px] uppercase text-slate-700">score</div></div>
+                </button>)}
+              </div>
+            </Card>
+            <Card kicker="Книга" title="Hype Radar · стоп −12% / цел +17% нето" right={<FlaskConical className="h-4 w-4 text-cyan-300" />}>
+              <div className="p-4 text-xs text-slate-400">
+                {hypeBook ? <>
+                  <div className="grid grid-cols-3 gap-2 text-center">{([['Баланс', `$${hypeBook.balance.toFixed(2)}`], ['Сделки', `${hypeStats?.trades ?? 0} (${hypeStats?.wins ?? 0}W/${hypeStats?.losses ?? 0}L)`], ['Резултат', `${signed(hypeStats?.realized_pnl ?? 0)}$`]] as [string, string][]).map(([label, value]) => <div key={label} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-2"><div className="text-sm font-black text-white">{value}</div><div className="mt-0.5 text-[8px] font-black uppercase tracking-wider text-slate-600">{label}</div></div>)}</div>
+                  {hypeBook.position && <button onClick={() => openCoin(hypeBook.position!.address)} className="mt-3 w-full rounded-xl border border-cyan-400/15 bg-cyan-400/[0.05] px-3 py-2 text-left"><span className="font-black text-cyan-200">отворена: ${hypeBook.position.symbol}</span> <span className={`font-black ${(hypeBook.position.pnl_pct || 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{signed(hypeBook.position.pnl_pct || 0)}%</span></button>}
+                  {hypeBook.why_quiet && hypeBook.why_quiet.reasons.length > 0 && <div className="mt-3"><div className="text-[9px] font-black uppercase tracking-[0.16em] text-slate-600">Защо (не) влиза · {hypeBook.why_quiet.candidates} кандидата</div><div className="mt-2"><RejectionBars rows={hypeBook.why_quiet.reasons.map(r => ({ key: r.reason, count: r.count, label: labLabels[r.reason] || r.reason }))} total={hypeBook.why_quiet.candidates} /></div></div>}
+                  <button onClick={() => { setShowQuietBooks(true); setOpenBook('HYPE_RADAR'); switchTab('lab'); }} className="mt-3 text-[10px] font-black text-cyan-300 hover:text-white">Всички сделки на книгата →</button>
+                </> : 'Книгата HYPE_RADAR ще се появи след рестарт на лабораторията.'}
+                <div className="mt-3 text-[9px] leading-4 text-slate-600">Влиза само в койн с име/тикер от активна тема, който мине проверката на цената от втори източник и rug проверката (mint/freeze authority, RugCheck не е блокирал). Най-ранният възможен вход е първият pool с ≥ $10k ликвидност; pump.fun bonding curve не се търгува.</div>
+              </div>
+            </Card>
+          </div>
+        </section>
+      </>}
 
       <footer className="mt-5 flex flex-col justify-between gap-2 border-t border-white/[0.06] py-5 text-[9px] leading-4 text-slate-700 sm:flex-row"><div>NEO Meme Coins · PAPER симулация · изолиран engine за този акаунт</div><div className="max-w-2xl sm:text-right">Симулираните резултати не доказват бъдеща доходност. Meme coins са високорискови.</div></footer>
     </main>

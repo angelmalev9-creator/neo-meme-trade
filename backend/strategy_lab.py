@@ -6,6 +6,8 @@ import requests
 from lab_paired_bridge import merge_paired_snapshot
 import lab_activity as activity
 import pair_price_integrity as price_integrity
+import engine_rug_guard as rug_guard
+import hype_radar
 from lab_dashboard_projection import compact_strategy_lab
 
 API_URL=os.getenv('NEO_LOCAL_API','http://127.0.0.1:8788/state')
@@ -14,6 +16,7 @@ STATE_PATH=Path(os.getenv('NEO_STRATEGY_LAB_PATH','/var/lib/neo-market/strategy_
 COMPACT_PATH=Path(os.getenv('NEO_STRATEGY_LAB_COMPACT_PATH',str(STATE_PATH.parent/'strategy_lab_compact.json')))
 RESET_FLAG_PATH=Path(os.getenv('NEO_STRATEGY_LAB_RESET_FLAG','/var/lib/neo-market/strategy_lab.reset'))
 X_SIGNAL_PATH=Path(os.getenv('NEO_X_SIGNAL_STATE_PATH','/var/lib/neo-market/x_signal.json'))
+HYPE_PATH=Path(os.getenv('NEO_HYPE_STATE_PATH','/var/lib/neo-market/hype_radar.json'))
 START_BALANCE=float(os.getenv('NEO_LAB_START_BALANCE','500'))
 STRATEGY_START_BALANCES={'SCALPER':float(os.getenv('NEO_LAB_SCALPER_START_BALANCE','100'))}
 TRADE_NOTIONAL=float(os.getenv('NEO_LAB_TRADE_NOTIONAL','150'))
@@ -182,6 +185,8 @@ STRATEGIES=[
  {'id':'TIKTOK','name':'TikTok Strategy','rule':lambda f: f['score']>=65 and f['liq']>=10000 and f['mc']>=30000 and -5<=f['m5']<=60 and f['bs']>=.80 and f['lmc']>=.02 and f['age']<=1440 and f['h1']>=-50},
  # PAPER entry is additionally gated by a recent literal Solana address from X.
  {'id':'X_SIGNAL','name':'X Signal','rule':lambda f: f['score']>=65 and f['liq']>=10000 and f['mc']>=30000 and -10<=f['m5']<=80 and f['bs']>=.70 and f['lmc']>=.02 and f['age']<=1440 and f['h1']>=-70},
+ # Hype Radar: LLM-ranked news/meme themes → tokens named after them, rug-checked; net -12% / +17%.
+ {'id':'HYPE_RADAR','name':'Hype Radar','rule':lambda f: f['score']>=60 and f['liq']>=10000 and f['mc']>=30000 and -10<=f['m5']<=150 and f['bs']>=.70 and f['lmc']>=.02 and f['age']<=2880 and f['h1']>=-70},
  {'id':'CONFLUENCE_MAX','name':'Confluence Max','rule':lambda f: f['score']>=95 and f['liq']>=40000 and 1<=f['m5']<=12 and f['h1']>-10 and f['bs']>=1.25 and f['lmc']>=.15 and .20<=f['vol_liq']<=4 and f['flow']['trades']>=5 and f['flow']['ratio']>=2.0 and f['flow']['unique_wallets']>=4 and f['flow']['max_sell']<max(200,f['flow']['buy_usd']*.45)},
 ]
 
@@ -358,9 +363,24 @@ def recent_x_signals(now=None):
                 if previous is None or basis>int(num(previous.get('post_created_at_ms') or previous.get('seen_at_ms'))): out[address]=signal
     return out
 
+def hype_themes(now=None):
+    return hype_radar.active_themes(load_json(HYPE_PATH,{}),now=now or now_ms())
+
+def rug_verdict(coin):
+    """PAPER rug gate for the hype book: fast on-chain mint check must pass and the
+    full RugCheck report must not be blocked (pending/unavailable is tolerated,
+    because the point of this book is to be early)."""
+    fast=rug_guard.fast_chain_check(coin)
+    full=rug_guard.check(coin)
+    ok=fast.get('status')=='pass' and full.get('status')!='blocked'
+    return ok,{'fast':{'status':fast.get('status'),'reasons':fast.get('reasons')},
+               'full':{'status':full.get('status'),'reasons':full.get('reasons')}}
+
 def maybe_open(feed,flows):
     now=now_ms()
     x_signals=recent_x_signals(now)
+    themes=hype_themes(now)
+    hype_matches={}
     candidates=[]
     for c in feed:
         if activity.usable_feed_coin(c,now):
@@ -381,6 +401,11 @@ def maybe_open(feed,flows):
         for coin,features in candidates:
             if strategy['id']=='X_SIGNAL' and coin.get('address') not in x_signals:
                 reject('no_x_signal'); continue
+            if strategy['id']=='HYPE_RADAR':
+                matched=hype_radar.match_token(coin,themes,now=now)
+                if not matched:
+                    reject('no_hype_match'); continue
+                hype_matches[coin['address']]=matched
             failed=activity.RULES[strategy['id']].failures(features)
             if failed:
                 for reason in failed: reject(reason)
@@ -389,6 +414,11 @@ def maybe_open(feed,flows):
             if validation.get('status')!='pass':
                 blocked_price+=1; reject('price_verification'); continue
             address=coin['address']
+            if strategy['id']=='HYPE_RADAR':
+                safe,verdict=rug_verdict(coin)
+                if not safe:
+                    reject('rug_check'); continue
+                hype_matches[address]['rug_check']=verdict
             if activity.cooldown_remaining_ms(book,address,now)>0:
                 blocked_cooldown+=1; reject('cooldown')
                 continue
@@ -404,6 +434,10 @@ def maybe_open(feed,flows):
                 signal=x_signals.get(coin.get('address')) or {}
                 priority=num(signal.get('post_created_at_ms') or signal.get('seen_at_ms'))
                 tiebreak=proposed['initial_pnl_pct']
+            elif strategy['id']=='HYPE_RADAR':
+                # Hottest theme first; among equals the youngest pool (earliest entry).
+                priority=hype_matches[coin['address']]['score']
+                tiebreak=-num(features.get('age'),1e9)
             elif strategy['id']=='MOMENTUM_HUNTER':
                 priority=activity.momentum_hunter_rank(features,proposed['initial_pnl_pct'])
                 if priority < activity.MOMENTUM_HUNTER_MIN_RANK:
@@ -431,7 +465,8 @@ def maybe_open(feed,flows):
             'cooldown_rejected':blocked_cooldown,'affordable_candidates':len(eligible),
             'price_verification_rejected':blocked_price,
             'rank_rejected':blocked_rank,'active_x_signals':len(x_signals) if strategy['id']=='X_SIGNAL' else None,
-            'selection_mode':('RECENT_X_SIGNAL_THEN_COST' if strategy['id']=='X_SIGNAL' else ('MOMENTUM_HUNTER_RANK_V1' if strategy['id']=='MOMENTUM_HUNTER' else 'LOWEST_COST_THEN_SCORE')),
+            'active_hype_themes':len(themes) if strategy['id']=='HYPE_RADAR' else None,
+            'selection_mode':('RECENT_X_SIGNAL_THEN_COST' if strategy['id']=='X_SIGNAL' else 'HYPE_SCORE_THEN_YOUNGEST' if strategy['id']=='HYPE_RADAR' else ('MOMENTUM_HUNTER_RANK_V1' if strategy['id']=='MOMENTUM_HUNTER' else 'LOWEST_COST_THEN_SCORE')),
         }
         if not eligible:
             continue
@@ -451,6 +486,7 @@ def maybe_open(feed,flows):
             'notional_usd':notional,'opened_at':stamp,'updated_at':stamp,
             'score':coin.get('score'),'entry_features':features,
             'x_signal':x_signals.get(address) if strategy['id']=='X_SIGNAL' else None,
+            'hype_match':hype_matches.get(address) if strategy['id']=='HYPE_RADAR' else None,
             'partial_realized_pnl':0.0,'partial_exits':[],
             'remaining_cost_basis_usd':capital_basis,
             'entry_dex_fee_bps':round(opening['dex_fee_bps'],4),

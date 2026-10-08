@@ -98,6 +98,7 @@ def _trade_row(trade, open_position=False):
         'pre_exit_pnl_pct': None if open_position else _finite(trade.get('pre_exit_pnl_pct')),
         'pre_exit_gap_seconds': None if open_position else _finite(trade.get('pre_exit_gap_seconds')),
         'exit_fill_model': None if open_position else trade.get('exit_fill_model'),
+        'hype_match': trade.get('hype_match') if isinstance(trade.get('hype_match'), dict) else None,
     }
 
 

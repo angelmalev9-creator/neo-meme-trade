@@ -15,6 +15,7 @@ import pair_price_integrity as price_integrity
 import pumpswap_stop_quote as pumpswap_stop
 import coin_flow
 import coin_wallets
+import hype_radar
 import discovery_universe
 import engine_runtime as runtime
 import engine_exit_policy as exit_policy
@@ -443,6 +444,41 @@ def read_coin_wallets(address: str, pair: str) -> dict[str, Any]:
             coin = next((c for c in STATE.feed if c.get('address') == address), None)
             pair = str((coin or {}).get('pairAddress') or '')
     return coin_wallets.build(address, pair, tape=read_live_tape(), fetch=_gecko_json, rpc=_dashboard_rpc)
+
+
+HYPE_RADAR_PATH = Path(os.getenv('NEO_HYPE_STATE_PATH', '/var/lib/neo-market/hype_radar.json'))
+
+
+def read_hype_radar() -> dict[str, Any]:
+    """Hype Radar themes plus which coins of the current feed match them (dashboard only)."""
+    try:
+        data = json.loads(HYPE_RADAR_PATH.read_text(encoding='utf-8'))
+        data = data if isinstance(data, dict) else {}
+    except Exception:
+        data = {}
+    now = now_ms()
+    themes = hype_radar.active_themes(data, now=now)
+    with STATE.lock:
+        feed = [dict(c) for c in STATE.feed]
+    matches = []
+    for coin in feed:
+        hit = hype_radar.match_token(coin, themes, now=now)
+        if hit:
+            matches.append({'address': coin.get('address'), 'pairAddress': coin.get('pairAddress'), 'symbol': coin.get('symbol'),
+                            'name': coin.get('name'), 'score': coin.get('score'), 'liquidityUsd': coin.get('liquidityUsd'),
+                            'marketCap': coin.get('marketCap') or coin.get('fdv'), 'ageMinutes': coin.get('ageMinutes'),
+                            'priceChangeM5': (coin.get('priceChange') or {}).get('m5'), 'imageUrl': coin.get('imageUrl'), **hit})
+    matches.sort(key=lambda m: -m['score'])
+    return {'status': data.get('status', 'offline'), 'updated_at': data.get('updated_at'), 'last_success_at': data.get('last_success_at'),
+            'model': data.get('model'), 'poll_seconds': data.get('poll_seconds'), 'daily_budget_usd': data.get('daily_budget_usd'),
+            'budget': data.get('budget'), 'error': data.get('error'), 'source_status': data.get('source_status'),
+            'theme_ttl_seconds': data.get('theme_ttl_seconds'), 'min_hype': data.get('min_hype'),
+            'themes': themes, 'stale_themes': len(data.get('themes') or []) - len(themes),
+            'source_lines': (data.get('source_lines') or [])[:MAX_HYPE_SOURCE_LINES], 'matches': matches[:40],
+            'feed_count': len(feed), 'checked_at': now}
+
+
+MAX_HYPE_SOURCE_LINES = 90
 
 
 def read_live_tape() -> dict[str, Any]:
@@ -2285,6 +2321,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == '/lab-book':
             self.send_json(read_lab_book((parse_qs(parsed.query).get('id') or [''])[0]))
+            return
+        if parsed.path == '/hype-radar':
+            self.send_json(read_hype_radar())
             return
         if parsed.path == '/coin-wallets':
             query = parse_qs(parsed.query)
