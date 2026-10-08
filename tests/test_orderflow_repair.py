@@ -19,7 +19,9 @@ class GoldParityTests(unittest.TestCase):
  def test_frozen_baseline_ast_hash_and_20000_inputs(self):
   text=(Path(__file__).parent/'fixtures/gold_entry_expression.txt').read_text()
   node=ast.parse(text,mode='eval').body
-  self.assertEqual(hashlib.sha256(ast.dump(node).encode()).hexdigest(),'ef252e00380c264b2f0d389c48d53c102d2b3219946cc60cbdf8b9b7efdf222a')
+  # ast.dump() output changed in Python 3.13, so the old dump hash failed on the
+  # 3.12 CI image. The normalized source is identical on 3.11, 3.12 and 3.13.
+  self.assertEqual(hashlib.sha256(ast.unparse(node).encode()).hexdigest(),'c79e25e11bee42b295c5cf9bf286e196f8451bddbc32c2b6e45a9e03c88855f3')
   fn=compile(ast.Expression(node),'<original-GOLD>','eval');rnd=random.Random(21)
   for _ in range(20000):
    score=rnd.choice([0,78,84.99,85,90,100]);liquidity=rnd.choice([1000,9999,10000,14999,15000,50000])
