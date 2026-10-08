@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import copy, hashlib, json, math, os, re, shutil, threading, time, uuid
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from datetime import datetime
@@ -14,6 +15,7 @@ import pair_price_integrity as price_integrity
 import pumpswap_stop_quote as pumpswap_stop
 import coin_flow
 import coin_wallets
+import discovery_universe
 import engine_runtime as runtime
 import engine_exit_policy as exit_policy
 import order_flow_adaptive_oct4 as oct4
@@ -31,9 +33,16 @@ LIVE_TAPE_PATH = Path(os.getenv('NEO_LIVE_TAPE_PATH', '/var/lib/neo-market/live_
 STRATEGY_LAB_PATH = Path(os.getenv('NEO_STRATEGY_LAB_PATH', '/var/lib/neo-market/strategy_lab.json'))
 STRATEGY_LAB_COMPACT_PATH = Path(os.getenv('NEO_STRATEGY_LAB_COMPACT_PATH', str(STRATEGY_LAB_PATH.parent / 'strategy_lab_compact.json')))
 ALL_TIME_HISTORY_PATH = Path(os.getenv('NEO_ALL_TIME_HISTORY_PATH', str(STATE_PATH.with_name('all_time_history.json'))))
+DISCOVERY_UNIVERSE_PATH = Path(os.getenv('NEO_DISCOVERY_UNIVERSE_PATH', str(STATE_PATH.with_name('discovery_universe.json'))))
 POSITION_SCAN_SECONDS = float(os.getenv('NEO_POSITION_SCAN_SECONDS', '0.5'))
 DEX_API = 'https://api.dexscreener.com'
-MAX_FEED = 90
+DISCOVERY_UNIVERSE_MAX = max(240, int(os.getenv('NEO_DISCOVERY_UNIVERSE_MAX', '5000')))
+DISCOVERY_SCAN_BATCH = max(60, min(DISCOVERY_UNIVERSE_MAX, int(os.getenv('NEO_DISCOVERY_SCAN_BATCH', '240'))))
+DISCOVERY_UNIVERSE_TTL_MS = max(60_000, int(float(os.getenv('NEO_DISCOVERY_UNIVERSE_TTL_MS', '86400000'))))
+DISCOVERY_REFRESH_SECONDS = max(4.0, float(os.getenv('NEO_DISCOVERY_REFRESH_SECONDS', '6')))
+MARKET_BATCH_WORKERS = max(1, min(6, int(os.getenv('NEO_MARKET_BATCH_WORKERS', '4'))))
+MARKET_BATCH_TIMEOUT_SECONDS = max(2.0, min(8.0, float(os.getenv('NEO_MARKET_BATCH_TIMEOUT_SECONDS', '5'))))
+MAX_FEED = DISCOVERY_SCAN_BATCH
 ENTRY_SCORE = 60.0
 MAX_POSITIONS = max(1, int(os.getenv('NEO_MAX_POSITIONS', '16')))
 WIN_REENTRY_SECONDS = max(0, int(float(os.getenv('NEO_WIN_REENTRY_SECONDS', '120'))))
@@ -492,7 +501,7 @@ def compact_public_trade(trade: dict[str, Any]) -> dict[str, Any]:
 
 
 def api(path: str) -> Any:
-    response = SESSION.get(f'{DEX_API}{path}', timeout=15)
+    response = SESSION.get(f'{DEX_API}{path}', timeout=(1.5, 5.0))
     response.raise_for_status()
     return response.json()
 
@@ -1160,6 +1169,8 @@ def discover() -> tuple[list[str], dict[str, dict[str, Any]]]:
         ('latest', '/token-profiles/latest/v1'),
         ('boosted', '/token-boosts/top/v1'),
         ('boosted-latest', '/token-boosts/latest/v1'),
+        ('community-takeover', '/community-takeovers/latest/v1'),
+        ('ads-latest', '/ads/latest/v1'),
     ]
     for source_name, path in sources:
         try:
@@ -1191,29 +1202,50 @@ def discover() -> tuple[list[str], dict[str, dict[str, Any]]]:
             info['description'] = info['description'] or row.get('description') or ''
             info['links'] = info['links'] or row.get('links') or []
             info['boost_amount'] = max(num(info['boost_amount']), num(row.get('amount')), num(row.get('totalAmount')))
-    return order[:90], metadata
+    return order, metadata
 
 
 def fetch_pairs(addresses: list[str]) -> list[dict[str, Any]]:
-    pairs: list[dict[str, Any]] = []
+    """Refresh a rotating token batch without serially blocking the scan loop.
+
+    DexScreener supports up to 30 token addresses per call. Four workers keep a
+    240-token PAPER scan comfortably below the documented 300 request/minute
+    market-data limit while bounding provider stalls.
+    """
     clean: list[str] = []
     seen: set[str] = set()
     for raw in addresses:
         address = str(raw or '').strip()
         if not is_valid_solana_address(address) or address in seen:
             continue
-        clean.append(address)
-        seen.add(address)
-    for i in range(0, len(clean), 30):
-        batch = clean[i:i + 30]
-        if not batch:
-            continue
+        clean.append(address); seen.add(address)
+    batches = [clean[i:i + 30] for i in range(0, len(clean), 30)]
+    if not batches:
+        return []
+
+    def one(batch: list[str]) -> list[dict[str, Any]]:
         try:
-            rows = api('/tokens/v1/solana/' + ','.join(batch))
-            if isinstance(rows, list):
+            response = requests.get(
+                f"{DEX_API}/tokens/v1/solana/{','.join(batch)}",
+                headers={'User-Agent': 'NEO-Meme-Market-Monitor/2.0', 'Accept': 'application/json'},
+                timeout=(1.5, MARKET_BATCH_TIMEOUT_SECONDS),
+            )
+            response.raise_for_status()
+            rows = response.json()
+            return rows if isinstance(rows, list) else []
+        except (requests.RequestException, ValueError, TypeError):
+            return []
+
+    pairs: list[dict[str, Any]] = []
+    failures = 0
+    with ThreadPoolExecutor(max_workers=min(MARKET_BATCH_WORKERS, len(batches))) as pool:
+        for rows in pool.map(one, batches):
+            if rows:
                 pairs.extend(rows)
-        except Exception as exc:
-            STATE.event(f'Market data warning: DexScreener batch unavailable ({type(exc).__name__})')
+            else:
+                failures += 1
+    if failures:
+        STATE.event(f'Market data warning: {failures}/{len(batches)} DexScreener batches unavailable')
     return pairs
 
 
@@ -1385,7 +1417,22 @@ class Monitor:
         self.position_lock = threading.Lock()
         self.position_poll_lock = threading.Lock()
         self.entry_lock = threading.Lock()
-        self.discovery = runtime.DiscoveryCache(discover, refresh_seconds=4, max_age_seconds=60)
+        self.discovery = runtime.DiscoveryCache(discover, refresh_seconds=DISCOVERY_REFRESH_SECONDS, max_age_seconds=90)
+        self.universe = discovery_universe.RollingUniverse(
+            DISCOVERY_UNIVERSE_PATH, max_items=DISCOVERY_UNIVERSE_MAX,
+            ttl_ms=DISCOVERY_UNIVERSE_TTL_MS, batch_size=DISCOVERY_SCAN_BATCH,
+            writer=runtime.atomic_json,
+        )
+        self.universe_seeded = self.universe.stats()['size'] > 0
+
+    def ensure_universe_seeded(self) -> None:
+        if self.universe_seeded:
+            return
+        seeds = [a for a in discovery_universe.seed_addresses_from_json(
+            [ALL_TIME_HISTORY_PATH, STRATEGY_LAB_PATH, STRATEGY_LAB_COMPACT_PATH]
+        ) if is_valid_solana_address(a)]
+        self.universe.observe(seeds, {a: {'sources': ['paper-history-seed']} for a in seeds})
+        self.universe_seeded = True
 
     def prewarm_entry_checks(self, feed: list[dict[str, Any]]) -> None:
         """Warm only the most time-sensitive candidates; avoid provider queues."""
@@ -2061,6 +2108,7 @@ class Monitor:
         if not self.scan_lock.acquire(blocking=False):
             return
         try:
+            self.ensure_universe_seeded()
             addresses, metadata = self.discovery.get()
             early_pairs = gecko_new_pumpswap_pairs()
             for early_pair in early_pairs:
@@ -2075,6 +2123,23 @@ class Monitor:
                 })
                 if 'gecko-new-pools' not in info['sources']:
                     info['sources'].append('gecko-new-pools')
+            # Persist every genuinely observed token and rotate the larger universe.
+            # Fresh discovery stays first so newborn pools are never delayed behind
+            # the historical/backfill portion of the scan.
+            self.universe.observe(addresses, metadata)
+            fresh_addresses = list(addresses)
+            addresses, universe_meta = self.universe.next_batch(
+                priority=fresh_addresses, limit=DISCOVERY_SCAN_BATCH
+            )
+            for address, info in universe_meta.items():
+                if address not in metadata:
+                    metadata[address] = info
+                else:
+                    old_sources = list(metadata[address].get('sources') or [])
+                    for source in info.get('sources') or []:
+                        if source not in old_sources:
+                            old_sources.append(source)
+                    metadata[address]['sources'] = old_sources
             for position in STATE.positions:
                 address = position.get('address')
                 if address and address not in addresses:
