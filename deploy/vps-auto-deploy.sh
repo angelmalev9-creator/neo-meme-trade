@@ -41,6 +41,9 @@ main() {
   local VERIFY_CMD="${NEO_DEPLOY_VERIFY_CMD:-}"
   local INSTALLED_COPY="${NEO_DEPLOY_INSTALLED_COPY:-/usr/local/sbin/neo-auto-deploy}"
 
+  # Never hand the deploy lock (fd 9) to anything systemctl starts.
+  sc() { "$SYSTEMCTL" "$@" 9>&-; }
+
   log() { printf '%s neo-auto-deploy: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
   write_status() {  # result, detail
@@ -99,12 +102,12 @@ PY
   engine_state_path() {
     if [ -n "$ENGINE_STATE_PATH" ]; then printf '%s\n' "$ENGINE_STATE_PATH"; return; fi
     local pid
-    pid="$("$SYSTEMCTL" show "$ENGINE_UNIT" -p MainPID --value 2>/dev/null || true)"
+    pid="$(sc show "$ENGINE_UNIT" -p MainPID --value 2>/dev/null || true)"
     if [ -n "$pid" ] && [ "$pid" != 0 ] && [ -r "/proc/$pid/environ" ]; then
       tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^NEO_MARKET_STATE_PATH=//p' | head -n 1
       return
     fi
-    "$SYSTEMCTL" show "$ENGINE_UNIT" -p Environment --value 2>/dev/null \
+    sc show "$ENGINE_UNIT" -p Environment --value 2>/dev/null \
       | tr ' ' '\n' | sed -n 's/^NEO_MARKET_STATE_PATH=//p' | head -n 1
   }
 
@@ -129,7 +132,7 @@ PY
   # proof, so the unit must also still be active a few seconds later.
   unit_settled() {  # unit
     sleep "$SETTLE_SECONDS"
-    "$SYSTEMCTL" is-active --quiet "$1"
+    sc is-active --quiet "$1"
   }
 
   # One `restart` keeps the gap short: while the engine is down the gateway
@@ -137,12 +140,12 @@ PY
   # first so the gateway finds it healthy and reuses it.
   restart_changed_services() {
     if [ "$engine_changed" = 1 ]; then
-      "$SYSTEMCTL" restart "$ENGINE_UNIT" || return 1
+      sc restart "$ENGINE_UNIT" || return 1
       wait_healthy "$ENGINE_URL/health" || return 1
       unit_settled "$ENGINE_UNIT" || return 1
     fi
     if [ "$gateway_changed" = 1 ]; then
-      "$SYSTEMCTL" restart "$GATEWAY_UNIT" || return 1
+      sc restart "$GATEWAY_UNIT" || return 1
       wait_healthy "$GATEWAY_URL/user/health" || return 1
       unit_settled "$GATEWAY_UNIT" || return 1
     fi
