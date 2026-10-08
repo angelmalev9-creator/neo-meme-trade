@@ -14,6 +14,7 @@ DEX='https://api.dexscreener.com'
 STATE_PATH=Path(os.getenv('NEO_STRATEGY_LAB_PATH','/var/lib/neo-market/strategy_lab.json'))
 COMPACT_PATH=Path(os.getenv('NEO_STRATEGY_LAB_COMPACT_PATH',str(STATE_PATH.parent/'strategy_lab_compact.json')))
 RESET_FLAG_PATH=Path(os.getenv('NEO_STRATEGY_LAB_RESET_FLAG','/var/lib/neo-market/strategy_lab.reset'))
+X_SIGNAL_PATH=Path(os.getenv('NEO_X_SIGNAL_STATE_PATH','/var/lib/neo-market/x_signal.json'))
 START_BALANCE=float(os.getenv('NEO_LAB_START_BALANCE','500'))
 STRATEGY_START_BALANCES={'SCALPER':float(os.getenv('NEO_LAB_SCALPER_START_BALANCE','100'))}
 TRADE_NOTIONAL=float(os.getenv('NEO_LAB_TRADE_NOTIONAL','150'))
@@ -180,6 +181,8 @@ STRATEGIES=[
  {'id':'CLEAN_MOMENTUM','name':'Clean Momentum','rule':lambda f: f['score']>=92 and f['liq']>=30000 and 3<=f['m5']<=18 and f['bs']>=1.2 and .20<=f['vol_liq']<=3.5 and f['flow']['ratio']>=1.5 and f['flow']['max_sell']<max(250,f['flow']['buy_usd']*.6)},
  # TikTok Strategy: light-filter PAPER sniper, net stop -12% / net target +17%.
  {'id':'TIKTOK','name':'TikTok Strategy','rule':lambda f: f['score']>=65 and f['liq']>=10000 and f['mc']>=30000 and -5<=f['m5']<=60 and f['bs']>=.80 and f['lmc']>=.02 and f['age']<=1440 and f['h1']>=-50},
+ # PAPER entry is additionally gated by a recent literal Solana address from X.
+ {'id':'X_SIGNAL','name':'X Signal','rule':lambda f: f['score']>=65 and f['liq']>=10000 and f['mc']>=30000 and -10<=f['m5']<=80 and f['bs']>=.70 and f['lmc']>=.02 and f['age']<=1440 and f['h1']>=-70},
  {'id':'CONFLUENCE_MAX','name':'Confluence Max','rule':lambda f: f['score']>=95 and f['liq']>=40000 and 1<=f['m5']<=12 and f['h1']>-10 and f['bs']>=1.25 and f['lmc']>=.15 and .20<=f['vol_liq']<=4 and f['flow']['trades']>=5 and f['flow']['ratio']>=2.0 and f['flow']['unique_wallets']>=4 and f['flow']['max_sell']<max(200,f['flow']['buy_usd']*.45)},
 ]
 
@@ -341,8 +344,24 @@ def update_positions(flows):
                     'remaining_fraction':round(remaining_qty/max(num(pos.get('original_quantity'),remaining_qty),1e-18),4),
                     'updated_at':now_ms()})
 
+def recent_x_signals(now=None):
+    now=now or now_ms()
+    data=load_json(X_SIGNAL_PATH,{})
+    max_age=max(60,num(data.get('max_signal_age_seconds'),600))*1000
+    out={}
+    for signal in data.get('signals') or []:
+        if not isinstance(signal,dict): continue
+        seen=int(num(signal.get('seen_at_ms'))); created=int(num(signal.get('post_created_at_ms'))); basis=created or seen
+        if basis<=0 or now-basis>max_age or basis>now+60_000: continue
+        for address in signal.get('addresses') or []:
+            if isinstance(address,str):
+                previous=out.get(address)
+                if previous is None or basis>int(num(previous.get('post_created_at_ms') or previous.get('seen_at_ms'))): out[address]=signal
+    return out
+
 def maybe_open(feed,flows):
     now=now_ms()
+    x_signals=recent_x_signals(now)
     candidates=[]
     for c in feed:
         if activity.usable_feed_coin(c,now):
@@ -358,6 +377,8 @@ def maybe_open(feed,flows):
         blocked_cooldown=0
         blocked_rank=0
         for coin,features in candidates:
+            if strategy['id']=='X_SIGNAL' and coin.get('address') not in x_signals:
+                continue
             if not activity.RULES[strategy['id']].matches(features):
                 continue
             validation=price_integrity.check(coin)
@@ -375,7 +396,11 @@ def maybe_open(feed,flows):
             if proposed is None:
                 blocked_cost+=1
                 continue
-            if strategy['id']=='MOMENTUM_HUNTER':
+            if strategy['id']=='X_SIGNAL':
+                signal=x_signals.get(coin.get('address')) or {}
+                priority=num(signal.get('post_created_at_ms') or signal.get('seen_at_ms'))
+                tiebreak=proposed['initial_pnl_pct']
+            elif strategy['id']=='MOMENTUM_HUNTER':
                 priority=activity.momentum_hunter_rank(features,proposed['initial_pnl_pct'])
                 if priority < activity.MOMENTUM_HUNTER_MIN_RANK:
                     blocked_rank+=1
@@ -389,8 +414,8 @@ def maybe_open(feed,flows):
             'at':now,'matched_candidates':checked,'cost_rejected':blocked_cost,
             'cooldown_rejected':blocked_cooldown,'affordable_candidates':len(eligible),
             'price_verification_rejected':blocked_price,
-            'rank_rejected':blocked_rank,
-            'selection_mode':'MOMENTUM_HUNTER_RANK_V1' if strategy['id']=='MOMENTUM_HUNTER' else 'LOWEST_COST_THEN_SCORE',
+            'rank_rejected':blocked_rank,'active_x_signals':len(x_signals) if strategy['id']=='X_SIGNAL' else None,
+            'selection_mode':('RECENT_X_SIGNAL_THEN_COST' if strategy['id']=='X_SIGNAL' else ('MOMENTUM_HUNTER_RANK_V1' if strategy['id']=='MOMENTUM_HUNTER' else 'LOWEST_COST_THEN_SCORE')),
         }
         if not eligible:
             continue
@@ -409,6 +434,7 @@ def maybe_open(feed,flows):
             'current_price':price,'peak_price':price,'quantity':qty,'original_quantity':qty,
             'notional_usd':notional,'opened_at':stamp,'updated_at':stamp,
             'score':coin.get('score'),'entry_features':features,
+            'x_signal':x_signals.get(address) if strategy['id']=='X_SIGNAL' else None,
             'partial_realized_pnl':0.0,'partial_exits':[],
             'remaining_cost_basis_usd':capital_basis,
             'entry_dex_fee_bps':round(opening['dex_fee_bps'],4),

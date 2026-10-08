@@ -102,24 +102,28 @@ RULES = {
     # Any pool from the first minute, market cap of at least $30k, no order-flow
     # requirement. Feed, price-integrity and liquidity-floor safety are unchanged.
     'TIKTOK': EntryRule(65, 10000, (-5, 60), .80, .02, (0, 1440), (-50, 1000), market_cap=30000),
+    # X Signal is additionally gated by a recent literal mint address in strategy_lab.py.
+    'X_SIGNAL': EntryRule(65, 10000, (-10, 80), .70, .02, (0, 1440), (-70, 1000), market_cap=30000),
 }
 
 # Per-strategy overrides. Everything not listed uses the lab-wide defaults.
 EXIT_OVERRIDES = {
     'TIKTOK': {'stop_loss': 12.0, 'take_profit': 17.0},
+    'X_SIGNAL': {'stop_loss': 12.0, 'take_profit': 17.0},
 }
 # Maximum modeled round-trip cost at entry. The pool fee is whatever the pool
 # charges (PumpSwap is about 1.25% per side near a $30k market cap), so a
 # strategy allowed to enter that low needs room above the 2.75% default.
 ENTRY_COST_CAPS = {
     'TIKTOK': 4.0,
+    'X_SIGNAL': 4.0,
 }
 # Books whose open position is re-checked on the fast interval.
-SNIPER_IDS = frozenset({'TIKTOK'})
+SNIPER_IDS = frozenset({'TIKTOK', 'X_SIGNAL'})
 # Books whose take profit is a resting limit order: once the net mark reaches
 # the target the sale is booked at the target, never above it. The stop is a
 # market sale and is always booked at the observed mark, including any gap.
-LIMIT_TAKE_PROFIT_IDS = frozenset({'TIKTOK'})
+LIMIT_TAKE_PROFIT_IDS = frozenset({'TIKTOK', 'X_SIGNAL'})
 SNIPER_POLL_SECONDS = 1.0
 
 

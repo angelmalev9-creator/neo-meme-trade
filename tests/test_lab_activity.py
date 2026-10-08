@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -32,8 +33,8 @@ class ActivityTests(unittest.TestCase):
         guard.start();self.addCleanup(guard.stop)
         lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
 
-    def test_all_35_rules_exist(self):
-        self.assertEqual(len(a.RULES),35)
+    def test_all_36_rules_exist(self):
+        self.assertEqual(len(a.RULES),36)
         self.assertEqual(set(a.RULES),{s['id'] for s in lab.STRATEGIES})
         for rule in a.RULES.values():self.assertGreaterEqual(rule.liquidity,10000)
 
@@ -117,7 +118,8 @@ class ActivityTests(unittest.TestCase):
 
     def test_net_stop_all_default_books_no_loss_clamping(self):
         c=coin()
-        lab.STATE['books'].pop('TIKTOK')   # its -12% stop is covered in TikTokStrategyTests
+        lab.STATE['books'].pop('TIKTOK')   # -12% stop covered below
+        lab.STATE['books'].pop('X_SIGNAL') # -12% stop covered by X Signal tests
         for b in lab.STATE['books'].values():
             b['position']={'trade_no':1,'address':ADDRESS,'pairAddress':PAIR,'entry_price':1,
                            'current_price':1,'quantity':100,'original_quantity':100,
@@ -166,8 +168,8 @@ class TikTokStrategyTests(unittest.TestCase):
         self.assertEqual((book['name'],book['starting_balance']),('TikTok Strategy',500))
         self.assertTrue(a.RULES['TIKTOK'].matches(self.LIGHT))
         for key,rule in a.RULES.items():
-            if key!='TIKTOK':self.assertFalse(rule.matches(self.LIGHT),key)
-        # Nothing else in the lab accepts a lower score, and no flow evidence is required.
+            if key not in {'TIKTOK','X_SIGNAL'}:self.assertFalse(rule.matches(self.LIGHT),key)
+        # X_SIGNAL has a similarly light market rule, but Strategy Lab separately requires a fresh X address.
         self.assertEqual(min(r.score for r in a.RULES.values()),a.RULES['TIKTOK'].score)
 
     def test_enters_only_from_30k_market_cap(self):
@@ -277,10 +279,54 @@ class TikTokStrategyTests(unittest.TestCase):
     def test_published_config_and_stats_show_the_overrides(self):
         config=a.policy_config()
         self.assertEqual(config['exit_overrides']['TIKTOK'],{'stop_loss':12.0,'take_profit':17.0})
-        self.assertEqual(config['entry_cost_caps'],{'TIKTOK':4.0})
+        self.assertEqual(config['entry_cost_caps'],{'TIKTOK':4.0,'X_SIGNAL':4.0})
         stats=lab.stats(lab.STATE['books']['TIKTOK'])
         self.assertEqual((stats['stop_loss_net_pct'],stats['take_profit_net_pct']),(12,17))
         self.assertEqual(lab.stats(lab.STATE['books']['SCALPER'])['stop_loss_net_pct'],3)
+
+
+
+class XSignalStrategyTests(unittest.TestCase):
+    def setUp(self):
+        guard=patch.object(lab.price_integrity,'check',return_value={'status':'pass','version':'OFFLINE_FIXTURE'})
+        guard.start();self.addCleanup(guard.stop)
+        lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
+        self.old_path=lab.X_SIGNAL_PATH
+        self.tmp=tempfile.NamedTemporaryFile('w+',delete=False)
+        self.tmp.close();lab.X_SIGNAL_PATH=Path(self.tmp.name)
+        self.addCleanup(setattr,lab,'X_SIGNAL_PATH',self.old_path)
+        self.addCleanup(lambda:Path(self.tmp.name).unlink(missing_ok=True))
+
+    def write_signals(self,signals):
+        Path(self.tmp.name).write_text(json.dumps({'max_signal_age_seconds':600,'signals':signals}))
+
+    def test_book_uses_same_paper_risk_shape_as_tiktok(self):
+        book=lab.empty_book(next(s for s in lab.STRATEGIES if s['id']=='X_SIGNAL'))
+        self.assertEqual((book['name'],book['starting_balance']),('X Signal',500))
+        self.assertEqual(a.exit_rules('X_SIGNAL',3,10,60)['stop_loss'],12)
+        self.assertEqual(a.exit_rules('X_SIGNAL',3,10,60)['take_profit'],17)
+        self.assertIn('X_SIGNAL',a.LIMIT_TAKE_PROFIT_IDS)
+        self.assertIn('X_SIGNAL',a.SNIPER_IDS)
+
+    def test_cannot_enter_without_fresh_literal_x_signal(self):
+        self.write_signals([])
+        with patch.object(lab,'now_ms',return_value=NOW):lab.maybe_open([coin()],flows())
+        self.assertIsNone(lab.STATE['books']['X_SIGNAL']['position'])
+
+    def test_fresh_address_signal_allows_normal_paper_checks_to_open(self):
+        self.write_signals([{'post_id':'123','handle':'elonmusk','seen_at_ms':NOW-1000,
+                             'post_created_at_ms':NOW-2000,'addresses':[ADDRESS]}])
+        with patch.object(lab,'now_ms',return_value=NOW):lab.maybe_open([coin()],flows())
+        pos=lab.STATE['books']['X_SIGNAL']['position']
+        self.assertIsNotNone(pos)
+        self.assertEqual(pos['x_signal']['post_id'],'123')
+        self.assertEqual(pos['address'],ADDRESS)
+
+    def test_stale_signal_is_ignored(self):
+        self.write_signals([{'post_id':'old','handle':'elonmusk','seen_at_ms':NOW-700_000,
+                             'post_created_at_ms':NOW-700_000,'addresses':[ADDRESS]}])
+        with patch.object(lab,'now_ms',return_value=NOW):lab.maybe_open([coin()],flows())
+        self.assertIsNone(lab.STATE['books']['X_SIGNAL']['position'])
 
 
 if __name__=='__main__':unittest.main()
