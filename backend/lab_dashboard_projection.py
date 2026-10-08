@@ -1,5 +1,23 @@
 """Small read-only dashboard projection of Strategy Lab state."""
 
+WHY_QUIET_TOP = 6
+
+
+def why_quiet(book):
+    """Which entry conditions have kept this book out of the market, cumulatively."""
+    total = book.get('rejection_totals') if isinstance(book, dict) else None
+    if not isinstance(total, dict):
+        return None
+    candidates = max(0, int(_finite(total.get('candidates')) or 0))
+    reasons = total.get('reasons') if isinstance(total.get('reasons'), dict) else {}
+    rows = sorted(((str(k), int(_finite(v) or 0)) for k, v in reasons.items()), key=lambda kv: -kv[1])
+    return {
+        'since': _finite(total.get('since')), 'scans': int(_finite(total.get('scans')) or 0),
+        'candidates': candidates, 'last_rule_match_at': _finite(total.get('last_rule_match_at')),
+        'reasons': [{'reason': k, 'count': v, 'share': round(v / candidates, 4) if candidates else None}
+                    for k, v in rows[:WHY_QUIET_TOP] if v > 0],
+    }
+
 def compact_strategy_lab(data):
     if not isinstance(data, dict):
         return {'status': 'offline', 'books': {}, 'stats': {}}
@@ -23,6 +41,7 @@ def compact_strategy_lab(data):
             'balance': raw.get('balance', 0),
             'position': position,
             'history': [],
+            'why_quiet': why_quiet(raw),
         }
 
     result = {
@@ -34,19 +53,6 @@ def compact_strategy_lab(data):
         'data_integrity_note': data.get('data_integrity_note'),
         'activity_config': data.get('activity_config') or {},
     }
-
-    astra = data.get('astra')
-    if isinstance(astra, dict):
-        astra_view = {key: value for key, value in astra.items() if key != 'book'}
-        book = astra.get('book')
-        if isinstance(book, dict):
-            astra_view['book'] = {
-                'balance': book.get('balance', 0),
-                'starting_balance': book.get('starting_balance', 0),
-                'positions': book.get('positions') or [],
-                'history': (book.get('history') or [])[:30],
-            }
-        result['astra'] = astra_view
 
     paired = data.get('paired')
     if isinstance(paired, dict):

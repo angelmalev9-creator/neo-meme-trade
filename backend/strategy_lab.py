@@ -3,7 +3,6 @@ import json, math, os, time
 from pathlib import Path
 from typing import Any, Callable
 import requests
-from astra_lab_bridge import merge_astra_snapshot
 from lab_paired_bridge import merge_paired_snapshot
 import lab_activity as activity
 import pair_price_integrity as price_integrity
@@ -376,17 +375,22 @@ def maybe_open(feed,flows):
         blocked_price=0
         blocked_cooldown=0
         blocked_rank=0
+        scan_rejections={}
+        def reject(reason):
+            scan_rejections[reason]=scan_rejections.get(reason,0)+1
         for coin,features in candidates:
             if strategy['id']=='X_SIGNAL' and coin.get('address') not in x_signals:
-                continue
-            if not activity.RULES[strategy['id']].matches(features):
+                reject('no_x_signal'); continue
+            failed=activity.RULES[strategy['id']].failures(features)
+            if failed:
+                for reason in failed: reject(reason)
                 continue
             validation=price_integrity.check(coin)
             if validation.get('status')!='pass':
-                blocked_price+=1; continue
+                blocked_price+=1; reject('price_verification'); continue
             address=coin['address']
             if activity.cooldown_remaining_ms(book,address,now)>0:
-                blocked_cooldown+=1
+                blocked_cooldown+=1; reject('cooldown')
                 continue
             checked+=1
             proposed=activity.affordable_entry(
@@ -394,7 +398,7 @@ def maybe_open(feed,flows):
                 activity.entry_cost_cap(strategy['id'])
             )
             if proposed is None:
-                blocked_cost+=1
+                blocked_cost+=1; reject('cost')
                 continue
             if strategy['id']=='X_SIGNAL':
                 signal=x_signals.get(coin.get('address')) or {}
@@ -403,15 +407,27 @@ def maybe_open(feed,flows):
             elif strategy['id']=='MOMENTUM_HUNTER':
                 priority=activity.momentum_hunter_rank(features,proposed['initial_pnl_pct'])
                 if priority < activity.MOMENTUM_HUNTER_MIN_RANK:
-                    blocked_rank+=1
+                    blocked_rank+=1; reject('rank')
                     continue
                 tiebreak=proposed['initial_pnl_pct']
             else:
                 priority=proposed['initial_pnl_pct']
                 tiebreak=num(features.get('score'))
             eligible.append((priority,tiebreak,coin,features,proposed))
+        # Cumulative view, so the dashboard can say which condition keeps a quiet
+        # book out of the market instead of showing one scan's snapshot.
+        total=book.get('rejection_totals') or {}
+        if not isinstance(total,dict) or total.get('version')!=activity.POLICY_VERSION:
+            total={'version':activity.POLICY_VERSION,'since':now,'scans':0,'candidates':0,'reasons':{}}
+        total['scans']=int(total.get('scans',0))+1
+        total['candidates']=int(total.get('candidates',0))+len(candidates)
+        reasons=total.setdefault('reasons',{})
+        for reason,count in scan_rejections.items(): reasons[reason]=int(reasons.get(reason,0))+count
+        total['last_scan_at']=now
+        if checked: total['last_rule_match_at']=now
+        book['rejection_totals']=total
         book['entry_diagnostics']={
-            'at':now,'matched_candidates':checked,'cost_rejected':blocked_cost,
+            'at':now,'candidates':len(candidates),'scan_rejections':scan_rejections,'matched_candidates':checked,'cost_rejected':blocked_cost,
             'cooldown_rejected':blocked_cooldown,'affordable_candidates':len(eligible),
             'price_verification_rejected':blocked_price,
             'rank_rejected':blocked_rank,'active_x_signals':len(x_signals) if strategy['id']=='X_SIGNAL' else None,
@@ -487,7 +503,7 @@ def persist(status='online',error=None):
                               'take_profit_net_pct':TAKE_PROFIT,'trade_limit_usd':TRADE_NOTIONAL}
     if error: STATE['error']=str(error)[:200]
     else: STATE.pop('error',None)
-    published=merge_paired_snapshot(merge_astra_snapshot(STATE))
+    published=merge_paired_snapshot(STATE)
     atomic_write(published)
     atomic_write_path(COMPACT_PATH,compact_strategy_lab(published))
 
