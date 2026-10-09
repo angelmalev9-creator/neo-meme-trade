@@ -194,9 +194,9 @@ class EngineLearning(EngineHarness):
         config = snapshot['config']
         expected = {'signal_strategy': 'ORDER_FLOW_ADAPTIVE_LEARNING', 'strategy_profile': 'ORDER_FLOW_ADAPTIVE_LEARNING',
                     'entry_policy_version': 'ORDER_FLOW_TIERED_LEARNER_V1', 'learning_mode': 'ONLINE_CONTEXT_EXPECTANCY_V1',
-                    'exit_policy': 'oct4_adaptive', 'scan_seconds': 5, 'position_scan_seconds': 1.0, 'max_positions': 8,
+                    'exit_policy': 'fixed', 'scan_seconds': 5, 'position_scan_seconds': 1.0, 'max_positions': 8,
                     'trade_notional_usd': 200.0, 'max_daily_loss_usd': 0.0, 'daily_loss_cap_enabled': False,
-                    'stop_loss_pct': 10.0, 'reentry_seconds': 120, 'loss_reentry_seconds': 600,
+                    'stop_loss_pct': 4.0, 'take_profit_pct': 10.0, 'reentry_seconds': 120, 'loss_reentry_seconds': 600,
                     'strict_max_roundtrip_cost_pct': 4.0, 'strict_max_worst_case_cost_pct': 6.0,
                     'max_quoted_candidates_per_scan': 6, 'unsellable_blocks_entries': False,
                     'config_source': 'adaptive_learning.CONFIG', 'paper_only': True}
@@ -210,8 +210,8 @@ class EngineLearning(EngineHarness):
         pos = self.open_one()
         self.assertEqual((pos['entry_mode'], pos['notional_usd']), ('CORE', 200.0))
         self.assertEqual((pos['strategy_id'], pos['entry_policy_version'], pos['exit_policy']),
-                         ('ORDER_FLOW_ADAPTIVE_LEARNING', 'ORDER_FLOW_TIERED_LEARNER_V1', 'oct4_adaptive'))
-        self.assertEqual((pos['stop_loss_pct'], pos['planned_stop_net_pct']), (10.0, -10.0))
+                         ('ORDER_FLOW_ADAPTIVE_LEARNING', 'ORDER_FLOW_TIERED_LEARNER_V1', 'fixed'))
+        self.assertEqual((pos['stop_loss_pct'], pos['planned_stop_net_pct'], pos['take_profit_net_pct']), (4.0, -4.0, 10.0))
         self.assertEqual(pos['learn_features']['tier'], 'CORE')
         self.assertEqual(set(pos['learn_features']), {'tier', 'mode', 'liquidity', 'market_cap', 'age', 'm5',
                                                       'flow_ratio', 'score', 'dex'})
@@ -311,13 +311,13 @@ class EngineLearning(EngineHarness):
 
 
 class EngineExitsUnderLearner(EngineHarness):
-    def test_learner_position_stops_at_minus_10_net(self):
-        self.position(stop_loss_pct=10.0)
-        self.mark(1.86, 187.0, conviction=80)        # about -6.6% net
+    def test_learner_position_uses_fixed_minus_4_stop(self):
+        self.position(stop_loss_pct=4.0, exit_policy='fixed', exit_policy_version='HONEST_NET_EXIT_V1', take_profit_net_pct=10.0)
+        self.mark(1.94, 195.0, conviction=80)        # about -2.6% net
         self.assertFalse(m.STATE.history)
-        self.assertEqual(m.STATE.positions[0]['planned_stop_net_pct'], -10.0)
-        self.mark(1.80, 180.0, conviction=80)        # about -10.1% net
-        self.assertEqual(m.STATE.history[0]['exit_reason'], 'STOP_LOSS')
+        self.assertEqual(m.STATE.positions[0].get('planned_stop_net_pct'), -4.0)
+        self.mark(1.91, 191.0, conviction=80)        # about -4.6% net
+        self.assertEqual(m.STATE.history[0]['exit_reason'], 'STOP_LOSS_NET_TARGET')
 
     def test_positions_opened_under_older_profiles_keep_their_5_percent_stop(self):
         self.position(stop_loss_pct=5.0)             # ORDER_FLOW_ADAPTIVE position
@@ -329,13 +329,13 @@ class EngineExitsUnderLearner(EngineHarness):
         self.mark(1.88, 189.0, conviction=80)
         self.assertEqual(m.STATE.history[0]['exit_reason'], 'STOP_LOSS_NET_TARGET')
 
-    def test_winner_runs_and_is_trailed(self):
-        self.position(stop_loss_pct=10.0)
-        self.mark(3.00, 296.0, conviction=90)
+    def test_learner_position_takes_fixed_plus_10_net(self):
+        self.position(stop_loss_pct=4.0, exit_policy='fixed', exit_policy_version='HONEST_NET_EXIT_V1', take_profit_net_pct=10.0)
+        self.mark(2.18, 218.0, conviction=90)        # about +8.9% net
         self.assertFalse(m.STATE.history)
-        self.mark(2.70, 266.0, conviction=90)        # 10% off the peak; RUNNER trails at 7%
-        self.assertEqual(m.STATE.history[0]['exit_reason'], 'ADAPTIVE_TRAILING')
-        self.assertGreater(m.STATE.history[0]['pnl_usd'], 60)
+        self.mark(2.21, 221.0, conviction=90)        # about +10.4% net
+        self.assertEqual(m.STATE.history[0]['exit_reason'], 'TAKE_PROFIT_10_NET')
+        self.assertGreater(m.STATE.history[0]['pnl_usd'], 20)
 
 
 if __name__ == '__main__':

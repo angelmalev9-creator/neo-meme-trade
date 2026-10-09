@@ -1,13 +1,13 @@
 {
   "name": "NEO ORDER_FLOW_ADAPTIVE_LEARNING: tiered high-frequency PAPER entries with size/avoid learning, on the durable honest PAPER runtime",
-  "locked_at_utc": "2026-10-08",
-  "source_commit": "NONSTOP_SCAN_BACKPRESSURE_20261009",
+  "locked_at_utc": "2026-10-09",
+  "source_commit": "MAIN_FIXED_NET_4_10_20261009",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "9081914bd960bf40443dbfc024e6b79102a4d3bbb90aa7a6798f5a01577b1c15",
+  "sha256": "052359fc181926036e5ff3bbc881c4ae557757238bb0be97e981672689b79a7e",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE_LEARNING",
   "rules": {
     "max_positions": 8,
-    "stop_loss_pct": 10,
+    "stop_loss_pct": 4,
     "starting_balance_usd": 1000,
     "trade_notional_usd_range": [
       40,
@@ -23,10 +23,11 @@
     "max_total_exposure_pct": 100,
     "max_drawdown_pct": 0,
     "stop_execution_buffer_pct": 0.5,
-    "adaptive_exits_override_base_take_profit_trailing_and_hold": true
+    "adaptive_exits_override_base_take_profit_trailing_and_hold": false,
+    "take_profit_pct": 10
   },
   "policy": "Owner-requested on 2026-10-08: trade as often as honest costs allow, learn from closed trades and lean toward what has been profitable. PAPER only; existing history, balance, trade sequence and audit are preserved; no reset, no live execution, no automatic live-money promotion.",
-  "integrity_note": "Entry thresholds, exits and cost caps are fixed; only position size and avoid/allow are learned, from quote-evidenced closed trades with a 24-hour half-life. Verified flow coverage, exact pool/mint checks, safety checks, bounded quote age and uncapped modeled losses are retained. A planned stop is not a guaranteed fill. Discovery-only extension: a persistent rotating universe refreshes up to 240 token addresses per scan from up to 5000 recently observed addresses; entry, exit, scoring, sizing, costs and PAPER-only execution rules are unchanged. Scanner scheduling now targets the configured cadence, publishes per-batch refresh progress, and fails open when the isolated PAPER training recorder is oversized/degraded; entry, exit, scoring, sizing, costs and PAPER-only execution rules are unchanged.",
+  "integrity_note": "Primary learner keeps the same CORE/EXPLORE entry thresholds, scoring, sizing and learning. Owner-requested exit change: new PAPER positions use fixed executable-net SL -4% and TP +10% via HONEST_NET_EXIT_V1. Existing positions keep their recorded exit rules. Verified flow coverage, exact pool/mint checks, safety checks, bounded quote age and uncapped modeled gap losses remain mandatory. Current live-tape mints are pinned into each rotating scan and use the exact taped pool so verified flow can overlap entry evaluation; entry thresholds are unchanged.",
   "execution_mode": "PAPER_QUOTE_OR_OBSERVED_POOL_MODEL",
   "entry_policy_version": "ORDER_FLOW_TIERED_LEARNER_V1",
   "entry_policy_limits": {
@@ -66,7 +67,7 @@
     "risk_overlay": "PLANNED_NET_STOP_NO_FILL_GUARANTEE"
   },
   "support_files_sha256": {
-    "backend/adaptive_learning.py": "cc189521217bc041a5d556dd9735d73b795badfe1441079b3acadcb87ef358f4",
+    "backend/adaptive_learning.py": "c8203a85076c810621dcf132ddafe58e0fa1878375f22ca4f0418b0f8a350d81",
     "backend/astra6_brain.py": "2b5ec59be59a93122ce6c08bedd1205c6330d12af75211c60336f616f17390de",
     "backend/compat_file_lock.py": "8ba79d6e53250fba0a3f0dc2f997ed89094210d170d84c4b66c200f5ab9d64df",
     "backend/engine_entry_policy.py": "cf4edec87f066dd662528336cdf5b7b22c36d217b6cc1d1d7a0b32b0148c297c",
@@ -97,7 +98,7 @@
   "runtime_version": "RUNTIME_DURABLE_PAPER_V2",
   "runtime_note": "Primary PAPER engine holds up to eight liquidity-scaled positions across CORE and EXPLORE tiers. Positions opened under an earlier profile keep the stop and exit policy recorded at entry.",
   "stop_execution_mode": "JUPITER_USDC_QUOTE_LATENCY_BUFFER_V6",
-  "stop_execution_note": "Planned net stop -10%; all observed gap losses and unavailable liquidation risk retained. Never clamps a loss or realizes native SOL as USDC.",
+  "stop_execution_note": "Planned net stop -4%; take profit +10% net. Observed gap losses and unavailable liquidation risk are retained; the stop is not a guaranteed fill.",
   "entry_data_fallbacks": {
     "missing_or_pending_reference_price": "EXACT_POOL_JUPITER_CONFIRMATION_REQUIRED",
     "sol_usd_for_tape": "SHARED_TIMESTAMPED_JUPITER_REFERENCE",
@@ -137,9 +138,9 @@
   "baseline_commit": "bccb0ed30bac1efbf2e16cfe89e0ee1af049f050",
   "baseline_manifest": "docs/strategy-lock-before-repair.json",
   "hash_basis": "UTF8_LF",
-  "exit_policy_version": "ADAPTIVE_CONTEXT_HOLD_NET_V1",
+  "exit_policy_version": "HONEST_NET_EXIT_V1",
   "hash_change_reasons": {
-    "backend/market_monitor.py": "2026-10-08: explicit strategy profile selection; ORDER_FLOW_ADAPTIVE (2026-10-04) is the primary profile with module-owned configuration, BALANCED_V4 entry filter, 60s flow window, fixed $200 size, $100 daily gate, 20-minute same-token cooldown, one position and adaptive conviction exits. EARLY_SCOUT_V10 behavior is unchanged when selected. Open positions keep the exit policy recorded at entry. ORDER_FLOW_ADAPTIVE_LEARNING becomes the default profile: eight positions, tiered entries, learned sizing, outcome-aware cooldown; an unsellable position no longer freezes entries under this profile; every position keeps the stop recorded at entry. Adds the read-only /lab-book endpoint (trade list of one Strategy Lab book); no trading logic changed. Adds the read-only /coin-flow endpoint (buyers/sellers windows for the dashboard); no trading logic changed. Adds the read-only /coin-wallets endpoint (per-wallet trades and top holders via GeckoTerminal + Solana RPC, dashboard only). Adds the read-only /hype-radar endpoint (themes file + feed matches, dashboard only). 2026-10-09: /coin-wallets now adds a read-only on-demand direct Solana RPC wallet feed for the selected pool; main engine entry/exit/sizing logic is unchanged. 2026-10-09: dashboard-only coin-flow/wallet pair resolution now falls back by mint for stale browser selections and accepts exact frontend pair forwarding; trading rules are unchanged. 2026-10-09: discovery scheduling now prioritizes only genuinely new provider addresses plus urgent newborn pools, guaranteeing remaining batch capacity rotates through the persistent universe; adds read-only discovery telemetry only. Trading rules are unchanged.",
+    "backend/market_monitor.py": "2026-10-08: explicit strategy profile selection; ORDER_FLOW_ADAPTIVE (2026-10-04) is the primary profile with module-owned configuration, BALANCED_V4 entry filter, 60s flow window, fixed $200 size, $100 daily gate, 20-minute same-token cooldown, one position and adaptive conviction exits. EARLY_SCOUT_V10 behavior is unchanged when selected. Open positions keep the exit policy recorded at entry. ORDER_FLOW_ADAPTIVE_LEARNING becomes the default profile: eight positions, tiered entries, learned sizing, outcome-aware cooldown; an unsellable position no longer freezes entries under this profile; every position keeps the stop recorded at entry. Adds the read-only /lab-book endpoint (trade list of one Strategy Lab book); no trading logic changed. Adds the read-only /coin-flow endpoint (buyers/sellers windows for the dashboard); no trading logic changed. Adds the read-only /coin-wallets endpoint (per-wallet trades and top holders via GeckoTerminal + Solana RPC, dashboard only). Adds the read-only /hype-radar endpoint (themes file + feed matches, dashboard only). 2026-10-09: /coin-wallets now adds a read-only on-demand direct Solana RPC wallet feed for the selected pool; main engine entry/exit/sizing logic is unchanged. 2026-10-09: dashboard-only coin-flow/wallet pair resolution now falls back by mint for stale browser selections and accepts exact frontend pair forwarding; trading rules are unchanged. 2026-10-09: discovery scheduling now prioritizes only genuinely new provider addresses plus urgent newborn pools, guaranteeing remaining batch capacity rotates through the persistent universe; adds read-only discovery telemetry only. Trading rules are unchanged. 2026-10-09: new positions record the fixed profile take-profit when the active strategy exit policy is fixed; existing positions retain their recorded policy. 2026-10-09: pins current live-tape mints into the rotating scan and prefers their exact taped pool so verified flow evidence overlaps entry evaluation; thresholds are unchanged.",
     "backend/engine_entry_policy.py": "Raised validated quote throughput to 12 candidates per scan and versioned V10 high-frequency scout policy. Unchanged on 2026-10-08; used only by the EARLY_SCOUT_V10 profile. 2026-10-08: adds the learned_avoid rejection label only.",
     "backend/gold_order_flow.py": "Added MICRO_SCOUT before ULTRA_EARLY with lower early thresholds while leaving safety/price/execution vetoes outside and mandatory. Unchanged on 2026-10-08; used only by the EARLY_SCOUT_V10 profile.",
     "backend/engine_exit_policy.py": "Versioned net fixed policy and original adaptive candidate, no chart stop",
@@ -162,72 +163,20 @@
     "backend/lab_paired_runner.py": "Cross-platform file locking and UTF-8 persistence",
     "backend/main_replay.py": "Actual primary engine recorded-only evidence replay",
     "backend/order_flow_adaptive_oct4.py": "Pure module: owned configuration, conviction model, hold modes and exit priority. 2026-10-08: entry filter changed from ORDER_FLOW_BALANCED_V4 to the GOLD rule of tag strategy-gold-v1-2026-10-04 (score 85, liquidity $15k, 5m -5..25, 3 flow trades, ratio 1.30, 1 wallet, large-sell guard, conviction 75).",
-    "backend/adaptive_learning.py": "New pure module (2026-10-08): owned configuration, CORE/EXPLORE tiers, liquidity-scaled sizing and time-decayed per-context learning of size and avoid/allow.",
+    "backend/adaptive_learning.py": "2026-10-09: owner-requested primary PAPER exit profile changed to fixed executable-net SL -4% / TP +10%; entry tiers, sizing and learning are unchanged.",
     "backend/lab_activity.py": "2026-10-08: adds X_SIGNAL PAPER entry/risk configuration only; shared safety and execution-cost logic remain unchanged. 2026-10-08: EntryRule.failures() names the failing conditions for diagnostics; matches() is unchanged. 2026-10-08: HYPE_RADAR rule/overrides and two diagnostic labels.",
     "backend/x_signal_monitor.py": "2026-10-08: budget-capped xAI X Search collector for PAPER signals; allowed handles only, literal addresses only, no order execution, atomic state output.",
     "backend/hype_radar.py": "2026-10-08: Hype Radar PAPER collector and pure token/theme matcher used by HYPE_RADAR entry gating; locked because match_token() and active_themes() influence lab entry eligibility.",
     "backend/discovery_universe.py": "2026-10-09: adds pure fresh-priority helper so repeated provider snapshots cannot starve rolling universe rotation; no scoring, entry, exit, sizing or execution logic."
   },
   "strategy_profile": "ORDER_FLOW_ADAPTIVE_LEARNING",
-  "strategy_version": "learner-2026-10-08",
+  "strategy_version": "learner-2026-10-09-fixed-4-10",
   "recovered_from_commit": "44a7a09b019f068a97c2165068a556cadcc6bfc4",
-  "exit_policy": "oct4_adaptive",
+  "exit_policy": "fixed",
   "accounting_exit_version": "HONEST_NET_EXIT_V1",
   "learning_mode": "ONLINE_CONTEXT_EXPECTANCY_V1",
-  "hold_modes": [
-    {
-      "mode": "RUNNER",
-      "min_conviction": 85.0,
-      "max_hold_minutes": 60.0,
-      "target_pct": null,
-      "trail_arm_pct": 15.0,
-      "trail_pct": 7.0
-    },
-    {
-      "mode": "STRONG",
-      "min_conviction": 72.0,
-      "max_hold_minutes": 30.0,
-      "target_pct": null,
-      "trail_arm_pct": 12.0,
-      "trail_pct": 6.0
-    },
-    {
-      "mode": "NORMAL",
-      "min_conviction": 58.0,
-      "max_hold_minutes": 15.0,
-      "target_pct": 20.0,
-      "trail_arm_pct": 9.0,
-      "trail_pct": 5.0
-    },
-    {
-      "mode": "CAUTIOUS",
-      "min_conviction": 45.0,
-      "max_hold_minutes": 8.0,
-      "target_pct": 14.0,
-      "trail_arm_pct": 7.0,
-      "trail_pct": 4.0
-    },
-    {
-      "mode": "WEAK",
-      "min_conviction": 0.0,
-      "max_hold_minutes": 4.0,
-      "target_pct": 8.0,
-      "trail_arm_pct": 5.0,
-      "trail_pct": 3.0
-    }
-  ],
-  "exit_limits": {
-    "conviction_exit_below": 35.0,
-    "orderflow_min_trades": 4,
-    "orderflow_min_sells": 3,
-    "orderflow_sell_floor_usd": 200.0,
-    "orderflow_sell_buy_multiple": 2.0,
-    "orderflow_max_signal_pct": 3.0,
-    "profit_lock_peak_pct": 10.0,
-    "profit_lock_conviction_below": 50.0,
-    "profit_lock_min_profit_pct": 2.0,
-    "max_hold_conviction_below": 72.0
-  },
+  "hold_modes": [],
+  "exit_limits": {},
   "config_ownership": "backend/adaptive_learning.py CONFIG; same-named NEO_* environment variables are ignored and reported in /state config.ignored_env_overrides.",
   "alternate_profiles": {
     "EARLY_SCOUT_V10": {

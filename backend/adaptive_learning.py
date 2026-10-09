@@ -28,11 +28,11 @@ import order_flow_adaptive_oct4 as oct4
 
 PROFILE = 'ORDER_FLOW_ADAPTIVE_LEARNING'
 STRATEGY_ID = 'ORDER_FLOW_ADAPTIVE_LEARNING'
-STRATEGY_VERSION = 'learner-2026-10-08'
+STRATEGY_VERSION = 'learner-2026-10-09-fixed-4-10'
 ENTRY_POLICY_VERSION = 'ORDER_FLOW_TIERED_LEARNER_V1'
 LEARNING_MODE = 'ONLINE_CONTEXT_EXPECTANCY_V1'
-EXIT_POLICY = oct4.EXIT_POLICY
-EXIT_POLICY_VERSION = oct4.EXIT_POLICY_VERSION
+EXIT_POLICY = 'fixed'
+EXIT_POLICY_VERSION = 'HONEST_NET_EXIT_V1'
 
 CONFIG = MappingProxyType({
     'scan_seconds': 5,
@@ -40,12 +40,12 @@ CONFIG = MappingProxyType({
     'max_positions': 8,
     'trade_notional_usd': 200.0,           # upper bound; real size is liquidity-scaled
     'max_daily_loss_usd': 0.0,             # no daily gate: size learning is the brake
-    # Small-cap pools cost about 3% per round trip, so the stop has to sit well
-    # outside the cost or every entry would stop out on fees alone.
-    'stop_loss_pct': 10.0,
-    'take_profit_pct': 18.0,               # base value only; exits use the hold modes
-    'trailing_pct': 4.0,                   # base value only
-    'max_hold_minutes': 7,                 # base value only
+    # Owner-requested fixed PAPER exits on executable net PnL. Cost/impact
+    # preflight still rejects entries whose modeled round trip is too expensive.
+    'stop_loss_pct': 4.0,
+    'take_profit_pct': 10.0,
+    'trailing_pct': 0.0,                   # fixed exit policy does not trail
+    'max_hold_minutes': 60,                # fixed policy fallback timeout
     'win_reentry_seconds': 120,
     'loss_reentry_seconds': 600,
     'entry_flow_window_seconds': 60,
@@ -271,6 +271,6 @@ def describe():
         'entry_policy_version': ENTRY_POLICY_VERSION, 'learning_mode': LEARNING_MODE,
         'exit_policy': EXIT_POLICY, 'exit_policy_version': EXIT_POLICY_VERSION,
         'config': dict(CONFIG), 'tiers': {name: dict(limits) for name, limits in TIER_LIMITS.items()},
-        'sizing': dict(SIZING), 'learning': dict(LEARNING), 'exit_limits': dict(oct4.EXIT_LIMITS),
-        'hold_modes': oct4.describe()['hold_modes'],
+        'sizing': dict(SIZING), 'learning': dict(LEARNING), 'exit_limits': {},
+        'hold_modes': [],
     }
