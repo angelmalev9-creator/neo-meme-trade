@@ -403,16 +403,66 @@ def _gecko_json(url: str) -> dict[str, Any]:
     return response.json()
 
 
+_DASHBOARD_PAIR_CACHE: dict[str, dict[str, Any]] = {}
+_DASHBOARD_PAIR_CACHE_LOCK = threading.Lock()
+_DASHBOARD_PAIR_TTL_MS = 60_000
+
+
+def _dashboard_coin(address: str) -> dict[str, Any] | None:
+    """Resolve the selected token to an exact pool without touching trading state.
+
+    Normally the current scanner feed already carries ``pairAddress``.  Older
+    browser tabs can keep a token selected after it rotates out of that bounded
+    feed, though, which used to turn /coin-flow and /coin-wallets into no_pair.
+    For that dashboard-only case resolve the most liquid current DexScreener
+    pair by mint and cache it briefly.
+    """
+    with STATE.lock:
+        current = next((dict(c) for c in STATE.feed if c.get('address') == address), None)
+    if current and current.get('pairAddress'):
+        return current
+
+    now = now_ms()
+    with _DASHBOARD_PAIR_CACHE_LOCK:
+        cached = _DASHBOARD_PAIR_CACHE.get(address)
+        if cached and 0 <= now - int(cached.get('fetched_at') or 0) <= _DASHBOARD_PAIR_TTL_MS:
+            coin = cached.get('coin')
+            return dict(coin) if isinstance(coin, dict) else None
+
+    resolved: dict[str, Any] | None = None
+    try:
+        pair_row = best_pairs(fetch_pairs([address])).get(address)
+        pair_address = str((pair_row or {}).get('pairAddress') or '')
+        if pair_address:
+            base = (pair_row or {}).get('baseToken') or {}
+            resolved = {
+                'address': address,
+                'pairAddress': pair_address,
+                'dexId': (pair_row or {}).get('dexId') or '',
+                'symbol': base.get('symbol') or '?',
+                'priceUsd': num((pair_row or {}).get('priceUsd')),
+                'priceNative': num((pair_row or {}).get('priceNative')),
+            }
+    except Exception:
+        resolved = None
+
+    with _DASHBOARD_PAIR_CACHE_LOCK:
+        _DASHBOARD_PAIR_CACHE[address] = {'fetched_at': now, 'coin': resolved}
+        if len(_DASHBOARD_PAIR_CACHE) > 200:
+            stale = sorted(_DASHBOARD_PAIR_CACHE, key=lambda key: int(_DASHBOARD_PAIR_CACHE[key].get('fetched_at') or 0))[:50]
+            for key in stale:
+                _DASHBOARD_PAIR_CACHE.pop(key, None)
+    return dict(resolved) if resolved else current
+
+
 def read_coin_flow(address: str, pair: str) -> dict[str, Any]:
     """Dashboard-only buyers/sellers windows for one pool (verified tape + GeckoTerminal)."""
     address, pair = str(address or '')[:64], str(pair or '')[:64]
     if not address:
         return {'error': 'address_required'}
-    with STATE.lock:
-        coin = next((c for c in STATE.feed if c.get('address') == address), None)
-        if coin and not pair:
-            pair = str(coin.get('pairAddress') or '')
-        coin = dict(coin) if coin else None
+    coin = _dashboard_coin(address)
+    if not pair:
+        pair = str((coin or {}).get('pairAddress') or '')
     return coin_flow.build(address, pair, coin=coin, tape=read_live_tape(), fetch=_gecko_json)
 
 
@@ -465,8 +515,7 @@ def read_coin_wallets(address: str, pair: str) -> dict[str, Any]:
     address, pair = str(address or '')[:64], str(pair or '')[:64]
     if not address:
         return {'error': 'address_required'}
-    with STATE.lock:
-        coin = next((dict(c) for c in STATE.feed if c.get('address') == address), None)
+    coin = _dashboard_coin(address)
     if not pair:
         pair = str((coin or {}).get('pairAddress') or '')
     direct = coin_wallets.direct_pool_trades(pair, address, coin=coin, batch_rpc=_dashboard_rpc_batch) if pair else None

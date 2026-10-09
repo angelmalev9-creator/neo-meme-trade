@@ -246,18 +246,24 @@ export default function App() {
     return () => { cancelled = true; if (retryTimer) window.clearTimeout(retryTimer); if (pollTimer) window.clearTimeout(pollTimer); };
   }, [refreshTick]);
 
+  const selectedPair = useMemo(() => {
+    const live = state?.feed.find(c => c.address === selectedAddress);
+    if (live?.pairAddress) return live.pairAddress;
+    return detail?.coin?.address === selectedAddress ? detail.coin.pairAddress : '';
+  }, [state, selectedAddress, detail]);
+
   useEffect(() => {
     if (!selectedAddress || tab !== 'coins') return;
     let cancelled = false;
     const loadToken = async () => {
       try { const next = await authedJson<TokenDetail>(`/user/token?address=${encodeURIComponent(selectedAddress)}`); if (!cancelled) setDetail(next); } catch { /* feed still works */ }
-      try { const next = await authedJson<CoinFlow>(`/user/coin-flow?address=${encodeURIComponent(selectedAddress)}`); if (!cancelled) setFlow(next); } catch { if (!cancelled) setFlow(null); }
+      try { const next = await authedJson<CoinFlow>(`/user/coin-flow?address=${encodeURIComponent(selectedAddress)}${selectedPair ? `&pair=${encodeURIComponent(selectedPair)}` : ''}`); if (!cancelled) setFlow(next); } catch { if (!cancelled) setFlow(null); }
     };
     let walletsInFlight = false;
     const loadWallets = async () => {
       if (walletsInFlight) return;
       walletsInFlight = true;
-      try { const next = await authedJson<CoinWallets>(`/user/coin-wallets?address=${encodeURIComponent(selectedAddress)}`); if (!cancelled) setWallets(next); }
+      try { const next = await authedJson<CoinWallets>(`/user/coin-wallets?address=${encodeURIComponent(selectedAddress)}${selectedPair ? `&pair=${encodeURIComponent(selectedPair)}` : ''}`); if (!cancelled) setWallets(next); }
       catch { /* keep the last answer */ }
       finally { walletsInFlight = false; }
     };
@@ -267,7 +273,7 @@ export default function App() {
     const timer = window.setInterval(loadToken, 2000);
     const walletTimer = window.setInterval(loadWallets, 3000);
     return () => { cancelled = true; window.clearInterval(timer); window.clearInterval(walletTimer); };
-  }, [selectedAddress, tab]);
+  }, [selectedAddress, selectedPair, tab]);
 
   useEffect(() => {
     if (tab !== 'hype') return;
@@ -295,7 +301,7 @@ export default function App() {
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [openBook]);
 
-  const selectedCoin = useMemo(() => state?.feed.find(c => c.address === selectedAddress) || detail?.coin || state?.feed[0] || null, [state, selectedAddress, detail]);
+  const selectedCoin = useMemo(() => state?.feed.find(c => c.address === selectedAddress) || (detail?.coin?.address === selectedAddress ? detail.coin : null) || state?.feed[0] || null, [state, selectedAddress, detail]);
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return (state?.feed || []).filter(coin => {
