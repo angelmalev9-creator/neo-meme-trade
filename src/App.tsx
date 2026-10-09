@@ -81,12 +81,12 @@ type CoinFlow = {
   gecko: { windows: Record<string, FlowWindow>; volume_usd?: Record<string, number>; price_change_pct?: Record<string, number>; fetched_at?: number; error?: string | null };
   dexscreener: Record<string, TxWindow>; longer_windows_note?: string;
 };
-type WalletTrade = { ts: number | null; direction: 'BUY' | 'SELL'; wallet: string; signature: string; usd_amount: number; token_amount: number; price_usd: number | null; source: 'tape' | 'geckoterminal' };
+type WalletTrade = { ts: number | null; direction: 'BUY' | 'SELL'; wallet: string; signature: string; usd_amount: number; token_amount: number; price_usd: number | null; source: 'tape' | 'rpc_live' | 'geckoterminal'; usd_estimated?: boolean; quote_amount?: number; quote_asset?: string | null };
 type WalletRow = { wallet: string; buys: number; sells: number; bought_usd: number; sold_usd: number; bought_tokens: number; sold_tokens: number; net_usd: number; net_tokens: number; first_seen: number | null; last_seen: number | null; last_signature: string | null };
 type Holder = { token_account: string; wallet: string | null; amount: number; share_pct: number | null; is_pool: boolean; entered_at: number | null; entry_status: string; first_signature?: string | null };
 type CoinWallets = {
   at: number; trades: WalletTrade[]; wallets: WalletRow[]; holders: Holder[];
-  trade_sources: { tape_rows: number; gecko_rows: number; gecko_error: string | null; tape_coverage: string | null };
+  trade_sources: { tape_rows: number; rpc_live_rows: number; rpc_live_error: string | null; rpc_live_fetched_at: number | null; rpc_live_attempted: number; gecko_rows: number; gecko_error: string | null; tape_coverage: string | null };
   holders_meta: { supply: number | null; decimals: number | null; fetched_at: number | null; error: string | null; top_n: number };
   links: { token: string; pool: string | null };
 };
@@ -193,7 +193,7 @@ export default function App() {
   const [flow, setFlow] = useState<CoinFlow | null>(null);
   const [flowWindow, setFlowWindow] = useState('m5');
   const [wallets, setWallets] = useState<CoinWallets | null>(null);
-  const [walletView, setWalletView] = useState<WalletView>('activity');
+  const [walletView, setWalletView] = useState<WalletView>('trades');
   const [hype, setHype] = useState<HypeRadar | null>(null);
   const [hypeError, setHypeError] = useState('');
   const [hypeSources, setHypeSources] = useState(false);
@@ -337,6 +337,13 @@ export default function App() {
   const shownTape = flow?.tape.windows[activeWindow];
   const shownGecko = flow?.gecko.windows[activeWindow];
   const shownDex = flow?.dexscreener?.[activeWindow];
+  const liveWalletFeed = wallets?.trades || [];
+  const liveOnchainMinute = liveWalletFeed.filter(tx => tx.source !== 'geckoterminal' && tx.ts && Date.now() - tx.ts <= 60_000);
+  const liveOnchainBuys = liveOnchainMinute.filter(tx => tx.direction === 'BUY');
+  const liveOnchainSells = liveOnchainMinute.filter(tx => tx.direction === 'SELL');
+  const liveOnchainWallets = new Set(liveOnchainMinute.map(tx => tx.wallet).filter(Boolean)).size;
+  const liveOnchainBuyUsd = liveOnchainBuys.reduce((sum, tx) => sum + (tx.usd_amount || 0), 0);
+  const liveOnchainSellUsd = liveOnchainSells.reduce((sum, tx) => sum + (tx.usd_amount || 0), 0);
 
   const tabs: { id: Tab; label: string; icon: ReactNode; badge?: string }[] = [
     { id: 'engine', label: 'Engine', icon: <Bot className="h-3.5 w-3.5" />, badge: state ? `${state.stats.open_positions}/${state.config.max_positions}` : undefined },
@@ -509,7 +516,7 @@ export default function App() {
               <div className="grid grid-cols-2 gap-px bg-white/[0.05] sm:grid-cols-4">{([['Market cap', fmtMoney(selectedCoin.marketCap || selectedCoin.fdv)], ['Ликвидност', fmtMoney(selectedCoin.liquidityUsd)], ['Обем 1ч', fmtMoney(selectedCoin.volume.h1)], ['1ч', `${signed(selectedCoin.priceChange.h1, 1)}%`]] as [string, string][]).map(([label, value]) => <div key={label} className="bg-[#0b0e11] p-4"><div className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-700">{label}</div><div className="mt-1 text-base font-black text-white">{value}</div></div>)}</div>
             </div>
 
-            <Card kicker="Купувачи · продавачи" title={`$${selectedCoin.symbol} · по периоди`} right={<div className="text-[9px] text-slate-500">{flow?.tape.status === 'online' ? `on-chain · покритие ${flow.tape.coverage ?? '—'}` : 'on-chain tape: свързване…'}</div>}>
+            <Card kicker="Купувачи · продавачи" title={`$${selectedCoin.symbol} · по периоди`} right={<div className="text-[9px] text-slate-500">{wallets?.trade_sources.rpc_live_rows ? `on-chain live · ${wallets.trade_sources.rpc_live_rows} сделки` : flow?.tape.status === 'online' ? `on-chain tape · покритие ${flow.tape.coverage ?? '—'}` : 'on-chain live: свързване…'}</div>}>
               <div className="flex flex-wrap gap-1.5 border-b border-white/[0.07] p-3">
                 {['m1', 'm5', 'm15', 'm30', 'h1', 'h6', 'h24'].map(key => { const enabled = windowChoices.includes(key); return <button key={key} disabled={!enabled} onClick={() => setFlowWindow(key)} title={enabled ? '' : 'Койнът е по-млад от този период'} className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-black ${activeWindow === key ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300' : enabled ? 'border-white/[0.07] bg-white/[0.02] text-slate-400 hover:text-white' : 'border-white/[0.04] text-slate-800'}`}>{WINDOW_LABELS[key]}</button>; })}
                 <span className="ml-auto self-center text-[9px] text-slate-700">{flow?.longer_windows_note}</span>
@@ -520,16 +527,19 @@ export default function App() {
                 <div className="bg-[#0b0e11] p-3"><div className="text-[8px] font-black uppercase text-slate-700">On-chain $ · {WINDOW_LABELS[activeWindow]}</div><div className="mt-1 text-sm font-black"><span className="text-emerald-300">{fmtMoney(shownTape?.buy_usd ?? 0)}</span><span className="text-slate-600"> / </span><span className="text-red-300">{fmtMoney(shownTape?.sell_usd ?? 0)}</span></div><div className="text-[9px] text-slate-600">{shownTape ? (shownTape.complete ? `${shownTape.buys}B / ${shownTape.sells}S проверени` : `частично · tape покрива ${holdLabel(flow?.tape.covered_seconds ?? 0)}`) : 'няма on-chain данни'}</div></div>
                 <div className="bg-[#0b0e11] p-3"><div className="text-[8px] font-black uppercase text-slate-700">Обем · {WINDOW_LABELS[activeWindow]}</div><div className="mt-1 text-sm font-black text-white">{flow?.gecko.volume_usd?.[activeWindow] != null ? fmtMoney(flow.gecko.volume_usd[activeWindow]) : '—'}</div><div className="text-[9px] text-slate-600">{flow?.gecko.price_change_pct?.[activeWindow] != null ? `цена ${signed(flow.gecko.price_change_pct[activeWindow], 1)}%` : flow?.gecko.error ? `GeckoTerminal: ${flow.gecko.error}` : ''}</div></div>
               </div>
-              <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-[9px] text-slate-600"><span>Последните 60с on-chain: <span className="font-black text-emerald-300">{detail?.flow?.buys ?? 0} покупки</span> · <span className="font-black text-red-300">{detail?.flow?.sells ?? 0} продажби</span> · {detail?.flow?.unique_wallets ?? 0} портфейла · {fmtMoney(detail?.flow?.buy_usd ?? 0)} / {fmtMoney(detail?.flow?.sell_usd ?? 0)}</span><span>обновява се на 2с · {flow ? agoLabel(flow.at) : ''}</span></div>
-              <div className="max-h-[260px] overflow-y-auto border-t border-white/[0.06]">
-                {(detail?.live_tape || []).length ? (detail?.live_tape || []).slice(0, 40).map(tx => <a key={tx.signature} href={`https://solscan.io/tx/${tx.signature}`} target="_blank" rel="noreferrer" className="grid grid-cols-[62px_48px_minmax(70px,1fr)_92px_86px] items-center gap-2 border-b border-white/[0.05] px-4 py-2 text-[9px] hover:bg-white/[0.025]"><span className="font-mono text-slate-600">{tapeTimeLabel(tx.ts)}</span><span className={`font-black ${tx.direction === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>{tx.direction}</span><span className="truncate font-black text-white">{fmtMoney(tx.usd_amount)}</span><span className="truncate font-mono text-slate-500">{shortAddress(tx.wallet)}</span><span className={`truncate text-right font-black ${tx.note.includes('WHALE') ? 'text-amber-300' : tx.direction === 'BUY' ? 'text-emerald-300/70' : 'text-red-300/70'}`}>{tx.note}</span></a>) : <div className="p-6 text-center text-[10px] leading-5 text-slate-600">{flow?.tape.coverage ? 'Още няма on-chain сделка за този pool в tape-а.' : 'On-chain tape-ът не покрива този pool; показват се данните от GeckoTerminal/DexScreener.'}</div>}
+              <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-[9px] text-slate-600"><span>Последните 60с директно on-chain: <span className="font-black text-emerald-300">{liveOnchainBuys.length} покупки</span> · <span className="font-black text-red-300">{liveOnchainSells.length} продажби</span> · {liveOnchainWallets} портфейла · <span className="text-emerald-300/70">{fmtMoney(liveOnchainBuyUsd)}</span> / <span className="text-red-300/70">{fmtMoney(liveOnchainSellUsd)}</span></span><span>обновява се на 3с · {wallets ? agoLabel(wallets.at) : ''}</span></div>
+              <div className="max-h-[300px] overflow-y-auto border-t border-white/[0.06]">
+                {liveWalletFeed.length ? liveWalletFeed.slice(0, 40).map(tx => <div key={tx.signature || `${tx.ts}-${tx.wallet}`} className="border-b border-white/[0.05] px-4 py-2 text-[9px] hover:bg-white/[0.025]">
+                  <div className="grid grid-cols-[54px_44px_minmax(0,1fr)] items-center gap-2"><span className="font-mono text-slate-600">{tx.ts ? tapeTimeLabel(tx.ts) : '—'}</span><span className={`font-black ${tx.direction === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>{tx.direction}</span><span className="truncate text-right font-black text-white">{tx.usd_amount > 0 ? `${tx.usd_estimated ? '≈' : ''}${fmtMoney(tx.usd_amount)}` : fmtTokens(tx.token_amount)}</span></div>
+                  <div className="mt-1 flex min-w-0 items-center justify-between gap-2"><a href={solscanAccount(tx.wallet)} target="_blank" rel="noreferrer" className="min-w-0 truncate font-mono text-slate-300 hover:text-emerald-200">{tx.wallet ? shortAddress(tx.wallet) : '—'} ↗</a><span className="shrink-0 text-slate-600">{tx.token_amount ? fmtTokens(tx.token_amount) : ''} · {tx.source === 'rpc_live' ? 'RPC live' : tx.source === 'tape' ? 'tape' : 'Gecko'}</span>{tx.signature ? <a href={solscanTx(tx.signature)} target="_blank" rel="noreferrer" className="shrink-0 text-slate-500 hover:text-white">tx ↗</a> : null}</div>
+                </div>) : <div className="p-6 text-center text-[10px] leading-5 text-slate-600">{wallets?.trade_sources.rpc_live_error ? `Direct Solana RPC: ${wallets.trade_sources.rpc_live_error}` : 'Чакам първата on-chain сделка за този pool…'}</div>}
               </div>
             </Card>
 
             <Card kicker="Портфейли" title={`$${selectedCoin.symbol} · кой купува, кой продава, кой държи`} right={<a href={wallets?.links.token ?? `https://solscan.io/token/${selectedCoin.address}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1.5 text-[9px] font-black text-slate-400 hover:text-white">SOLSCAN <ExternalLink className="h-3 w-3" /></a>}>
               <div className="flex flex-wrap items-center gap-1.5 border-b border-white/[0.07] p-3">
-                {([['activity', 'По портфейл'], ['trades', 'Сделки на живо'], ['holders', 'Холдъри (топ 20)']] as [WalletView, string][]).map(([id, label]) => <button key={id} onClick={() => setWalletView(id)} className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-black ${walletView === id ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300' : 'border-white/[0.07] bg-white/[0.02] text-slate-400 hover:text-white'}`}>{label}</button>)}
-                <span className="ml-auto text-[9px] text-slate-600">{wallets ? `${wallets.trade_sources.tape_rows} on-chain + ${wallets.trade_sources.gecko_rows} GeckoTerminal сделки · ${agoLabel(wallets.at)}` : 'зареждане…'}{wallets?.trade_sources.gecko_error ? ` · Gecko: ${wallets.trade_sources.gecko_error}` : ''}</span>
+                {([['trades', 'Live портфейли'], ['activity', 'По портфейл'], ['holders', 'Холдъри (топ 20)']] as [WalletView, string][]).map(([id, label]) => <button key={id} onClick={() => setWalletView(id)} className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-black ${walletView === id ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300' : 'border-white/[0.07] bg-white/[0.02] text-slate-400 hover:text-white'}`}>{label}</button>)}
+                <span className="ml-auto text-[9px] text-slate-600">{wallets ? `${wallets.trade_sources.rpc_live_rows} direct + ${wallets.trade_sources.tape_rows} tape + ${wallets.trade_sources.gecko_rows} Gecko · ${agoLabel(wallets.at)}` : 'зареждане…'}{wallets?.trade_sources.rpc_live_error ? ` · RPC: ${wallets.trade_sources.rpc_live_error}` : ''}</span>
               </div>
               {!wallets && <div className="p-6 text-center text-[10px] text-slate-600">Събирам сделките и холдърите…</div>}
               {wallets && walletView === 'activity' && <div className="max-h-[420px] overflow-y-auto"><table className="w-full min-w-[820px] text-left"><thead><tr className="border-b border-white/[0.06] text-[8px] font-black uppercase tracking-[0.14em] text-slate-700"><th className="px-4 py-2">Портфейл</th><th className="px-3 py-2">Купил</th><th className="px-3 py-2">Продал</th><th className="px-3 py-2">Нето</th><th className="px-3 py-2">Токени нето</th><th className="px-3 py-2">Първа сделка</th><th className="px-3 py-2">Последна</th></tr></thead><tbody>
@@ -544,14 +554,10 @@ export default function App() {
                   <td className="px-3 py-2 text-slate-400">{row.last_signature ? <a href={solscanTx(row.last_signature)} target="_blank" rel="noreferrer" className="hover:text-white">{row.last_seen ? tapeTimeLabel(row.last_seen) : 'tx'} ↗</a> : row.last_seen ? tapeTimeLabel(row.last_seen) : '—'}</td>
                 </tr>)}</tbody></table></div>}
               {wallets && walletView === 'trades' && <div className="max-h-[420px] overflow-y-auto">
-                {wallets.trades.length === 0 && <div className="p-6 text-center text-[10px] text-slate-600">Още няма сделки за този pool.</div>}
-                {wallets.trades.map(tx => <div key={tx.signature || `${tx.ts}-${tx.wallet}`} className="grid grid-cols-[70px_44px_minmax(70px,1fr)_minmax(90px,1fr)_120px_60px] items-center gap-2 border-b border-white/[0.05] px-4 py-2 text-[10px] hover:bg-white/[0.025]">
-                  <span className="font-mono text-slate-500">{tx.ts ? tapeTimeLabel(tx.ts) : '—'}</span>
-                  <span className={`font-black ${tx.direction === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>{tx.direction}</span>
-                  <span className="truncate font-black text-white">{fmtMoney(tx.usd_amount)}<span className="ml-1 font-normal text-slate-600">{tx.token_amount ? fmtTokens(tx.token_amount) : ''}</span></span>
-                  <a href={solscanAccount(tx.wallet)} target="_blank" rel="noreferrer" className="truncate font-mono text-slate-300 hover:text-emerald-200">{tx.wallet ? shortAddress(tx.wallet) : '—'}</a>
-                  <span className={`text-[9px] ${tx.source === 'tape' ? 'text-emerald-300/70' : 'text-slate-600'}`}>{tx.source === 'tape' ? 'on-chain проверена' : 'GeckoTerminal'}</span>
-                  {tx.signature ? <a href={solscanTx(tx.signature)} target="_blank" rel="noreferrer" className="text-right text-slate-500 hover:text-white">tx ↗</a> : <span />}
+                {wallets.trades.length === 0 && <div className="p-6 text-center text-[10px] text-slate-600">Чакам първата on-chain сделка за този pool.</div>}
+                {wallets.trades.map(tx => <div key={tx.signature || `${tx.ts}-${tx.wallet}`} className="border-b border-white/[0.05] px-4 py-2.5 text-[10px] hover:bg-white/[0.025]">
+                  <div className="grid grid-cols-[58px_46px_minmax(0,1fr)] items-center gap-2"><span className="font-mono text-slate-500">{tx.ts ? tapeTimeLabel(tx.ts) : '—'}</span><span className={`font-black ${tx.direction === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>{tx.direction}</span><span className="truncate text-right font-black text-white">{tx.usd_amount > 0 ? `${tx.usd_estimated ? '≈' : ''}${fmtMoney(tx.usd_amount)}` : fmtTokens(tx.token_amount)}</span></div>
+                  <div className="mt-1 flex min-w-0 items-center justify-between gap-2"><a href={solscanAccount(tx.wallet)} target="_blank" rel="noreferrer" className="min-w-0 truncate font-mono text-slate-300 hover:text-emerald-200">{tx.wallet ? shortAddress(tx.wallet) : '—'} ↗</a><span className={`shrink-0 text-[9px] ${tx.source !== 'geckoterminal' ? 'text-emerald-300/70' : 'text-slate-600'}`}>{tx.token_amount ? `${fmtTokens(tx.token_amount)} · ` : ''}{tx.source === 'rpc_live' ? 'on-chain direct' : tx.source === 'tape' ? 'on-chain tape' : 'GeckoTerminal'}</span>{tx.signature ? <a href={solscanTx(tx.signature)} target="_blank" rel="noreferrer" className="shrink-0 text-slate-500 hover:text-white">tx ↗</a> : null}</div>
                 </div>)}
               </div>}
               {wallets && walletView === 'holders' && <div className="max-h-[420px] overflow-y-auto">
