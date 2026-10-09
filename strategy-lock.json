@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-08",
   "source_commit": "ROLLING_DISCOVERY_20261008",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "ebc89f4f7a30ee562e0a7097667b81671bc1fc79dc53fdc0343a76c2f31b9284",
+  "sha256": "39e26c961938ff56eb53238f9412d813997d7610a1168b09a17c732aee4c752f",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE_LEARNING",
   "rules": {
     "max_positions": 8,
@@ -138,7 +138,7 @@
   "hash_basis": "UTF8_LF",
   "exit_policy_version": "ADAPTIVE_CONTEXT_HOLD_NET_V1",
   "hash_change_reasons": {
-    "backend/market_monitor.py": "2026-10-08: explicit strategy profile selection; ORDER_FLOW_ADAPTIVE (2026-10-04) is the primary profile with module-owned configuration, BALANCED_V4 entry filter, 60s flow window, fixed $200 size, $100 daily gate, 20-minute same-token cooldown, one position and adaptive conviction exits. EARLY_SCOUT_V10 behavior is unchanged when selected. Open positions keep the exit policy recorded at entry. ORDER_FLOW_ADAPTIVE_LEARNING becomes the default profile: eight positions, tiered entries, learned sizing, outcome-aware cooldown; an unsellable position no longer freezes entries under this profile; every position keeps the stop recorded at entry. Adds the read-only /lab-book endpoint (trade list of one Strategy Lab book); no trading logic changed. Adds the read-only /coin-flow endpoint (buyers/sellers windows for the dashboard); no trading logic changed. Adds the read-only /coin-wallets endpoint (per-wallet trades and top holders via GeckoTerminal + Solana RPC, dashboard only). Adds the read-only /hype-radar endpoint (themes file + feed matches, dashboard only).",
+    "backend/market_monitor.py": "2026-10-08: explicit strategy profile selection; ORDER_FLOW_ADAPTIVE (2026-10-04) is the primary profile with module-owned configuration, BALANCED_V4 entry filter, 60s flow window, fixed $200 size, $100 daily gate, 20-minute same-token cooldown, one position and adaptive conviction exits. EARLY_SCOUT_V10 behavior is unchanged when selected. Open positions keep the exit policy recorded at entry. ORDER_FLOW_ADAPTIVE_LEARNING becomes the default profile: eight positions, tiered entries, learned sizing, outcome-aware cooldown; an unsellable position no longer freezes entries under this profile; every position keeps the stop recorded at entry. Adds the read-only /lab-book endpoint (trade list of one Strategy Lab book); no trading logic changed. Adds the read-only /coin-flow endpoint (buyers/sellers windows for the dashboard); no trading logic changed. Adds the read-only /coin-wallets endpoint (per-wallet trades and top holders via GeckoTerminal + Solana RPC, dashboard only). Adds the read-only /hype-radar endpoint (themes file + feed matches, dashboard only). 2026-10-09: /coin-wallets now adds a read-only on-demand direct Solana RPC wallet feed for the selected pool; main engine entry/exit/sizing logic is unchanged.",
     "backend/engine_entry_policy.py": "Raised validated quote throughput to 12 candidates per scan and versioned V10 high-frequency scout policy. Unchanged on 2026-10-08; used only by the EARLY_SCOUT_V10 profile. 2026-10-08: adds the learned_avoid rejection label only.",
     "backend/gold_order_flow.py": "Added MICRO_SCOUT before ULTRA_EARLY with lower early thresholds while leaving safety/price/execution vetoes outside and mandatory. Unchanged on 2026-10-08; used only by the EARLY_SCOUT_V10 profile.",
     "backend/engine_exit_policy.py": "Versioned net fixed policy and original adaptive candidate, no chart stop",

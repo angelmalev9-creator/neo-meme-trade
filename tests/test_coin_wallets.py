@@ -19,7 +19,7 @@ def gecko_trade(ts, kind, wallet, usd, tx, tokens=1000):
 
 class Trades(unittest.TestCase):
     def setUp(self):
-        cw._TRADES.clear(); cw._HOLDERS.clear(); cw._ENTRY.clear()
+        cw._TRADES.clear(); cw._DIRECT.clear(); cw._HOLDERS.clear(); cw._ENTRY.clear()
 
     def test_parse_and_merge_with_tape_winning_on_the_same_signature(self):
         payload = {'data': [gecko_trade('2027-01-15T10:00:00Z', 'buy', W1, 120, 'sig1', 2000),
@@ -70,9 +70,55 @@ def cw_b58decode(value):
     return out
 
 
+class DirectWalletFeed(unittest.TestCase):
+    def setUp(self):
+        cw._TRADES.clear(); cw._DIRECT.clear(); cw._HOLDERS.clear(); cw._ENTRY.clear()
+
+    def test_direct_pool_scanner_emits_verified_wallet_rows_and_caches(self):
+        calls = []
+        def batch_rpc(batch):
+            calls.append(batch)
+            if batch[0][0] == 'getSignaturesForAddress':
+                return [{'result': [
+                    {'signature': 'sig-buy', 'blockTime': 1_800_000_000, 'err': None},
+                    {'signature': 'sig-bad', 'blockTime': 1_800_000_001, 'err': None},
+                ]}]
+            return [{'result': {'id': method[1][0]}} for method in batch]
+
+        def classifier(tx, metadata, **kwargs):
+            signature = tx['id']
+            if signature == 'sig-bad':
+                return 'unclassified', [{'ts': NOW, 'direction': 'BUY', 'wallet': W2, 'address': MINT, 'pairAddress': PAIR,
+                                         'token_amount': 10, 'usd_amount': 1, 'confirmed_swap': True,
+                                         'quality_flags': ['SWAP_ACTOR_NOT_TRANSACTION_SIGNER']}], 'bad_actor'
+            return 'unclassified', [{'ts': NOW, 'direction': 'BUY', 'wallet': W1, 'address': MINT, 'pairAddress': PAIR,
+                                     'token_amount': 2000, 'usd_amount': 12.5, 'quote_amount': .1, 'quote_asset': 'SOL',
+                                     'confirmed_swap': True, 'quality_flags': ['QUOTE_ASSET_USD_REFERENCE_ESTIMATE']}], 'estimated_usd'
+
+        first = cw.direct_pool_trades(PAIR, MINT, coin={'symbol': 'TEST', 'priceUsd': .01, 'priceNative': .0001},
+                                      batch_rpc=batch_rpc, classifier=classifier, now=NOW)
+        self.assertEqual(len(first['rows']), 1)
+        self.assertEqual((first['rows'][0]['wallet'], first['rows'][0]['source'], first['rows'][0]['usd_estimated']),
+                         (W1, 'rpc_live', True))
+        self.assertEqual(first['attempted'], 2)
+        # A second dashboard poll inside the 2.5s cache window performs no RPC.
+        second = cw.direct_pool_trades(PAIR, MINT, coin={}, batch_rpc=batch_rpc, classifier=classifier, now=NOW + 1000)
+        self.assertIs(second, first)
+        self.assertEqual(len(calls), 2)
+
+    def test_rpc_live_beats_gecko_but_verified_tape_beats_rpc_live(self):
+        gecko = [{'ts': NOW, 'direction': 'BUY', 'wallet': W1, 'signature': 'same', 'usd_amount': 10,
+                  'token_amount': 100, 'price_usd': .1, 'source': 'geckoterminal'}]
+        direct = [{**gecko[0], 'usd_amount': 11, 'source': 'rpc_live'}]
+        tape = [{**gecko[0], 'usd_amount': 12, 'source': 'tape'}]
+        self.assertEqual(cw.merge_trades(gecko, direct)[0]['usd_amount'], 11)
+        merged = cw.merge_trades(gecko, direct, tape)
+        self.assertEqual((merged[0]['source'], merged[0]['usd_amount']), ('tape', 12))
+
+
 class Holders(unittest.TestCase):
     def setUp(self):
-        cw._TRADES.clear(); cw._HOLDERS.clear(); cw._ENTRY.clear()
+        cw._TRADES.clear(); cw._DIRECT.clear(); cw._HOLDERS.clear(); cw._ENTRY.clear()
 
     def test_b58_roundtrip(self):
         for wallet in (W1, PAIR, cw.b58encode(bytes(32))):
@@ -112,10 +158,12 @@ class Holders(unittest.TestCase):
     def test_build_shape_and_rpc_failure_is_reported_not_raised(self):
         def rpc(method, params):
             raise RuntimeError('rpc down')
-        out = cw.build(MINT, PAIR, tape={'events': []}, fetch=lambda url: {'data': []}, rpc=rpc, now=NOW)
+        out = cw.build(MINT, PAIR, tape={'events': []}, fetch=lambda url: {'data': []}, rpc=rpc, direct={'rows': [{'ts': NOW, 'direction': 'BUY', 'wallet': W1, 'signature': 'live1', 'usd_amount': 7, 'token_amount': 70, 'price_usd': .1, 'source': 'rpc_live'}], 'error': None, 'fetched_at': NOW, 'attempted': 1}, now=NOW)
         self.assertEqual(out['holders'], [])
         self.assertIn('rpc down', out['holders_meta']['error'])
         self.assertEqual(out['trade_sources']['gecko_rows'], 0)
+        self.assertEqual(out['trade_sources']['rpc_live_rows'], 1)
+        self.assertEqual(out['trades'][0]['wallet'], W1)
         self.assertEqual(out['links']['token'], f'https://solscan.io/token/{MINT}')
 
 

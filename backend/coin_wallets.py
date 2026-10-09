@@ -3,9 +3,10 @@
 
 Read-only, no keys, nothing here feeds a trading decision:
 
-* recent trades per wallet: GeckoTerminal's free pool trades endpoint (last
-  trades with the signer wallet, side, USD and time) merged with the verified
-  on-chain tape for pools the tape covers;
+* recent trades per wallet: a direct, cached Solana RPC scan of the selected
+  pool merged with the verified on-chain tape and GeckoTerminal fallback. The
+  direct scan reuses the strict PumpSwap parser, so wallet/direction are not
+  guessed from token-balance deltas;
 * top holders: Solana RPC ``getTokenLargestAccounts`` (top 20 token accounts),
   owners decoded from the token-account layout, share of ``getTokenSupply``,
   and an "entered at" estimate from the oldest signature of the token account
@@ -26,6 +27,10 @@ TRADES_TTL_MS = 10_000
 HOLDERS_TTL_MS = 20_000
 ENTRY_TTL_MS = 600_000
 ERROR_TTL_MS = 30_000
+DIRECT_TTL_MS = 2_500
+DIRECT_ERROR_TTL_MS = 4_000
+DIRECT_SIGNATURE_LIMIT = 60
+DIRECT_TX_BUDGET = 12
 MAX_WALLET_ROWS = 60
 MAX_TRADE_ROWS = 120
 SIGNATURE_PAGE = 1000
@@ -34,6 +39,7 @@ _B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 # vaults are owned by the pool account itself, which the caller passes in.
 KNOWN_POOL_AUTHORITIES = {'5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1'}
 _TRADES: dict[str, dict[str, Any]] = {}
+_DIRECT: dict[str, dict[str, Any]] = {}
 _HOLDERS: dict[str, dict[str, Any]] = {}
 _ENTRY: dict[str, dict[str, Any]] = {}
 _LOCK = threading.Lock()
@@ -116,6 +122,107 @@ def gecko_trades(pair: str, mint: str, fetch: Callable[[str], dict[str, Any]], *
     return row
 
 
+_DASHBOARD_VALUATION_FLAGS = {'QUOTE_ASSET_USD_REFERENCE_ESTIMATE', 'QUOTE_USD_UNKNOWN'}
+
+
+def direct_pool_trades(pair: str, mint: str, *, coin: dict[str, Any] | None = None,
+                       batch_rpc: Callable[[list[tuple[str, list[Any]]]], list[dict[str, Any]]] | None = None,
+                       classifier: Callable[..., tuple[str, list[dict[str, Any]], str | None]] | None = None,
+                       now: int | None = None) -> dict[str, Any]:
+    """Read the selected pool directly from Solana RPC for the dashboard.
+
+    This is deliberately separate from the global tape recorder.  The tape is
+    bounded to the busiest pools for engine evidence; the dashboard, however,
+    must be able to show wallet activity for whichever pool the user opens.
+    Only events produced by the same strict PumpSwap parser are accepted.  A
+    scanner-derived SOL/USD conversion may be shown as an estimate, but actor
+    or instruction-integrity flags are never tolerated.
+    """
+    now = now or now_ms()
+    if not pair or not mint:
+        return {'fetched_at': now, 'error': 'pair_or_mint_missing', 'rows': [], 'attempted': 0}
+    with _LOCK:
+        cached = _DIRECT.get(pair)
+    ttl = DIRECT_ERROR_TTL_MS if cached and cached.get('error') else DIRECT_TTL_MS
+    if cached and 0 <= now - int(cached.get('fetched_at') or 0) <= ttl:
+        return cached
+
+    if batch_rpc is None or classifier is None:
+        import live_tape as verified_tape
+        batch_rpc = batch_rpc or verified_tape.rpc_batch
+        classifier = classifier or verified_tape.classify_transaction
+
+    previous_rows = list((cached or {}).get('rows') or [])
+    seen = set((cached or {}).get('seen') or [])
+    try:
+        answers = batch_rpc([('getSignaturesForAddress', [pair, {'limit': DIRECT_SIGNATURE_LIMIT, 'commitment': 'confirmed'}])])
+        answer = answers[0] if answers else {'error': {'code': 'NO_RPC_RESPONSE'}}
+        if answer.get('error') or not isinstance(answer.get('result'), list):
+            raise RuntimeError(str(answer.get('error') or 'signature rpc unavailable')[:160])
+        signatures = [row for row in answer['result'] if isinstance(row, dict) and isinstance(row.get('signature'), str)]
+        candidates = [row for row in signatures if not row.get('err') and row['signature'] not in seen][:DIRECT_TX_BUDGET]
+        calls = [('getTransaction', [row['signature'], {'encoding': 'jsonParsed', 'commitment': 'confirmed',
+                                                        'maxSupportedTransactionVersion': 0}]) for row in candidates]
+        bodies = batch_rpc(calls) if calls else []
+        coin = coin or {}
+        price_usd, price_native = _num(coin.get('priceUsd')), _num(coin.get('priceNative'))
+        quote_reference = price_usd / price_native if price_usd > 0 and price_native > 0 else None
+        metadata = {'pair': pair, 'address': mint, 'symbol': coin.get('symbol') or '?', 'dexId': coin.get('dexId'),
+                    'provider': 'dashboard-solana-rpc-live', 'quote_usd_reference': quote_reference,
+                    'quote_reference_at': now if quote_reference else None,
+                    'quote_reference_source': 'SCANNER_QUOTE_ASSET_REFERENCE_ESTIMATE' if quote_reference else None}
+        fresh: list[dict[str, Any]] = []
+        for row, body in zip(candidates, bodies):
+            tx = body.get('result') if isinstance(body, dict) and not body.get('error') else None
+            if tx is None:
+                # Very fresh signatures can briefly have a null body. Do not
+                # mark them seen; the next 3s dashboard poll retries them.
+                continue
+            signature = row['signature']
+            seen.add(signature)
+            try:
+                _classification, events, _reason = classifier(tx, metadata, observed_at=now, ingested_at=now)
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError):
+                continue
+            for event in events:
+                if not isinstance(event, dict) or event.get('address') != mint or event.get('pairAddress') != pair:
+                    continue
+                direction, wallet = str(event.get('direction') or '').upper(), str(event.get('wallet') or '')
+                flags = set(event.get('quality_flags') or [])
+                if direction not in ('BUY', 'SELL') or not wallet or not event.get('confirmed_swap') or (flags - _DASHBOARD_VALUATION_FLAGS):
+                    continue
+                token_amount = _num(event.get('token_amount'))
+                if token_amount <= 0:
+                    continue
+                usd = _num(event.get('usd_amount'))
+                fresh.append({'ts': int(_num(event.get('ts')) or _num(row.get('blockTime')) * 1000),
+                              'direction': direction, 'wallet': wallet, 'signature': signature,
+                              'usd_amount': round(usd, 2), 'token_amount': token_amount,
+                              'price_usd': usd / token_amount if usd > 0 else None,
+                              'quote_amount': _num(event.get('quote_amount')),
+                              'quote_asset': event.get('quote_asset'), 'usd_estimated': bool(flags),
+                              'source': 'rpc_live'})
+        rows = merge_trades(fresh, previous_rows)[:MAX_TRADE_ROWS]
+        # Keep bounded signature memory. Current RPC head comes first, then any
+        # still-useful older values so a pool with no new trades stays cheap.
+        ordered_seen = [row['signature'] for row in signatures if row['signature'] in seen]
+        for signature in (cached or {}).get('seen') or []:
+            if signature not in ordered_seen:
+                ordered_seen.append(signature)
+        result = {'fetched_at': now, 'error': None, 'rows': rows, 'seen': ordered_seen[:300],
+                  'attempted': len(candidates), 'signature_rows': len(signatures)}
+    except Exception as exc:
+        result = {'fetched_at': now, 'error': str(exc)[:160], 'rows': previous_rows,
+                  'seen': list(seen)[:300], 'attempted': 0, 'signature_rows': 0}
+    with _LOCK:
+        _DIRECT[pair] = result
+        if len(_DIRECT) > 100:
+            stale = sorted(_DIRECT, key=lambda key: int(_DIRECT[key].get('fetched_at') or 0))[:25]
+            for key in stale:
+                _DIRECT.pop(key, None)
+    return result
+
+
 def tape_rows(events: list[dict[str, Any]], address: str, pair: str, *, now: int) -> list[dict[str, Any]]:
     out = []
     for e in events:
@@ -131,14 +238,15 @@ def tape_rows(events: list[dict[str, Any]], address: str, pair: str, *, now: int
 
 
 def merge_trades(*sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Union by transaction signature; the verified tape row wins on a clash."""
+    """Union by transaction signature; stronger on-chain evidence wins."""
+    priority = {'geckoterminal': 0, 'rpc_live': 1, 'tape': 2}
     seen: dict[str, dict[str, Any]] = {}
     order: list[dict[str, Any]] = []
     for rows in sources:
         for row in rows:
             key = row.get('signature') or f"{row.get('ts')}:{row.get('wallet')}:{row.get('usd_amount')}"
             if key in seen:
-                if row['source'] == 'tape' and seen[key]['source'] != 'tape':
+                if priority.get(str(row.get('source')), -1) > priority.get(str(seen[key].get('source')), -1):
                     seen[key].update(row)
                 continue
             seen[key] = dict(row)
@@ -278,18 +386,22 @@ def holders(mint: str, rpc: Callable[[str, list[Any]], Any], *, pool_accounts: s
 # ------------------------------------------------------------------ build --
 def build(address: str, pair: str, *, tape: dict[str, Any], fetch: Callable[[str], dict[str, Any]],
           rpc: Callable[[str, list[Any]], Any], pool_accounts: set[str] | None = None,
-          now: int | None = None) -> dict[str, Any]:
+          direct: dict[str, Any] | None = None, now: int | None = None) -> dict[str, Any]:
     now = now or now_ms()
     gecko = gecko_trades(pair, address, fetch, now=now) if pair else {'rows': [], 'error': 'no_pair', 'fetched_at': now}
     tape_list = tape_rows(tape.get('events') or [], address, pair, now=now)
-    trades = merge_trades(tape_list, gecko['rows'])
+    direct = direct or {'rows': [], 'error': None, 'fetched_at': now, 'attempted': 0}
+    direct_rows = list(direct.get('rows') or [])
+    trades = merge_trades(gecko['rows'], direct_rows, tape_list)
     pools = set(pool_accounts or set()) | KNOWN_POOL_AUTHORITIES | ({pair} if pair else set())
     holder_view = holders(address, rpc, pool_accounts=pools, now=now, max_entry_lookups=8)
     return {
         'address': address, 'pairAddress': pair, 'at': now,
         'trades': trades[:MAX_TRADE_ROWS],
         'wallets': wallet_activity(trades),
-        'trade_sources': {'tape_rows': len(tape_list), 'gecko_rows': len(gecko['rows']), 'gecko_error': gecko.get('error'),
+        'trade_sources': {'tape_rows': len(tape_list), 'rpc_live_rows': len(direct_rows), 'rpc_live_error': direct.get('error'),
+                          'rpc_live_fetched_at': direct.get('fetched_at'), 'rpc_live_attempted': direct.get('attempted', 0),
+                          'gecko_rows': len(gecko['rows']), 'gecko_error': gecko.get('error'),
                           'gecko_fetched_at': gecko.get('fetched_at'), 'tape_coverage': ((tape.get('pair_coverage') or {}).get(pair) or {}).get('status')},
         'holders': holder_view.get('holders') or [],
         'holders_meta': {'supply': holder_view.get('supply'), 'decimals': holder_view.get('decimals'),

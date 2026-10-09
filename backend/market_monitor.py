@@ -434,16 +434,43 @@ def _dashboard_rpc(method: str, params: list[Any]) -> Any:
     raise RuntimeError(str(last_error or 'RPC unavailable'))
 
 
+def _dashboard_rpc_batch(calls: list[tuple[str, list[Any]]]) -> list[dict[str, Any]]:
+    """Small read-only JSON-RPC batch with fast fallback for the visible wallet feed."""
+    if not calls:
+        return []
+    payload = [{'jsonrpc': '2.0', 'id': index, 'method': method, 'params': params}
+               for index, (method, params) in enumerate(calls, 1)]
+    last_error: Exception | None = None
+    # SolanaTracker public RPC handles JSON-RPC batches well; the canonical
+    # public endpoint remains a fallback. Keep timeouts below the 3s UI cadence.
+    for url in dict.fromkeys([pumpswap_stop.RPC_FALLBACK_URL, pumpswap_stop.RPC_URL]):
+        if not url:
+            continue
+        try:
+            response = SESSION.post(url, json=payload, timeout=(0.8, 3.5))
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, list):
+                raise RuntimeError('RPC batch response is not a list')
+            by_id = {row.get('id'): row for row in data if isinstance(row, dict) and type(row.get('id')) is int}
+            return [by_id.get(index, {'id': index, 'error': {'code': 'MISSING_RPC_ID'}})
+                    for index in range(1, len(calls) + 1)]
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            last_error = exc
+    raise RuntimeError(str(last_error or 'RPC batch unavailable'))
+
+
 def read_coin_wallets(address: str, pair: str) -> dict[str, Any]:
     """Dashboard-only wallet activity and top holders for one token."""
     address, pair = str(address or '')[:64], str(pair or '')[:64]
     if not address:
         return {'error': 'address_required'}
+    with STATE.lock:
+        coin = next((dict(c) for c in STATE.feed if c.get('address') == address), None)
     if not pair:
-        with STATE.lock:
-            coin = next((c for c in STATE.feed if c.get('address') == address), None)
-            pair = str((coin or {}).get('pairAddress') or '')
-    return coin_wallets.build(address, pair, tape=read_live_tape(), fetch=_gecko_json, rpc=_dashboard_rpc)
+        pair = str((coin or {}).get('pairAddress') or '')
+    direct = coin_wallets.direct_pool_trades(pair, address, coin=coin, batch_rpc=_dashboard_rpc_batch) if pair else None
+    return coin_wallets.build(address, pair, tape=read_live_tape(), fetch=_gecko_json, rpc=_dashboard_rpc, direct=direct)
 
 
 HYPE_RADAR_PATH = Path(os.getenv('NEO_HYPE_STATE_PATH', '/var/lib/neo-market/hype_radar.json'))
