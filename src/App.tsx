@@ -96,7 +96,7 @@ type WalletRow = { wallet: string; buys: number; sells: number; bought_usd: numb
 type Holder = { token_account: string; wallet: string | null; amount: number; share_pct: number | null; is_pool: boolean; entered_at: number | null; entry_status: string; first_signature?: string | null };
 type OnchainWindow = { buys: number; sells: number; buyers: number; sellers: number; buy_usd: number; sell_usd: number; observed_seconds: number; complete: boolean; trades: number };
 type CoinWallets = {
-  at: number; trades: WalletTrade[]; wallets: WalletRow[]; holders: Holder[]; onchain_windows?: Record<string, OnchainWindow>;
+  address: string; pairAddress: string; at: number; trades: WalletTrade[]; wallets: WalletRow[]; holders: Holder[]; onchain_windows?: Record<string, OnchainWindow>;
   trade_sources: { tape_rows: number; rpc_live_rows: number; rpc_live_error: string | null; rpc_live_fetched_at: number | null; rpc_live_attempted: number; rpc_live_page_drained?: boolean | null; rpc_live_coverage_since_ms?: number | null; gecko_rows: number; gecko_error: string | null; tape_coverage: string | null };
   holders_meta: { supply: number | null; decimals: number | null; fetched_at: number | null; error: string | null; top_n: number };
   links: { token: string; pool: string | null };
@@ -295,8 +295,10 @@ export default function App() {
   useEffect(() => {
     if (!selectedAddress || tab !== 'coins') return;
     let cancelled = false;
-    const loadToken = async () => {
+    const loadDetail = async () => {
       try { const next = await authedJson<TokenDetail>(`/user/token?address=${encodeURIComponent(selectedAddress)}`); if (!cancelled) setDetail(next); } catch { /* feed still works */ }
+    };
+    const loadFlow = async () => {
       try { const next = await authedJson<CoinFlow>(`/user/coin-flow?address=${encodeURIComponent(selectedAddress)}${selectedPair ? `&pair=${encodeURIComponent(selectedPair)}` : ''}`); if (!cancelled) setFlow(next); } catch { if (!cancelled) setFlow(null); }
     };
     let walletsInFlight = false;
@@ -307,12 +309,14 @@ export default function App() {
       catch { /* keep the last answer */ }
       finally { walletsInFlight = false; }
     };
-    setWallets(null);
-    void loadToken();
+    setWallets(current => current?.address === selectedAddress ? current : null);
+    void loadDetail();
+    void loadFlow();
     void loadWallets();
-    const timer = window.setInterval(loadToken, 2000);
-    const walletTimer = window.setInterval(loadWallets, 3000);
-    return () => { cancelled = true; window.clearInterval(timer); window.clearInterval(walletTimer); };
+    const detailTimer = window.setInterval(loadDetail, 2000);
+    const flowTimer = window.setInterval(loadFlow, 1000);
+    const walletTimer = window.setInterval(loadWallets, 1500);
+    return () => { cancelled = true; window.clearInterval(detailTimer); window.clearInterval(flowTimer); window.clearInterval(walletTimer); };
   }, [selectedAddress, selectedPair, tab]);
 
   useEffect(() => {

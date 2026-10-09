@@ -686,15 +686,32 @@ def _dashboard_rpc_batch(calls: list[tuple[str, list[Any]]]) -> list[dict[str, A
 
 
 def read_coin_wallets(address: str, pair: str) -> dict[str, Any]:
-    """Dashboard-only wallet activity and top holders for one token."""
+    """Dashboard-only wallet activity and top holders for one token.
+
+    The three independent remote reads run concurrently. Holder entry-history
+    enrichment is intentionally outside the first paint: top holders, owners,
+    balances and shares arrive first instead of waiting on up to eight extra RPC
+    round trips. This endpoint is display-only and does not feed trading logic.
+    """
     address, pair = str(address or '')[:64], str(pair or '')[:64]
     if not address:
         return {'error': 'address_required'}
     coin = _dashboard_coin(address)
     if not pair:
         pair = str((coin or {}).get('pairAddress') or '')
-    direct = coin_wallets.direct_pool_trades(pair, address, coin=coin, batch_rpc=_dashboard_rpc_batch) if pair else None
-    return coin_wallets.build(address, pair, tape=read_live_tape(), fetch=_gecko_json, rpc=_dashboard_rpc, direct=direct)
+    now = now_ms()
+    tape = read_live_tape()
+    pools = set(coin_wallets.KNOWN_POOL_AUTHORITIES) | ({pair} if pair else set())
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix='neo-dashboard-wallets') as pool:
+        direct_future = pool.submit(coin_wallets.direct_pool_trades, pair, address, coin=coin, batch_rpc=_dashboard_rpc_batch, now=now) if pair else None
+        gecko_future = pool.submit(coin_wallets.gecko_trades, pair, address, _gecko_json, now=now) if pair else None
+        holders_future = pool.submit(coin_wallets.holders, address, _dashboard_rpc, pool_accounts=pools, now=now, max_entry_lookups=0)
+        direct = direct_future.result() if direct_future else None
+        gecko = gecko_future.result() if gecko_future else {'rows': [], 'error': 'no_pair', 'fetched_at': now}
+        holder_view = holders_future.result()
+    return coin_wallets.build(address, pair, tape=tape, fetch=_gecko_json, rpc=_dashboard_rpc,
+                              direct=direct, gecko=gecko, holder_view=holder_view,
+                              max_entry_lookups=0, now=now)
 
 
 HYPE_RADAR_PATH = Path(os.getenv('NEO_HYPE_STATE_PATH', '/var/lib/neo-market/hype_radar.json'))

@@ -581,16 +581,18 @@ def holders(mint: str, rpc: Callable[[str, list[Any]], Any], *, pool_accounts: s
 # ------------------------------------------------------------------ build --
 def build(address: str, pair: str, *, tape: dict[str, Any], fetch: Callable[[str], dict[str, Any]],
           rpc: Callable[[str, list[Any]], Any], pool_accounts: set[str] | None = None,
-          direct: dict[str, Any] | None = None, now: int | None = None) -> dict[str, Any]:
+          direct: dict[str, Any] | None = None, gecko: dict[str, Any] | None = None,
+          holder_view: dict[str, Any] | None = None, max_entry_lookups: int = 8,
+          now: int | None = None) -> dict[str, Any]:
     now = now or now_ms()
-    gecko = gecko_trades(pair, address, fetch, now=now) if pair else {'rows': [], 'error': 'no_pair', 'fetched_at': now}
+    gecko = gecko if gecko is not None else (gecko_trades(pair, address, fetch, now=now) if pair else {'rows': [], 'error': 'no_pair', 'fetched_at': now})
     tape_list = tape_rows(tape.get('events') or [], address, pair, now=now)
     direct = direct or {'rows': [], 'error': None, 'fetched_at': now, 'attempted': 0}
     direct_rows = list(direct.get('rows') or [])
     onchain_rows = merge_trades(direct_rows, tape_list)
     trades = merge_trades(gecko['rows'], direct_rows, tape_list)
     pools = set(pool_accounts or set()) | KNOWN_POOL_AUTHORITIES | ({pair} if pair else set())
-    holder_view = holders(address, rpc, pool_accounts=pools, now=now, max_entry_lookups=8)
+    holder_view = holder_view if holder_view is not None else holders(address, rpc, pool_accounts=pools, now=now, max_entry_lookups=max_entry_lookups)
     return {
         'address': address, 'pairAddress': pair, 'at': now,
         'trades': trades[:MAX_TRADE_ROWS],
