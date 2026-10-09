@@ -744,6 +744,20 @@ class EffectiveConfig(EngineHarness):
         self.assertEqual(restored.scan_count, 321)
         self.assertEqual(restored.scanned_address_slots_total, 76_543)
 
+    def test_live_tape_cache_keeps_exact_pair_rows(self):
+        tape = {
+            'status': 'online',
+            'events': [
+                {'address': A, 'pairAddress': B, 'ts': NOW, 'direction': 'BUY', 'usd_amount': 10},
+                {'address': A, 'pairAddress': C, 'ts': NOW, 'direction': 'SELL', 'usd_amount': 20},
+            ],
+            'pair_coverage': {},
+        }
+        m.LIVE_TAPE_PATH.write_text(json.dumps(tape), encoding='utf-8')
+        self.assertEqual(len(m.live_tape_events(A)), 2)
+        self.assertEqual([row['pairAddress'] for row in m.live_tape_events(A, B)], [B])
+        self.assertIs(m.read_live_tape(), m.read_live_tape())
+
     def test_engine_settings_validate_ranges_and_persist_shape(self):
         row = m.normalize_engine_settings({'trade_notional_usd': 123.45, 'stop_loss_pct': 4, 'take_profit_pct': 11, 'updated_at': 123456})
         self.assertEqual((row['trade_notional_usd'], row['stop_loss_pct'], row['take_profit_pct']), (123.45, 4.0, 11.0))

@@ -630,12 +630,66 @@ def read_hype_radar() -> dict[str, Any]:
 MAX_HYPE_SOURCE_LINES = 90
 
 
+_LIVE_TAPE_READ_LOCK = threading.Lock()
+_LIVE_TAPE_READ_CACHE: dict[str, Any] = {
+    'source': None,
+    'mtime_ns': None,
+    'data': {'status': 'offline', 'events': []},
+    'by_address': {},
+    'by_pair': {},
+}
+
+
 def read_live_tape() -> dict[str, Any]:
+    """Read the shared on-chain tape once per file version, not once per coin.
+
+    Entry semantics are unchanged.  The cache only avoids reparsing and rescanning
+    the same JSON hundreds of times inside one market cycle.
+    """
+    source = str(LIVE_TAPE_PATH)
     try:
-        data = json.loads(LIVE_TAPE_PATH.read_text(encoding='utf-8'))
-        return data if isinstance(data, dict) else {'status': 'offline', 'events': []}
-    except Exception:
-        return {'status': 'offline', 'events': []}
+        stat = LIVE_TAPE_PATH.stat()
+        mtime_ns = stat.st_mtime_ns
+    except OSError:
+        mtime_ns = None
+    with _LIVE_TAPE_READ_LOCK:
+        if (mtime_ns is not None and _LIVE_TAPE_READ_CACHE.get('source') == source
+                and _LIVE_TAPE_READ_CACHE.get('mtime_ns') == mtime_ns):
+            return _LIVE_TAPE_READ_CACHE['data']
+        try:
+            data = json.loads(LIVE_TAPE_PATH.read_text(encoding='utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError('invalid live tape')
+        except Exception:
+            data = {'status': 'offline', 'events': []}
+        by_address: dict[str, list[dict[str, Any]]] = {}
+        by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for event in data.get('events', []) if isinstance(data.get('events'), list) else []:
+            if not isinstance(event, dict):
+                continue
+            address = str(event.get('address') or '')
+            pair = str(event.get('pairAddress') or '')
+            if address:
+                by_address.setdefault(address, []).append(event)
+                if pair:
+                    by_pair.setdefault((address, pair), []).append(event)
+        _LIVE_TAPE_READ_CACHE.update(source=source, mtime_ns=mtime_ns, data=data, by_address=by_address, by_pair=by_pair)
+        return data
+
+
+def live_tape_events(address: str, pair_address: str | None = None,
+                     tape: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    tape = read_live_tape() if tape is None else tape
+    with _LIVE_TAPE_READ_LOCK:
+        if tape is _LIVE_TAPE_READ_CACHE.get('data'):
+            rows = (_LIVE_TAPE_READ_CACHE['by_pair'].get((address, pair_address), []) if pair_address
+                    else _LIVE_TAPE_READ_CACHE['by_address'].get(address, []))
+            return list(rows)
+    # Tests/replays may inject an explicit tape snapshot. Preserve exactly the
+    # historical semantics instead of requiring it to pass through the file cache.
+    return [event for event in tape.get('events', []) if isinstance(event, dict)
+            and event.get('address') == address
+            and (not pair_address or event.get('pairAddress') == pair_address)]
 
 
 def active_tape_pins(tape: dict[str, Any]) -> dict[str, str]:
@@ -990,9 +1044,8 @@ class State:
         quality = str(coverage.get('status') or 'UNKNOWN').upper()
         if not pair_address or num(coverage.get('complete_since_ms'), decision_at+1) > cutoff:
             quality = 'DEGRADED' if quality == 'COMPLETE' else 'UNKNOWN'
-        available_rows = [e for e in tape.get('events', []) if e.get('address') == address
-                and (not pair_address or e.get('pairAddress') == pair_address)
-                and cutoff <= num(e.get('ts')) <= decision_at
+        available_rows = [e for e in live_tape_events(address, pair_address, tape)
+                if cutoff <= num(e.get('ts')) <= decision_at
                 and 0 < num(e.get('available_at', e.get('ingested_at'))) <= decision_at]
         if any(e.get('quality_flags') or num(e.get('usd_amount')) <= 0 for e in available_rows):
             quality = 'DEGRADED'
@@ -1231,7 +1284,7 @@ class State:
                 'history': self.price_history.get(address, [])[-480:],
                 'position': next((p for p in self.positions if p.get('address') == address), None),
                 'trades': [t for t in self.history if t.get('address') == address][:20],
-                'live_tape': [e for e in read_live_tape().get('events', []) if e.get('address') == address][:80],
+                'live_tape': live_tape_events(address)[:80],
                 'flow': self.live_flow(address, 60),
             }
 
@@ -2580,6 +2633,8 @@ class Monitor:
             progress_done = 0
             discovery_stats.update({
                 'scan_sequence': scan_sequence,
+                'phase': 'market_data',
+                'continuous_rotation': True,
                 'refresh_completed': 0,
                 'refresh_total': len(addresses),
                 'scanned_address_slots_since_start': self.scanned_address_slots_since_start,
@@ -2607,10 +2662,16 @@ class Monitor:
             dex_pairs = fetch_pairs(addresses, progress=market_refresh_progress)
             discovery_stats.update({
                 'scan_sequence': scan_sequence,
+                'phase': 'feed_build',
                 'refresh_completed': progress_done,
                 'refresh_total': len(addresses),
                 'scanned_address_slots_since_start': self.scanned_address_slots_since_start,
             })
+            with STATE.lock:
+                live_stats = dict(STATE.discovery_stats or discovery_stats)
+                if int(live_stats.get('scan_sequence') or 0) == scan_sequence:
+                    live_stats.update(discovery_stats)
+                    STATE.discovery_stats = live_stats
             pairs = list(early_pairs) + dex_pairs
             chosen = best_pairs(pairs)
             prefer_exact_tape_pairs(chosen, pairs, tape_pins)
@@ -2677,9 +2738,18 @@ class Monitor:
                 for coin in feed:
                     training_bridge.observe(coin,STATE.live_flow(coin['address'],pair_address=coin.get('pairAddress')),
                         context=self.market_context(coin,{}),now=now_ms())
+            with STATE.lock:
+                live_stats = dict(STATE.discovery_stats or discovery_stats)
+                live_stats.update(phase='entry_checks', scan_sequence=scan_sequence)
+                STATE.discovery_stats = live_stats
             self.prewarm_entry_checks(feed)
             # Entry preparation and quotes must not hold the account/UI lock.
             self.maybe_open(feed)
+            with STATE.lock:
+                live_stats = dict(STATE.discovery_stats or discovery_stats)
+                live_stats.update(phase='cycle_complete', scan_sequence=scan_sequence,
+                                  cycle_completed_at=now_ms())
+                STATE.discovery_stats = live_stats
         except Exception as exc:
             with STATE.lock:
                 STATE.status = 'error'
