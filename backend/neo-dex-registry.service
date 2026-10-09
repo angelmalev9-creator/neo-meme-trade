@@ -1,0 +1,25 @@
+[Unit]
+Description=NEO Meme Coins free DEX presence registry
+After=network-online.target neo-live-tape.service neo-user-angel-paper.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/neo-meme-trade
+Environment=PYTHONUNBUFFERED=1
+Environment=NEO_DEX_REGISTRY_PATH=/var/lib/neo-market/dex_registry.json
+Environment=NEO_DEX_ENGINE_STATE_PATH=/var/lib/neo-market/users/42d3192d-f033-4061-85d6-2408c5e168e7/state.json
+Environment=NEO_LIVE_TAPE_PATH=/var/lib/neo-market/live_tape.json
+Environment=NEO_LIVE_TAPE_DB_PATH=/var/lib/neo-market/live_tape.sqlite3
+Environment=NEO_DEX_REGISTRY_PORT=18807
+Environment=NEO_DEX_GECKO_SECONDS=60
+Environment=NEO_DEX_ENGINE_SECONDS=10
+Environment=NEO_DEX_DB_SECONDS=60
+Environment=NEO_DEX_LOCAL_SECONDS=2
+ExecStart=/usr/bin/python3 /root/neo-meme-trade/backend/dex_registry_service.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
