@@ -306,6 +306,10 @@ BUY_PRESSURE_MIN_M5_PCT = float(os.getenv('NEO_BUY_PRESSURE_MIN_M5_PCT', '-3'))
 BUY_PRESSURE_MAX_M5_PCT = float(os.getenv('NEO_BUY_PRESSURE_MAX_M5_PCT', '18'))
 BUY_PRESSURE_MAX_AGE_MINUTES = float(os.getenv('NEO_BUY_PRESSURE_MAX_AGE_MINUTES', '180'))
 BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES = float(os.getenv('NEO_BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES', '30'))
+BUY_PRESSURE_ACTIVE_MARKET_RATIO = float(os.getenv('NEO_BUY_PRESSURE_ACTIVE_MARKET_RATIO', '2.20'))
+BUY_PRESSURE_ACTIVE_MARKET_MIN_BUYS = float(os.getenv('NEO_BUY_PRESSURE_ACTIVE_MARKET_MIN_BUYS', '50'))
+BUY_PRESSURE_ACTIVE_MARKET_MIN_VOLUME_USD = float(os.getenv('NEO_BUY_PRESSURE_ACTIVE_MARKET_MIN_VOLUME_USD', '10000'))
+BUY_PRESSURE_ACTIVE_MARKET_MAX_AGE_MINUTES = float(os.getenv('NEO_BUY_PRESSURE_ACTIVE_MARKET_MAX_AGE_MINUTES', '45'))
 
 
 def buy_pressure_rejections(coin: dict[str, Any], flow: dict[str, Any], context: dict[str, Any]) -> list[str]:
@@ -350,16 +354,23 @@ def buy_pressure_rejections(coin: dict[str, Any], flow: dict[str, Any], context:
         and buys >= BUY_PRESSURE_MIN_M5_BUYS
         and volume_m5 >= max(BUY_PRESSURE_MIN_M5_VOLUME_USD * 2, 5000)
     )
-    # Verified wallet flow is preferred. But when the public 5m tape is already
-    # extremely one-sided, do not let a warming 30s wallet sample make the engine
-    # miss the very move this profile is designed to catch. Known large sells
-    # still veto the setup, and rug/price/executable-quote checks run afterwards.
+    active_market_setup = (
+        age <= min(BUY_PRESSURE_ACTIVE_MARKET_MAX_AGE_MINUTES, max_age)
+        and market_ratio >= max(BUY_PRESSURE_MIN_MARKET_RATIO, BUY_PRESSURE_ACTIVE_MARKET_RATIO)
+        and buys >= BUY_PRESSURE_ACTIVE_MARKET_MIN_BUYS
+        and volume_m5 >= BUY_PRESSURE_ACTIVE_MARKET_MIN_VOLUME_USD
+    )
+    # Verified wallet flow is preferred. A very young pool with a large, current
+    # DexScreener buy/sell imbalance and real 5m activity may however arrive before
+    # the 30s wallet tape has warmed. In that case the market snapshot may advance
+    # to the existing price/rug/executable-quote gates; no fill is invented.
+    flow_optional_setup = extreme_setup or active_market_setup
     if flow_trades >= BUY_PRESSURE_MIN_FLOW_TRADES:
         if max_sell >= max(750.0, buy_usd * 0.9): reasons.append('large_sells')
-        if not extreme_setup:
+        if not flow_optional_setup:
             if conviction < BUY_PRESSURE_MIN_CONVICTION: reasons.append('conviction')
             if flow_ratio < BUY_PRESSURE_MIN_FLOW_RATIO: reasons.append('flow_ratio')
-    elif not extreme_setup:
+    elif not flow_optional_setup:
         reasons.append('flow_count')
     return list(dict.fromkeys(reasons))
 
@@ -1498,6 +1509,10 @@ def effective_entry_thresholds() -> dict[str, Any]:
             'max_m5_pct': BUY_PRESSURE_MAX_M5_PCT,
             'max_age_minutes': BUY_PRESSURE_MAX_AGE_MINUTES,
             'extreme_unverified_max_age_minutes': BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES,
+            'active_market_ratio': BUY_PRESSURE_ACTIVE_MARKET_RATIO,
+            'active_market_min_buys': BUY_PRESSURE_ACTIVE_MARKET_MIN_BUYS,
+            'active_market_min_volume_usd': BUY_PRESSURE_ACTIVE_MARKET_MIN_VOLUME_USD,
+            'active_market_max_age_minutes': BUY_PRESSURE_ACTIVE_MARKET_MAX_AGE_MINUTES,
         }
     return dict(oct4.ENTRY_LIMITS) if is_adaptive() else EFFECTIVE_ENTRY_THRESHOLDS.as_dict()
 
