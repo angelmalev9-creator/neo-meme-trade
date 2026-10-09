@@ -1,9 +1,9 @@
 {
   "name": "NEO ORDER_FLOW_ADAPTIVE_LEARNING: tiered high-frequency PAPER entries with size/avoid learning, on the durable honest PAPER runtime",
   "locked_at_utc": "2026-10-08",
-  "source_commit": "ROLLING_DISCOVERY_20261008",
+  "source_commit": "CONTINUOUS_DISCOVERY_20261009",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "654c5d93cd8c8d1b747a724267f10deb56029c70525ab2cbfe05df3c243c2541",
+  "sha256": "d921fb33162c7e984aa8bbc9fd581cccc081316e8bf4a0765194694218120e8f",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE_LEARNING",
   "rules": {
     "max_positions": 8,
@@ -91,7 +91,7 @@
     "backend/user_gateway.py": "e51ce4a6e0077df26d0804356dc463ba0350bb3904c7b24291d12892bbfc70f3",
     "backend/lab_activity.py": "deb81c318f6c0419ed6237a40288cbb175bd8f7c1fca42adc431029ec06a1c14",
     "backend/x_signal_monitor.py": "eb7c3f952a8f4048ebfd956c2d6a479fb04c31c83b9925b2a3ebb691a138298a",
-    "backend/discovery_universe.py": "17072087527fa3adef5ab27df64b132bd8310892ac65773b3b9f175486a170b4",
+    "backend/discovery_universe.py": "3230e27acec26b08e867298cfcda34e9b128d79b39b88a02a9e61bbeaac06d93",
     "backend/hype_radar.py": "5b98237a7a7915c39dbd6b1471840d979e423cf13c853093e071818c33803543"
   },
   "runtime_version": "RUNTIME_DURABLE_PAPER_V2",
@@ -131,14 +131,15 @@
     "cache_seconds": 5,
     "dexscreener_profiles_and_boosts": true,
     "exact_new_pool_pinned_minutes": 15,
-    "safety_checks_unchanged": true
+    "safety_checks_unchanged": true,
+    "continuous_rotation": "Every market scan prioritizes genuinely new/newborn pools, then rotates the persistent universe; repeated provider snapshots are not re-prioritized."
   },
   "baseline_commit": "bccb0ed30bac1efbf2e16cfe89e0ee1af049f050",
   "baseline_manifest": "docs/strategy-lock-before-repair.json",
   "hash_basis": "UTF8_LF",
   "exit_policy_version": "ADAPTIVE_CONTEXT_HOLD_NET_V1",
   "hash_change_reasons": {
-    "backend/market_monitor.py": "2026-10-08: explicit strategy profile selection; ORDER_FLOW_ADAPTIVE (2026-10-04) is the primary profile with module-owned configuration, BALANCED_V4 entry filter, 60s flow window, fixed $200 size, $100 daily gate, 20-minute same-token cooldown, one position and adaptive conviction exits. EARLY_SCOUT_V10 behavior is unchanged when selected. Open positions keep the exit policy recorded at entry. ORDER_FLOW_ADAPTIVE_LEARNING becomes the default profile: eight positions, tiered entries, learned sizing, outcome-aware cooldown; an unsellable position no longer freezes entries under this profile; every position keeps the stop recorded at entry. Adds the read-only /lab-book endpoint (trade list of one Strategy Lab book); no trading logic changed. Adds the read-only /coin-flow endpoint (buyers/sellers windows for the dashboard); no trading logic changed. Adds the read-only /coin-wallets endpoint (per-wallet trades and top holders via GeckoTerminal + Solana RPC, dashboard only). Adds the read-only /hype-radar endpoint (themes file + feed matches, dashboard only). 2026-10-09: /coin-wallets now adds a read-only on-demand direct Solana RPC wallet feed for the selected pool; main engine entry/exit/sizing logic is unchanged. 2026-10-09: dashboard-only coin-flow/wallet pair resolution now falls back by mint for stale browser selections and accepts exact frontend pair forwarding; trading rules are unchanged.",
+    "backend/market_monitor.py": "2026-10-08: explicit strategy profile selection; ORDER_FLOW_ADAPTIVE (2026-10-04) is the primary profile with module-owned configuration, BALANCED_V4 entry filter, 60s flow window, fixed $200 size, $100 daily gate, 20-minute same-token cooldown, one position and adaptive conviction exits. EARLY_SCOUT_V10 behavior is unchanged when selected. Open positions keep the exit policy recorded at entry. ORDER_FLOW_ADAPTIVE_LEARNING becomes the default profile: eight positions, tiered entries, learned sizing, outcome-aware cooldown; an unsellable position no longer freezes entries under this profile; every position keeps the stop recorded at entry. Adds the read-only /lab-book endpoint (trade list of one Strategy Lab book); no trading logic changed. Adds the read-only /coin-flow endpoint (buyers/sellers windows for the dashboard); no trading logic changed. Adds the read-only /coin-wallets endpoint (per-wallet trades and top holders via GeckoTerminal + Solana RPC, dashboard only). Adds the read-only /hype-radar endpoint (themes file + feed matches, dashboard only). 2026-10-09: /coin-wallets now adds a read-only on-demand direct Solana RPC wallet feed for the selected pool; main engine entry/exit/sizing logic is unchanged. 2026-10-09: dashboard-only coin-flow/wallet pair resolution now falls back by mint for stale browser selections and accepts exact frontend pair forwarding; trading rules are unchanged. 2026-10-09: discovery scheduling now prioritizes only genuinely new provider addresses plus urgent newborn pools, guaranteeing remaining batch capacity rotates through the persistent universe; adds read-only discovery telemetry only. Trading rules are unchanged.",
     "backend/engine_entry_policy.py": "Raised validated quote throughput to 12 candidates per scan and versioned V10 high-frequency scout policy. Unchanged on 2026-10-08; used only by the EARLY_SCOUT_V10 profile. 2026-10-08: adds the learned_avoid rejection label only.",
     "backend/gold_order_flow.py": "Added MICRO_SCOUT before ULTRA_EARLY with lower early thresholds while leaving safety/price/execution vetoes outside and mandatory. Unchanged on 2026-10-08; used only by the EARLY_SCOUT_V10 profile.",
     "backend/engine_exit_policy.py": "Versioned net fixed policy and original adaptive candidate, no chart stop",
@@ -164,7 +165,8 @@
     "backend/adaptive_learning.py": "New pure module (2026-10-08): owned configuration, CORE/EXPLORE tiers, liquidity-scaled sizing and time-decayed per-context learning of size and avoid/allow.",
     "backend/lab_activity.py": "2026-10-08: adds X_SIGNAL PAPER entry/risk configuration only; shared safety and execution-cost logic remain unchanged. 2026-10-08: EntryRule.failures() names the failing conditions for diagnostics; matches() is unchanged. 2026-10-08: HYPE_RADAR rule/overrides and two diagnostic labels.",
     "backend/x_signal_monitor.py": "2026-10-08: budget-capped xAI X Search collector for PAPER signals; allowed handles only, literal addresses only, no order execution, atomic state output.",
-    "backend/hype_radar.py": "2026-10-08: Hype Radar PAPER collector and pure token/theme matcher used by HYPE_RADAR entry gating; locked because match_token() and active_themes() influence lab entry eligibility."
+    "backend/hype_radar.py": "2026-10-08: Hype Radar PAPER collector and pure token/theme matcher used by HYPE_RADAR entry gating; locked because match_token() and active_themes() influence lab entry eligibility.",
+    "backend/discovery_universe.py": "2026-10-09: adds pure fresh-priority helper so repeated provider snapshots cannot starve rolling universe rotation; no scoring, entry, exit, sizing or execution logic."
   },
   "strategy_profile": "ORDER_FLOW_ADAPTIVE_LEARNING",
   "strategy_version": "learner-2026-10-08",

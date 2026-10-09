@@ -65,6 +65,7 @@ type MonitorState = {
   strategy_lab: StrategyLab;
   paper_training?: PaperTrainingSnapshot;
   entry_diagnostics?: EntryDiagnostics;
+  discovery_stats?: { size: number; cursor: number; max_items: number; batch_size: number; provider_snapshot_size: number; selected_last_scan: number; priority_last_scan: number; rotation_last_scan: number; new_universe_last_scan: number; new_universe_since_start: number };
   learning?: {
     mode: string; trades_used: number; loss_streak: number; loss_streak_brake: boolean; avoided: string[];
     best: { bucket: string; trades: number; mean_pct: number; win_rate: number; avoided: boolean }[];
@@ -399,6 +400,7 @@ export default function App() {
             <div className="p-4">
               {!diagnostics ? <div className="text-xs text-slate-500">Чакам първия scan…</div> : <>
                 <div className={`rounded-2xl border p-3 text-xs leading-5 ${engineQuiet ? 'border-amber-400/20 bg-amber-400/[0.05] text-amber-100' : 'border-emerald-400/15 bg-emerald-400/[0.04] text-emerald-100'}`}>{diagnostics.message || state?.message || '—'}</div>
+                {state?.discovery_stats && <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-emerald-400/10 bg-emerald-400/[0.03] px-3 py-2 text-[9px] text-slate-500"><span className="flex items-center gap-1.5 font-black text-emerald-300"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-300" />НЕПРЕКЪСНАТ SCAN</span><span>universe <b className="text-white">{state.discovery_stats.size}</b></span><span>този batch <b className="text-white">{state.discovery_stats.selected_last_scan}</b></span><span>нови <b className="text-emerald-300">+{state.discovery_stats.new_universe_last_scan}</b></span><span>ротация <b className="text-white">{state.discovery_stats.rotation_last_scan}</b></span><span>cursor {state.discovery_stats.cursor}/{state.discovery_stats.size}</span></div>}
                 <div className="mt-3 grid grid-cols-5 gap-2 text-center">
                   {([['Кандидати', diagnostics.candidates], ['Проверени', diagnostics.evaluated], ['Минали филтъра', diagnostics.signal_passed], ['Котирани', diagnostics.quoted], ['Отворени', diagnostics.opened]] as [string, number | undefined][]).map(([label, value]) => <div key={label} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-2"><div className="text-base font-black text-white">{value ?? 0}</div><div className="mt-0.5 text-[8px] font-black uppercase tracking-wider text-slate-600">{label}</div></div>)}
                 </div>

@@ -40,6 +40,26 @@ def seed_addresses_from_json(paths: Iterable[Path | str]) -> list[str]:
     return found
 
 
+def fresh_priority(current: Iterable[str], previous: Iterable[str] = (), urgent: Iterable[str] = ()) -> list[str]:
+    """Return only genuinely new discovery addresses, with urgent pools first.
+
+    The full provider snapshot must not be treated as priority on every scan or
+    it can starve the rotating universe. Urgent addresses (for example brand-new
+    pools) stay first even when they were present in the previous snapshot.
+    """
+    previous_set = {str(value or '').strip() for value in previous if str(value or '').strip()}
+    selected: list[str] = []
+    seen: set[str] = set()
+    for rows, only_new in ((urgent, False), (current, True)):
+        for raw in rows:
+            address = str(raw or '').strip()
+            if not address or address in seen or (only_new and address in previous_set):
+                continue
+            selected.append(address)
+            seen.add(address)
+    return selected
+
+
 class RollingUniverse:
     def __init__(self, path: Path | str, *, max_items: int = 5000,
                  ttl_ms: int = 24 * 60 * 60 * 1000, batch_size: int = 240,
