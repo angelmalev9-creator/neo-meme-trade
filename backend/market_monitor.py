@@ -1674,6 +1674,10 @@ def discover() -> tuple[list[str], dict[str, dict[str, Any]]]:
             continue
         sources_ok += 1
         for row in rows:
+            # Some DexScreener discovery surfaces can contain non-object rows;
+            # they are not token candidates and must not abort the whole scan.
+            if not isinstance(row, dict):
+                continue
             if row.get('chainId') != 'solana':
                 continue
             address = str(row.get('tokenAddress') or '').strip()
