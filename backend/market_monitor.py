@@ -43,6 +43,15 @@ DISCOVERY_UNIVERSE_TTL_MS = max(60_000, int(float(os.getenv('NEO_DISCOVERY_UNIVE
 DISCOVERY_REFRESH_SECONDS = max(4.0, float(os.getenv('NEO_DISCOVERY_REFRESH_SECONDS', '6')))
 MARKET_BATCH_WORKERS = max(1, min(6, int(os.getenv('NEO_MARKET_BATCH_WORKERS', '4'))))
 MARKET_BATCH_TIMEOUT_SECONDS = max(2.0, min(8.0, float(os.getenv('NEO_MARKET_BATCH_TIMEOUT_SECONDS', '5'))))
+_BACKEND_HEALTH_LOCK = threading.Lock()
+_MARKET_DATA_HEALTH: dict[str, Any] = {
+    'status': 'starting', 'checked_at': 0, 'requested_tokens': 0,
+    'unavailable_tokens': 0, 'returned_pairs': 0,
+}
+_DISCOVERY_HEALTH: dict[str, Any] = {
+    'status': 'starting', 'checked_at': 0, 'sources_ok': 0,
+    'sources_failed': 0, 'last_error': None,
+}
 MAX_FEED = DISCOVERY_SCAN_BATCH
 ENTRY_SCORE = 60.0
 MAX_POSITIONS = max(1, int(os.getenv('NEO_MAX_POSITIONS', '16')))
@@ -951,6 +960,36 @@ class State:
             wins, closed = lifetime['wins'], lifetime['closed_trades']
             closed_total = closed
             tape = read_live_tape()
+            tape_coverage = tape.get('pair_coverage') or {}
+            complete_pairs = sum(1 for row in tape_coverage.values() if isinstance(row, dict) and row.get('status') == 'COMPLETE')
+            tracked_pairs = int(tape.get('tracked_pairs') or len(tape_coverage) or 0)
+            warming_pairs = int(tape.get('warming_pairs') if tape.get('warming_pairs') is not None else max(0, tracked_pairs - complete_pairs))
+            with _BACKEND_HEALTH_LOCK:
+                market_health = dict(_MARKET_DATA_HEALTH)
+                discovery_health = dict(_DISCOVERY_HEALTH)
+            tape_health = {
+                'status': tape.get('status') or 'offline', 'checked_at': tape.get('updated_at') or 0,
+                'tracked_pairs': tracked_pairs, 'complete_pairs': complete_pairs,
+                'warming_pairs': warming_pairs, 'coverage': tape.get('coverage'),
+                'source': tape.get('source'), 'error': tape.get('error'),
+            }
+            active_issues: list[dict[str, Any]] = []
+            if market_health.get('status') in {'degraded', 'error'}:
+                active_issues.append({'component': 'market_data', 'status': market_health.get('status'),
+                    'text': f"DexScreener: {market_health.get('unavailable_tokens', 0)}/{market_health.get('requested_tokens', 0)} token-а недостъпни след retry",
+                    'at': market_health.get('checked_at') or 0})
+            if discovery_health.get('status') in {'degraded', 'error'}:
+                active_issues.append({'component': 'discovery', 'status': discovery_health.get('status'),
+                    'text': f"Discovery: {discovery_health.get('sources_failed', 0)} source-а с проблем",
+                    'at': discovery_health.get('checked_at') or 0})
+            if tape_health.get('status') in {'degraded', 'offline'}:
+                active_issues.append({'component': 'order_flow', 'status': tape_health.get('status'),
+                    'text': f"Order flow: {str(tape_health.get('status')).upper()}" + (f" · {tape_health.get('error')}" if tape_health.get('error') else ''),
+                    'at': tape_health.get('checked_at') or 0})
+            runtime_health = {
+                'checked_at': now_ms(), 'market_data': market_health, 'discovery': discovery_health,
+                'order_flow': tape_health, 'active_issues': active_issues,
+            }
             return {
                 'running': self.running,
                 'status': self.status,
@@ -962,11 +1001,17 @@ class State:
                 'history': [compact_public_trade(t) for t in display_history],
                 'events': self.events[:30],
                 'source_status': self.source_status,
+                'runtime_health': runtime_health,
                 'entry_diagnostics': self.entry_diagnostics,
                 'discovery_stats': self.discovery_stats,
                 'learning': learner.summary(learning_table(self.history, now_ms())) if is_learner() else None,
                 'live_tape': [],
-                'live_tape_status': {k: tape.get(k) for k in ('status','tracked_pairs','updated_at','source','error')},
+                'live_tape_status': {
+                    'status': tape_health['status'], 'tracked_pairs': tracked_pairs,
+                    'complete_pairs': complete_pairs, 'warming_pairs': warming_pairs,
+                    'coverage': tape_health['coverage'], 'updated_at': tape_health['checked_at'],
+                    'source': tape_health['source'], 'error': tape_health['error'],
+                },
                 'strategy_lab': read_strategy_lab(),
                 'paper_training': training_bridge.snapshot(),
                 'stats': {
@@ -1319,6 +1364,8 @@ STATE = State(load_state=False)
 def discover() -> tuple[list[str], dict[str, dict[str, Any]]]:
     metadata: dict[str, dict[str, Any]] = {}
     order: list[str] = []
+    source_failures: list[str] = []
+    sources_ok = 0
     sources = [
         ('latest', '/token-profiles/latest/v1'),
         ('boosted', '/token-boosts/top/v1'),
@@ -1330,10 +1377,13 @@ def discover() -> tuple[list[str], dict[str, dict[str, Any]]]:
         try:
             rows = api(path)
         except Exception as exc:
+            source_failures.append(f'{source_name}: {type(exc).__name__}')
             STATE.event(f'{source_name} discovery warning: {exc}')
             continue
         if not isinstance(rows, list):
+            source_failures.append(f'{source_name}: invalid response')
             continue
+        sources_ok += 1
         for row in rows:
             if row.get('chainId') != 'solana':
                 continue
@@ -1356,6 +1406,13 @@ def discover() -> tuple[list[str], dict[str, dict[str, Any]]]:
             info['description'] = info['description'] or row.get('description') or ''
             info['links'] = info['links'] or row.get('links') or []
             info['boost_amount'] = max(num(info['boost_amount']), num(row.get('amount')), num(row.get('totalAmount')))
+    checked_at = now_ms()
+    with _BACKEND_HEALTH_LOCK:
+        _DISCOVERY_HEALTH.update(
+            status='online' if not source_failures else ('degraded' if sources_ok else 'error'),
+            checked_at=checked_at, sources_ok=sources_ok, sources_failed=len(source_failures),
+            last_error=source_failures[-1] if source_failures else None,
+        )
     return order, metadata
 
 
@@ -1426,6 +1483,13 @@ def fetch_pairs(addresses: list[str], progress=None) -> list[dict[str, Any]]:
                     progress(completed_addresses, total_addresses)
                 except Exception:
                     pass
+    checked_at = now_ms()
+    with _BACKEND_HEALTH_LOCK:
+        _MARKET_DATA_HEALTH.update(
+            status='online' if unavailable_addresses == 0 else 'degraded',
+            checked_at=checked_at, requested_tokens=total_addresses,
+            unavailable_tokens=unavailable_addresses, returned_pairs=len(pairs),
+        )
     if unavailable_addresses:
         STATE.event(f'Market data warning: {unavailable_addresses}/{total_addresses} token-а unavailable след retry')
     return pairs

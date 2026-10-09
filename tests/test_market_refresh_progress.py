@@ -29,6 +29,9 @@ class MarketRefreshProgressTests(unittest.TestCase):
         progress = []
         with patch.object(monitor.requests, 'get', side_effect=fake_get):
             rows = monitor.fetch_pairs(addresses, progress=lambda done, total: progress.append((done, total)))
+        self.assertEqual(monitor._MARKET_DATA_HEALTH['status'], 'online')
+        self.assertEqual(monitor._MARKET_DATA_HEALTH['requested_tokens'], 65)
+        self.assertEqual(monitor._MARKET_DATA_HEALTH['unavailable_tokens'], 0)
         self.assertEqual(len(rows), 65)
         self.assertGreaterEqual(len(progress), 3)
         self.assertEqual(progress[-1], (65, 65))
@@ -53,6 +56,38 @@ class MarketRefreshProgressTests(unittest.TestCase):
             rows = monitor.fetch_pairs(addresses)
         self.assertEqual(len(rows), 30)
         self.assertEqual(calls, [30, 15, 15])
+
+
+    def test_fetch_pairs_projects_current_degraded_health_after_retry_failure(self):
+        addresses = [live_tape._b58encode(bytes([i]) * 32) for i in range(1, 31)]
+        def fake_get(url, **_kwargs):
+            raw = url.rsplit('/', 1)[-1]
+            batch = raw.split(',') if raw else []
+            if len(batch) in (30, 15):
+                raise monitor.requests.Timeout('provider still unavailable')
+            return _Response([])
+        with patch.object(monitor.requests, 'get', side_effect=fake_get), patch.object(monitor.time, 'sleep'):
+            rows = monitor.fetch_pairs(addresses)
+        self.assertEqual(rows, [])
+        self.assertEqual(monitor._MARKET_DATA_HEALTH['status'], 'degraded')
+        self.assertEqual(monitor._MARKET_DATA_HEALTH['requested_tokens'], 30)
+        self.assertEqual(monitor._MARKET_DATA_HEALTH['unavailable_tokens'], 30)
+
+    def test_discover_projects_aggregate_source_health(self):
+        calls = []
+        def fake_api(path):
+            calls.append(path)
+            if path == '/token-profiles/latest/v1':
+                raise monitor.requests.Timeout('one source down')
+            return []
+        with patch.object(monitor, 'api', side_effect=fake_api):
+            order, metadata = monitor.discover()
+        self.assertEqual(order, [])
+        self.assertEqual(metadata, {})
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(monitor._DISCOVERY_HEALTH['status'], 'degraded')
+        self.assertEqual(monitor._DISCOVERY_HEALTH['sources_ok'], 4)
+        self.assertEqual(monitor._DISCOVERY_HEALTH['sources_failed'], 1)
 
     def test_discovery_api_retries_one_transient_timeout(self):
         calls = []

@@ -50,7 +50,14 @@ type LabStats = { trades: number; wins: number; losses: number; win_rate: number
 type StrategyLab = { paired?: LabPairedSnapshot; status: string; updated_at: number; started_at: number; books: Record<string, LabBook>; stats: Record<string, LabStats>; error?: string; activity_config?: { rejection_labels?: Record<string, string>; exit_overrides?: Record<string, { stop_loss?: number; take_profit?: number }> } };
 type LiveTrade = { ts: number; direction: 'BUY' | 'SELL'; token_amount: number; usd_amount: number; wallet: string; note: string; address: string; pairAddress: string; symbol: string; signature: string; slot: number };
 type FlowStats = { seconds: number; trades: number; buys: number; sells: number; buy_usd: number; sell_usd: number; buy_sell_usd_ratio: number; unique_wallets: number; max_buy_usd: number; max_sell_usd: number };
-type TapeStatus = { status?: string; tracked_pairs?: number; updated_at?: number; source?: string; error?: string | null };
+type TapeStatus = { status?: string; tracked_pairs?: number; complete_pairs?: number; warming_pairs?: number; coverage?: number | null; updated_at?: number; source?: string; error?: string | null };
+type RuntimeHealth = {
+  checked_at: number;
+  market_data: { status?: string; checked_at?: number; requested_tokens?: number; unavailable_tokens?: number; returned_pairs?: number };
+  discovery: { status?: string; checked_at?: number; sources_ok?: number; sources_failed?: number; last_error?: string | null };
+  order_flow: { status?: string; checked_at?: number; tracked_pairs?: number; complete_pairs?: number; warming_pairs?: number; coverage?: number | null; source?: string; error?: string | null };
+  active_issues: { component: string; status?: string; text: string; at: number }[];
+};
 type EntryDiagnostics = {
   status?: string; message?: string; policy_version?: string; strategy?: string; checked_at?: number;
   candidates?: number; evaluated?: number; signal_passed?: number; quoted?: number; opened?: number; max_positions?: number;
@@ -62,6 +69,7 @@ type MonitorState = {
   feed: Coin[]; positions: Position[]; history: Position[];
   events: { ts: number; text: string }[];
   live_tape: LiveTrade[]; live_tape_status: TapeStatus;
+  runtime_health?: RuntimeHealth;
   strategy_lab: StrategyLab;
   paper_training?: PaperTrainingSnapshot;
   entry_diagnostics?: EntryDiagnostics;
@@ -319,29 +327,58 @@ export default function App() {
     ? `Проверени ${diagnostics.evaluated ?? 0} от ${diagnostics.candidates ?? 0} token-а; ${diagnostics.signal_passed ?? 0} минаха GOLD сигнала; ${diagnostics.quoted ?? 0} стигнаха до котировка; ${diagnostics.opened ?? 0} отворени.`
     : state?.message || '—';
   const journalEvents = useMemo(() => {
-    const rows: { ts: number; text: string }[] = [];
+    const rows: { ts: number; text: string; tone?: 'ok' | 'warn' | 'error' }[] = [];
+    const health = state?.runtime_health;
     if (diagnostics) rows.push({
       ts: diagnostics.checked_at || state?.last_scan_at || Date.now(),
       text: `Scan #${state?.discovery_stats?.scan_sequence ?? state?.scan_count ?? '—'}: ${diagnostics.evaluated ?? 0} проверени · ${diagnostics.signal_passed ?? 0} GOLD сигнал · ${diagnostics.quoted ?? 0} до quote · ${diagnostics.opened ?? 0} отворени`,
+      tone: 'ok',
     });
-    if (state?.live_tape_status?.updated_at) rows.push({
-      ts: state.live_tape_status.updated_at,
-      text: `Order flow: ${(state.live_tape_status.status || 'unknown').toUpperCase()} · ${state.live_tape_status.tracked_pairs ?? 0} следени pool-а`,
-    });
-    const seen = new Set<string>();
-    for (const event of state?.events || []) {
-      const key = event.text.startsWith('Market data warning:')
-        ? 'dex-market-warning'
-        : event.text.startsWith('latest discovery warning:')
-          ? 'dex-discovery-warning'
-          : event.text;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      rows.push(event);
-      if (rows.length >= 8) break;
+    if (health?.order_flow?.checked_at) {
+      const flow = health.order_flow;
+      const ready = flow.complete_pairs ?? 0;
+      const tracked = flow.tracked_pairs ?? 0;
+      const warming = flow.warming_pairs ?? Math.max(0, tracked - ready);
+      rows.push({
+        ts: flow.checked_at,
+        text: `Order flow: ${(flow.status || 'unknown').toUpperCase()} · ${ready}/${tracked} готови pool-а${warming ? ` · ${warming} загряват` : ''}`,
+        tone: flow.status === 'online' ? 'ok' : flow.status === 'warming' ? 'warn' : 'error',
+      });
     }
-    return rows.slice(0, 8);
-  }, [diagnostics, state?.discovery_stats?.scan_sequence, state?.events, state?.last_scan_at, state?.live_tape_status, state?.scan_count]);
+    if (health?.market_data?.checked_at) {
+      const market = health.market_data;
+      const requested = market.requested_tokens ?? 0;
+      const unavailable = market.unavailable_tokens ?? 0;
+      rows.push({
+        ts: market.checked_at,
+        text: `Market data: ${(market.status || 'unknown').toUpperCase()} · ${Math.max(0, requested - unavailable)}/${requested} token-а налични след retry`,
+        tone: market.status === 'online' ? 'ok' : 'warn',
+      });
+    }
+    if (health?.discovery?.checked_at) {
+      const discovery = health.discovery;
+      const ok = discovery.sources_ok ?? 0;
+      const failed = discovery.sources_failed ?? 0;
+      rows.push({
+        ts: discovery.checked_at,
+        text: `Discovery: ${(discovery.status || 'unknown').toUpperCase()} · ${ok}/${ok + failed} source-а работят${failed && discovery.last_error ? ` · ${discovery.last_error}` : ''}`,
+        tone: discovery.status === 'online' ? 'ok' : 'warn',
+      });
+    }
+    for (const issue of health?.active_issues || []) rows.push({ ts: issue.at || health?.checked_at || Date.now(), text: `Активен проблем: ${issue.text}`, tone: issue.status === 'error' ? 'error' : 'warn' });
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const event of state?.events || []) {
+      if (event.ts < cutoff) continue;
+      if (!event.text.startsWith('PAPER ENTRY') && !event.text.startsWith('PAPER EXIT')) continue;
+      rows.push({ ts: event.ts, text: event.text, tone: 'ok' });
+    }
+    if (health && !(health.active_issues || []).length) rows.push({
+      ts: health.checked_at || Date.now(),
+      text: 'Няма активни backend проблеми.',
+      tone: 'ok',
+    });
+    return rows.sort((a, b) => b.ts - a.ts).slice(0, 8);
+  }, [diagnostics, state?.discovery_stats?.scan_sequence, state?.events, state?.last_scan_at, state?.runtime_health, state?.scan_count]);
   const labBooks = useMemo(() => Object.values(state?.strategy_lab?.books || {}).filter(book => book.id !== 'ASTRA_6_BRAIN').sort((a, b) => (state?.strategy_lab?.stats?.[b.id]?.equity ?? b.balance) - (state?.strategy_lab?.stats?.[a.id]?.equity ?? a.balance)), [state]);
   const activeBooks = labBooks.filter(book => (state?.strategy_lab?.stats?.[book.id]?.trades ?? 0) > 0 || book.position);
   const quietBooks = labBooks.filter(book => !activeBooks.includes(book));
@@ -454,7 +491,7 @@ export default function App() {
               <div className="space-y-2 p-4">{(state?.positions || []).length === 0 && <div className="rounded-xl border border-dashed border-white/[0.08] p-4 text-center text-[10px] leading-5 text-slate-600">Няма отворена позиция. Причината е вляво.</div>}{state?.positions.map(position => <button key={position.id} onClick={() => openCoin(position.address)} className="w-full rounded-2xl border border-white/[0.07] bg-white/[0.02] p-3 text-left hover:border-emerald-400/20"><div className="flex items-center justify-between gap-2"><div><div className="text-xs font-black text-white">${position.symbol}</div><div className="mt-0.5 text-[9px] text-slate-600">#{position.trade_no ?? '—'} · вход {fmtPrice(position.execution_entry_price ?? position.entry_price)} · ${position.notional_usd.toFixed(0)}</div></div><div className={`text-sm font-black ${position.pnl_pct >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{signed(position.pnl_pct)}%</div></div><div className="mt-2 flex items-center justify-between text-[9px] text-slate-600"><span>{signed(position.pnl_usd)}$ · score {position.current_score?.toFixed(0) ?? position.score.toFixed(0)}</span><span>{holdLabel((Date.now() - position.opened_at) / 1000)}</span></div></button>)}</div>
             </Card>
             <Card kicker="Дневник" title="Какво прави NEO" right={<Bot className="h-4 w-4 text-emerald-300" />}>
-              <div className="space-y-3 p-4">{journalEvents.map(event => <div key={`${event.ts}-${event.text}`} className="flex gap-2.5"><div className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-300" /><div><div className="text-[10px] leading-4 text-slate-400">{event.text}</div><div className="mt-0.5 text-[8px] text-slate-700">{tapeTimeLabel(event.ts)}</div></div></div>)}</div>
+              <div className="space-y-3 p-4">{journalEvents.map(event => <div key={`${event.ts}-${event.text}`} className="flex gap-2.5"><div className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${event.tone === 'error' ? 'bg-red-300' : event.tone === 'warn' ? 'bg-amber-300' : 'bg-emerald-300'}`} /><div><div className={`text-[10px] leading-4 ${event.tone === 'error' ? 'text-red-300' : event.tone === 'warn' ? 'text-amber-200' : 'text-slate-400'}`}>{event.text}</div><div className="mt-0.5 text-[8px] text-slate-700">{tapeTimeLabel(event.ts)}</div></div></div>)}</div>
             </Card>
           </div>
         </section>
