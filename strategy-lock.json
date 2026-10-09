@@ -1,9 +1,9 @@
 {
   "name": "NEO ORDER_FLOW_ADAPTIVE_LEARNING: tiered high-frequency PAPER entries with size/avoid learning, on the durable honest PAPER runtime",
   "locked_at_utc": "2026-10-08",
-  "source_commit": "CONTINUOUS_DISCOVERY_20261009",
+  "source_commit": "NONSTOP_SCAN_BACKPRESSURE_20261009",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "d921fb33162c7e984aa8bbc9fd581cccc081316e8bf4a0765194694218120e8f",
+  "sha256": "9081914bd960bf40443dbfc024e6b79102a4d3bbb90aa7a6798f5a01577b1c15",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE_LEARNING",
   "rules": {
     "max_positions": 8,
@@ -26,7 +26,7 @@
     "adaptive_exits_override_base_take_profit_trailing_and_hold": true
   },
   "policy": "Owner-requested on 2026-10-08: trade as often as honest costs allow, learn from closed trades and lean toward what has been profitable. PAPER only; existing history, balance, trade sequence and audit are preserved; no reset, no live execution, no automatic live-money promotion.",
-  "integrity_note": "Entry thresholds, exits and cost caps are fixed; only position size and avoid/allow are learned, from quote-evidenced closed trades with a 24-hour half-life. Verified flow coverage, exact pool/mint checks, safety checks, bounded quote age and uncapped modeled losses are retained. A planned stop is not a guaranteed fill. Discovery-only extension: a persistent rotating universe refreshes up to 240 token addresses per scan from up to 5000 recently observed addresses; entry, exit, scoring, sizing, costs and PAPER-only execution rules are unchanged.",
+  "integrity_note": "Entry thresholds, exits and cost caps are fixed; only position size and avoid/allow are learned, from quote-evidenced closed trades with a 24-hour half-life. Verified flow coverage, exact pool/mint checks, safety checks, bounded quote age and uncapped modeled losses are retained. A planned stop is not a guaranteed fill. Discovery-only extension: a persistent rotating universe refreshes up to 240 token addresses per scan from up to 5000 recently observed addresses; entry, exit, scoring, sizing, costs and PAPER-only execution rules are unchanged. Scanner scheduling now targets the configured cadence, publishes per-batch refresh progress, and fails open when the isolated PAPER training recorder is oversized/degraded; entry, exit, scoring, sizing, costs and PAPER-only execution rules are unchanged.",
   "execution_mode": "PAPER_QUOTE_OR_OBSERVED_POOL_MODEL",
   "entry_policy_version": "ORDER_FLOW_TIERED_LEARNER_V1",
   "entry_policy_limits": {
@@ -86,7 +86,7 @@
     "backend/paper_training.py": "c560ec945c210663b00617780f71c93cf76f08538b4fcb7af2815d163af9df48",
     "backend/pumpswap_stop_quote.py": "518f607710ea738edd94d5e6040fcd0ec8bc5521f6f20814ad20967c8be4be61",
     "backend/strategy_lab.py": "a445aa349b8bd6c5985bd51f9f26ed4115331d91d69086c41172367dc9cc3637",
-    "backend/training_bridge.py": "f25d6bc763c801bbaa4c65c05869921b471885b46ca6187ed81ad2a39ac0c08d",
+    "backend/training_bridge.py": "c45341b7b0fb12d034de94d3f39aaeadccefddff135c8cdcae6dd9775f728936",
     "backend/training_worker.py": "75a48c03cbdf7274a74d6701f8e2f45ce618337caf135fde9dfe05bc3bbeba81",
     "backend/user_gateway.py": "e51ce4a6e0077df26d0804356dc463ba0350bb3904c7b24291d12892bbfc70f3",
     "backend/lab_activity.py": "deb81c318f6c0419ed6237a40288cbb175bd8f7c1fca42adc431029ec06a1c14",

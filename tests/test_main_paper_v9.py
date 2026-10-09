@@ -331,7 +331,7 @@ class MainPaperRepair(unittest.TestCase):
 
     def test_enabled_bridge_refreshes_shared_evidence_and_context(self):
         self.position()
-        with patch.object(m.training_bridge,'enabled',return_value=True),patch.object(m.training_bridge,'observe') as observe,\
+        with patch.object(m.training_bridge,'accepting',return_value=True),patch.object(m.training_bridge,'observe') as observe,\
              patch.object(m.rug_guard,'check',return_value={'status':'pass','checked_at':self.clock[0]}),\
              patch.object(m.price_integrity,'check',return_value={'status':'pass'}),\
              patch.object(self.monitor,'market_context',return_value=self.context),\

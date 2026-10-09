@@ -99,6 +99,36 @@ class TrainingBridgeProcessTests(unittest.TestCase):
         self.assertEqual(self.control(snap)["positions"][0]["entry"]["market_price"], 2)
         self.assertEqual(snap["unique_market_episodes"], 1)
 
+    def test_existing_training_state_reuses_saved_config_when_no_override_is_requested(self):
+        # Reproduce the production failure: the persisted config can legitimately
+        # differ from today's module defaults. A bridge started with config=None
+        # must pass JSON null to the worker so PaperTrainingEngine reuses it.
+        PaperTrainingEngine(self.root / "training.json", config={"latency_ms": 777})
+        self.start()
+        snap = self.wait_for(lambda s:s["unique_observations"] == 0)
+        self.assertEqual(snap["status"], "WAIT")
+        saved = json.loads((self.root / "training.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["config"]["latency_ms"], 777)
+        self.assertIsNone(json.loads((self.root / "worker_config.json").read_text(encoding="utf-8")))
+
+    def test_oversized_journal_pauses_recording_without_deleting_it(self):
+        journal = self.root / "observations.jsonl"
+        journal.write_bytes(b"x" * 1024)
+        with patch.dict("os.environ", {"NEO_TRAINING_MAX_JOURNAL_BYTES": str(64 * 1024 * 1024)}):
+            # Minimum cap is 64 MiB, so make the file sparse and safely over it.
+            with journal.open("r+b") as handle:
+                handle.truncate(65 * 1024 * 1024)
+            self.start()
+            end = time.monotonic() + 2
+            while time.monotonic() < end and not self.bridge.paused_reason:
+                time.sleep(.01)
+            self.assertIsNotNone(self.bridge.paused_reason)
+            self.assertIsNone(self.bridge.process)
+            self.assertFalse(self.bridge.accepting())
+            coin, flow, *_ = inputs(int(time.time() * 1000))
+            self.assertFalse(self.bridge.observe(coin, flow))
+            self.assertEqual(journal.stat().st_size, 65 * 1024 * 1024)
+
     def test_process_restart_recovers_pending_and_durable_completed_results(self):
         self.start()
         at = int(time.time()*1000)

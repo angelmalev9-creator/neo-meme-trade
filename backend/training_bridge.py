@@ -19,6 +19,7 @@ from paper_training import USDC, digest, number, raw_int
 
 _BRIDGE = None
 ROUTE_EVIDENCE_TTL_MS = 30_000
+DEFAULT_MAX_JOURNAL_BYTES = 2 * 1024 * 1024 * 1024
 SOL = 'So11111111111111111111111111111111111111112'
 
 
@@ -43,9 +44,32 @@ class TrainingBridge:
         self.config = config
         self.process = None
         self.closed = False
+        self.max_journal_bytes = max(64 * 1024 * 1024, int(os.getenv('NEO_TRAINING_MAX_JOURNAL_BYTES', str(DEFAULT_MAX_JOURNAL_BYTES))))
+        journal = self.root / 'observations.jsonl'
+        try:
+            self.journal_bytes = journal.stat().st_size
+        except OSError:
+            self.journal_bytes = 0
+        self.paused_reason = (
+            f'Training journal safety cap exceeded ({self.journal_bytes} > {self.max_journal_bytes}); recording paused'
+            if self.journal_bytes > self.max_journal_bytes else None
+        )
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name='paper-training', daemon=True)
         self.thread.start()
+
+    def accepting(self):
+        if getattr(self, 'closed', False) or getattr(self, 'paused_reason', None):
+            return False
+        process = getattr(self, 'process', None)
+        if process is not None and process.poll() is not None:
+            self.error = f'Training worker exited with code {process.returncode}'
+            return False
+        work_queue = getattr(self, 'queue', None)
+        if work_queue is not None and work_queue.maxsize > 0 and work_queue.qsize() >= max(64, int(work_queue.maxsize * .75)):
+            self.error = 'Training backlog high; new observations paused so the primary PAPER engine stays responsive'
+            return False
+        return True
 
     def submit(self, observation):
         if self.closed:
@@ -60,8 +84,20 @@ class TrainingBridge:
 
     def run(self):
         try:
+            if self.paused_reason:
+                self.error = self.paused_reason
+                self.latest = {
+                    'status': 'degraded', 'paper_only': True, 'reason': self.paused_reason,
+                    'journal_bytes': self.journal_bytes, 'recording_paused': True,
+                }
+                while not self.stop_event.wait(.25):
+                    pass
+                return
             config_path = self.root / 'worker_config.json'
-            atomic_json(config_path, self.config or {})
+            # None means: reuse the configuration persisted in training.json.
+            # Writing {} here silently re-expanded today's defaults and made old
+            # durable PAPER training state look like an incompatible config.
+            atomic_json(config_path, self.config)
             with (self.root / 'worker_error.log').open('ab') as diagnostic:
                 self.process = subprocess.Popen(
                     [sys.executable, str(Path(__file__).with_name('training_worker.py')),
@@ -264,6 +300,8 @@ class TrainingBridge:
                 'fee_observations':fee_evidence}
 
     def observe(self, coin, flow, **kwargs):
+        if not self.accepting():
+            return False
         try:
             return self._observe(coin, flow, **kwargs)
         except Exception as exc:
@@ -369,6 +407,10 @@ def observe(coin, flow, **kwargs):
     return _BRIDGE.observe(coin, flow, **kwargs) if _BRIDGE else False
 
 
+def accepting():
+    return bool(_BRIDGE and _BRIDGE.accepting())
+
+
 def enabled():
     return _BRIDGE is not None
 
@@ -376,9 +418,17 @@ def enabled():
 def snapshot():
     if _BRIDGE:
         result = copy.deepcopy(_BRIDGE.latest)
+        try:
+            root = getattr(_BRIDGE, 'root', None)
+            journal_bytes = (root / 'observations.jsonl').stat().st_size if root is not None else getattr(_BRIDGE, 'journal_bytes', 0)
+        except OSError:
+            journal_bytes = getattr(_BRIDGE, 'journal_bytes', 0)
         result['recorder'] = {'processed': _BRIDGE.processed, 'backlog': _BRIDGE.queue.qsize(),
-                              'dropped': _BRIDGE.dropped, 'error': _BRIDGE.error}
-        if _BRIDGE.error:
+                              'dropped': _BRIDGE.dropped, 'error': _BRIDGE.error,
+                              'accepting': _BRIDGE.accepting(),
+                              'paused_reason': getattr(_BRIDGE, 'paused_reason', None),
+                              'journal_bytes': journal_bytes}
+        if _BRIDGE.error or not result['recorder']['accepting']:
             result['status'] = 'degraded'
         return result
     return {'status': 'disabled', 'paper_only': True, 'reason': 'Worker starts only in main()'}
