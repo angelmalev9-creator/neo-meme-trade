@@ -640,9 +640,22 @@ def compact_public_trade(trade: dict[str, Any]) -> dict[str, Any]:
 
 
 def api(path: str) -> Any:
-    response = SESSION.get(f'{DEX_API}{path}', timeout=(1.5, 5.0))
-    response.raise_for_status()
-    return response.json()
+    # DexScreener occasionally closes or stalls a single request. Retry once
+    # before declaring discovery degraded so a transient 5s blip does not drop
+    # a source from the rotating universe.
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            response = SESSION.get(f'{DEX_API}{path}', timeout=(1.5, 5.0))
+            response.raise_for_status()
+            return response.json()
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            last_error = exc
+            if attempt == 0:
+                time.sleep(0.15)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError('DexScreener request failed')
 
 
 def sol_usd_market_price() -> float:
@@ -1364,7 +1377,7 @@ def fetch_pairs(addresses: list[str], progress=None) -> list[dict[str, Any]]:
     if not batches:
         return []
 
-    def one(batch: list[str]) -> list[dict[str, Any]]:
+    def request_batch(batch: list[str]) -> list[dict[str, Any]] | None:
         try:
             response = requests.get(
                 f"{DEX_API}/tokens/v1/solana/{','.join(batch)}",
@@ -1373,30 +1386,48 @@ def fetch_pairs(addresses: list[str], progress=None) -> list[dict[str, Any]]:
             )
             response.raise_for_status()
             rows = response.json()
-            return rows if isinstance(rows, list) else []
+            return rows if isinstance(rows, list) else None
         except (requests.RequestException, ValueError, TypeError):
-            return []
+            return None
+
+    def one(batch: list[str]) -> tuple[list[dict[str, Any]], int]:
+        rows = request_batch(batch)
+        if rows is not None:
+            return rows, 0
+        # A failed 30-token call is retried as two smaller calls. This keeps the
+        # normal request rate unchanged and only spends extra requests when the
+        # provider actually timed out/closed the connection.
+        recovered: list[dict[str, Any]] = []
+        unavailable = 0
+        time.sleep(0.12)
+        for start in range(0, len(batch), 15):
+            part = batch[start:start + 15]
+            retry_rows = request_batch(part)
+            if retry_rows is None:
+                unavailable += len(part)
+            else:
+                recovered.extend(retry_rows)
+        return recovered, unavailable
 
     pairs: list[dict[str, Any]] = []
-    failures = 0
+    unavailable_addresses = 0
     completed_addresses = 0
     total_addresses = len(clean)
     with ThreadPoolExecutor(max_workers=min(MARKET_BATCH_WORKERS, len(batches))) as pool:
         futures = {pool.submit(one, batch): len(batch) for batch in batches}
         for future in as_completed(futures):
-            rows = future.result()
+            rows, unavailable = future.result()
             if rows:
                 pairs.extend(rows)
-            else:
-                failures += 1
+            unavailable_addresses += unavailable
             completed_addresses += futures[future]
             if progress is not None:
                 try:
                     progress(completed_addresses, total_addresses)
                 except Exception:
                     pass
-    if failures:
-        STATE.event(f'Market data warning: {failures}/{len(batches)} DexScreener batches unavailable')
+    if unavailable_addresses:
+        STATE.event(f'Market data warning: {unavailable_addresses}/{total_addresses} token-а unavailable след retry')
     return pairs
 
 

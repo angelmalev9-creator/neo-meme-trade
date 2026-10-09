@@ -35,6 +35,37 @@ class MarketRefreshProgressTests(unittest.TestCase):
         self.assertEqual([x[0] for x in progress], sorted(x[0] for x in progress))
         self.assertTrue(all(total == 65 for _, total in progress))
 
+    def test_fetch_pairs_recovers_a_timed_out_batch_by_splitting_retry(self):
+        addresses = [live_tape._b58encode(bytes([i]) * 32) for i in range(1, 31)]
+        calls = []
+        def fake_get(url, **_kwargs):
+            raw = url.rsplit('/', 1)[-1]
+            batch = raw.split(',') if raw else []
+            calls.append(len(batch))
+            if len(batch) == 30:
+                raise monitor.requests.Timeout('transient timeout')
+            return _Response([
+                {'chainId': 'solana', 'baseToken': {'address': address}, 'pairAddress': address,
+                 'liquidity': {'usd': 1}, 'priceUsd': '1'}
+                for address in batch
+            ])
+        with patch.object(monitor.requests, 'get', side_effect=fake_get), patch.object(monitor.time, 'sleep'):
+            rows = monitor.fetch_pairs(addresses)
+        self.assertEqual(len(rows), 30)
+        self.assertEqual(calls, [30, 15, 15])
+
+    def test_discovery_api_retries_one_transient_timeout(self):
+        calls = []
+        def fake_get(url, **_kwargs):
+            calls.append(url)
+            if len(calls) == 1:
+                raise monitor.requests.Timeout('transient timeout')
+            return _Response([{'ok': True}])
+        with patch.object(monitor.SESSION, 'get', side_effect=fake_get), patch.object(monitor.time, 'sleep'):
+            rows = monitor.api('/test')
+        self.assertEqual(rows, [{'ok': True}])
+        self.assertEqual(len(calls), 2)
+
 
 if __name__ == '__main__':
     unittest.main()

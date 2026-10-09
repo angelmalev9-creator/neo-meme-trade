@@ -22,6 +22,11 @@ import requests
 
 API_URL = os.getenv('NEO_LOCAL_API', 'http://127.0.0.1:8788/state')
 RPC_URL = os.getenv('SOLANA_RPC_URL', 'https://rpc.solanatracker.io/public')
+RPC_FALLBACK_URLS = tuple(url.strip() for url in os.getenv(
+    'SOLANA_RPC_FALLBACKS',
+    'https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com',
+).split(',') if url.strip() and url.strip() != RPC_URL)
+RPC_URLS = (RPC_URL, *RPC_FALLBACK_URLS)
 OUT = Path(os.getenv('NEO_LIVE_TAPE_PATH', '/var/lib/neo-market/live_tape-oct4.json'))
 MAX_TRACKED = max(1, int(os.getenv('NEO_TAPE_MAX_PAIRS', '45')))
 MAX_EVENTS = max(100, int(os.getenv('NEO_TAPE_MAX_EVENTS', '1600')))
@@ -178,18 +183,62 @@ def align_answers(calls: list[tuple[str, list[Any]]], data: Any) -> list[dict[st
     return [indexed.get(i + 1, {'id': i + 1, 'error': {'code': 'MISSING_RPC_ID'}}) for i in range(len(calls))]
 
 
-def rpc_batch(calls: list[tuple[str, list[Any]]]) -> list[dict[str, Any]]:
-    if not calls:
-        return []
+def _rpc_cap(url: str, calls: list[tuple[str, list[Any]]]) -> int:
+    host = url.lower()
+    methods = {method for method, _ in calls}
+    if 'publicnode.com' in host:
+        return 1 if methods == {'getTransaction'} else min(RPC_BATCH, 4)
+    if 'api.mainnet-beta.solana.com' in host:
+        return min(RPC_BATCH, 10)
+    return RPC_BATCH
+
+
+def _rpc_request(url: str, calls: list[tuple[str, list[Any]]]) -> list[dict[str, Any]]:
     answers: list[dict[str, Any]] = []
-    for start in range(0, len(calls), RPC_BATCH):
-        chunk = calls[start:start + RPC_BATCH]
+    cap = max(1, _rpc_cap(url, calls))
+    for start in range(0, len(calls), cap):
+        chunk = calls[start:start + cap]
         payload = [{'jsonrpc': '2.0', 'id': i + 1, 'method': method, 'params': params}
                    for i, (method, params) in enumerate(chunk)]
-        response = SESSION.post(RPC_URL, json=payload, timeout=(2.0, 12.0))
+        response = SESSION.post(url, json=payload, timeout=(1.5, 8.0))
         response.raise_for_status()
         answers.extend(align_answers(chunk, response.json()))
     return answers
+
+
+def rpc_batch(calls: list[tuple[str, list[Any]]]) -> list[dict[str, Any]]:
+    """Use the Oct-4 RPC first, but fail over transient transport/provider errors.
+
+    Entry semantics stay unchanged.  Fallbacks only fill calls whose provider
+    response is an RPC error; a legitimate ``result: null`` is preserved.
+    """
+    if not calls:
+        return []
+    resolved: list[dict[str, Any] | None] = [None] * len(calls)
+    pending = list(range(len(calls)))
+    last_error = 'RPC_UNAVAILABLE'
+    for url in RPC_URLS:
+        if not pending:
+            break
+        subset = [calls[index] for index in pending]
+        try:
+            answers = _rpc_request(url, subset)
+        except (requests.RequestException, RuntimeError, ValueError, TypeError) as exc:
+            last_error = type(exc).__name__
+            continue
+        retry: list[int] = []
+        for original_index, answer in zip(pending, answers):
+            if not isinstance(answer, dict) or answer.get('error'):
+                retry.append(original_index)
+                if isinstance(answer, dict):
+                    last_error = str((answer.get('error') or {}).get('code') or 'RPC_ERROR')
+                continue
+            resolved[original_index] = answer
+        pending = retry
+    for index in pending:
+        resolved[index] = {'id': index + 1, 'error': {'code': last_error}}
+    return [answer or {'id': index + 1, 'error': {'code': 'RPC_UNAVAILABLE'}}
+            for index, answer in enumerate(resolved)]
 
 
 def amount_map(items: Any, mint: str) -> defaultdict[str, float]:
@@ -341,9 +390,12 @@ def poll_once() -> dict[str, Any]:
     complete_count = sum(row['status'] == 'COMPLETE' for row in coverage.values())
     payload = {
         **STATUS,
-        'status': 'online' if complete_count == len(feed) else 'warming',
+        # The collector is healthy as soon as it is polling successfully. New
+        # candidates can still be individually WARMING without making the whole
+        # transport look offline/degraded forever. Entry checks remain per-pair.
+        'status': 'online' if complete_count else 'warming',
         'updated_at': stamp, 'events': list(EVENTS), 'pair_coverage': coverage,
-        'coverage': complete_count / max(1, len(feed)), 'window_ms': FLOW_WINDOW_MS,
+        'coverage': complete_count / max(1, len(feed)), 'warming_pairs': len(feed) - complete_count,
         'backlog': 0, 'current_backlog': 0, 'stale_pending': 0,
         'events_total': len(EVENTS), 'lag_ms': 0,
     }
@@ -360,11 +412,15 @@ def main() -> None:
             poll_once()
         except Exception as exc:
             stamp = now_ms()
+            fallback_coverage = coverage_snapshot(list(TRACKED.values())[:MAX_TRACKED], stamp)
+            complete_count = sum(row.get('status') == 'COMPLETE' for row in fallback_coverage.values())
             payload = {
                 **STATUS, 'status': 'degraded', 'updated_at': stamp,
                 'error': str(exc)[:240], 'events': list(EVENTS),
-                'pair_coverage': coverage_snapshot(list(TRACKED.values())[:MAX_TRACKED], stamp),
-                'coverage': 0.0, 'window_ms': FLOW_WINDOW_MS,
+                'pair_coverage': fallback_coverage,
+                'coverage': complete_count / max(1, len(fallback_coverage)),
+                'warming_pairs': max(0, len(fallback_coverage) - complete_count),
+                'window_ms': FLOW_WINDOW_MS,
                 'backlog': 0, 'current_backlog': 0, 'stale_pending': 0,
                 'events_total': len(EVENTS), 'lag_ms': 0,
             }
