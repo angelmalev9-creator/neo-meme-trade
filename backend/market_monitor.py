@@ -101,6 +101,7 @@ if MAX_POSITION_RISK_USD <= 0 or not 0 < MAX_TOTAL_EXPOSURE_PCT <= 100 or not 0 
 # EARLY_SCOUT_V10 keeps the 2026-10-05 environment-driven values captured
 # above. An unknown profile refuses to start.
 V10_PROFILE = 'EARLY_SCOUT_V10'
+OCT4_FIXED_PROFILE = 'ORDER_FLOW_OCT4_FIXED_5_10'
 DEFAULT_STRATEGY_PROFILE = learner.PROFILE
 _V10_SETTINGS = dict(
     SCAN_SECONDS=SCAN_SECONDS, POSITION_SCAN_SECONDS=POSITION_SCAN_SECONDS, MAX_POSITIONS=MAX_POSITIONS,
@@ -156,6 +157,25 @@ def _oct4_settings() -> dict[str, Any]:
     )
 
 
+def _oct4_fixed_settings() -> dict[str, Any]:
+    """Oct-4 GOLD entries with owner-requested fixed $200 / -5% / +10% exits.
+
+    This deliberately keeps the Oct-4 entry signal and all modern rug, price,
+    quote and execution checks. Only position sizing and exit targets are
+    overlaid; no adaptive/trailing/conviction exit can replace the fixed TP.
+    """
+    settings = _oct4_settings()
+    settings.update(
+        STOP_LOSS_PCT=5.0, TAKE_PROFIT_PCT=10.0, MAX_HOLD_MINUTES=60,
+        TRADE_NOTIONAL_USD=200.0,
+        STRATEGY_VERSION='gold-2026-10-04-fixed-5-10-20261009',
+        EXIT_POLICY='fixed', EXIT_POLICY_VERSION=exit_policy.VERSION,
+        LEARNING_MODE='OCT4_GOLD_FIXED_200_SL5_TP10',
+        CONFIG_SOURCE='order_flow_adaptive_oct4.CONFIG + owner fixed 200/5/10 overlay',
+    )
+    return settings
+
+
 def _learner_settings() -> dict[str, Any]:
     c, loosest = learner.CONFIG, learner.TIER_LIMITS['EXPLORE']
     return dict(
@@ -197,6 +217,8 @@ def apply_strategy_profile(name: str | None = None) -> str:
         settings = _learner_settings()
     elif profile == oct4.PROFILE:
         settings = _oct4_settings()
+    elif profile == OCT4_FIXED_PROFILE:
+        settings = _oct4_fixed_settings()
     elif profile == V10_PROFILE:
         settings = _V10_SETTINGS
     else:
@@ -211,8 +233,13 @@ def is_learner() -> bool:
 
 
 def is_adaptive() -> bool:
-    """Profiles that use the conviction model and adaptive exits."""
-    return STRATEGY_PROFILE in (oct4.PROFILE, learner.PROFILE)
+    """Profiles that use the Oct-4 conviction/GOLD entry family."""
+    return STRATEGY_PROFILE in (oct4.PROFILE, OCT4_FIXED_PROFILE, learner.PROFILE)
+
+
+def is_oct4_fixed_size() -> bool:
+    """Oct-4 profiles that must never resize the owner-requested $200 notional."""
+    return STRATEGY_PROFILE in (oct4.PROFILE, OCT4_FIXED_PROFILE)
 
 
 def policy_module():
@@ -600,8 +627,15 @@ def prefer_exact_tape_pairs(chosen: dict[str, dict[str, Any]], pairs: list[dict[
         if exact and str(pair.get('pairAddress') or '') == exact:
             chosen[address] = pair
 
+PUBLIC_HISTORY_MIN_NOTIONAL_USD = 200.0
 _ALL_TIME_HISTORY_CACHE: dict[str, Any] = {'mtime_ns': None, 'rows': []}
 _ALL_TIME_HISTORY_LOCK = threading.Lock()
+
+def public_history_trade_visible(trade: dict[str, Any]) -> bool:
+    """Hide known sub-$200 trades; legacy rows without size remain readable."""
+    if 'notional_usd' not in trade or trade.get('notional_usd') is None:
+        return True
+    return num(trade.get('notional_usd')) + 1e-9 >= PUBLIC_HISTORY_MIN_NOTIONAL_USD
 
 def read_all_time_history(current_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge restored PAPER history for display without touching engine state."""
@@ -612,7 +646,10 @@ def read_all_time_history(current_history: list[dict[str, Any]]) -> list[dict[st
             if _ALL_TIME_HISTORY_CACHE.get('mtime_ns') != stat.st_mtime_ns:
                 data = json.loads(ALL_TIME_HISTORY_PATH.read_text(encoding='utf-8'))
                 rows = data.get('history', []) if isinstance(data, dict) else []
-                _ALL_TIME_HISTORY_CACHE['rows'] = [row for row in rows if isinstance(row, dict)]
+                _ALL_TIME_HISTORY_CACHE['rows'] = [
+                    row for row in rows
+                    if isinstance(row, dict) and public_history_trade_visible(row)
+                ]
                 _ALL_TIME_HISTORY_CACHE['mtime_ns'] = stat.st_mtime_ns
             archive_rows = list(_ALL_TIME_HISTORY_CACHE.get('rows') or [])
     except Exception:
@@ -623,14 +660,16 @@ def read_all_time_history(current_history: list[dict[str, Any]]) -> list[dict[st
         trade_id = str(trade.get('id') or '')
         if trade_id:
             merged[trade_id] = trade
-    for trade in current_history:
-        if not isinstance(trade, dict):
-            continue
+    filtered_current = [
+        trade for trade in current_history
+        if isinstance(trade, dict) and public_history_trade_visible(trade)
+    ]
+    for trade in filtered_current:
         trade_id = str(trade.get('id') or '')
         if trade_id:
             merged[trade_id] = trade
     if not merged:
-        return list(current_history)
+        return filtered_current
     return sorted(merged.values(), key=lambda trade: int(trade.get('closed_at') or trade.get('updated_at') or 0), reverse=True)
 
 def compact_public_trade(trade: dict[str, Any]) -> dict[str, Any]:
@@ -1069,7 +1108,7 @@ class State:
                     'risk_overlay': 'PLANNED_NET_STOP_NO_FILL_GUARANTEE',
                     'execution_verification_version': 'QUOTE_EVIDENCE_V9',
                     'rug_guard': rug_guard.VERSION,
-                    'paper_only': True,
+                    'paper_only': True, 'public_history_min_notional_usd': PUBLIC_HISTORY_MIN_NOTIONAL_USD,
                     'runtime_version': runtime.VERSION,
                     'daily_budget_sizing': DAILY_BUDGET_SIZING,
                     'stop_execution_buffer_pct': STOP_EXECUTION_BUFFER_PCT,
@@ -2158,8 +2197,14 @@ class Monitor:
                 STATE.risk_day_pnl()-open_planned_risk,
                 STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
             )
+            if is_oct4_fixed_size() and notional + 1e-9 < TRADE_NOTIONAL_USD:
+                # The Oct-4 family is fixed-size. Never silently create a
+                # smaller trade; if $200 plus costs does not fit, skip it.
+                reject(report,['balance'],coin); return
             if notional < 10:
                 reject(report,['risk_budget_unavailable' if DAILY_BUDGET_SIZING else 'balance'],coin); return
+            if is_oct4_fixed_size():
+                notional = TRADE_NOTIONAL_USD
             report['quoted'] += 1
             dex_id = str(coin.get('dexId') or '').lower()
             if dex_id == 'pumpswap':
@@ -2252,6 +2297,8 @@ class Monitor:
                     STATE.risk_day_pnl()-live_open_risk,
                     STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
                 )
+                if is_oct4_fixed_size() and permitted + 1e-9 < TRADE_NOTIONAL_USD:
+                    reject(report,['balance'],coin); return
                 if notional>permitted:
                     reject(report,['risk_budget_unavailable'],coin); return
                 if not 0 <= now_ms()-int(live_quote['quoted_at']) <= entry_policy.MAX_ENTRY_QUOTE_AGE_MS:

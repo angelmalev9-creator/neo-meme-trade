@@ -213,8 +213,7 @@ export default function App() {
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const startingBalance = state?.stats.demo_starting_balance_usd ?? 1000;
-  const lifetimePnl = state?.stats.metrics?.lifetime?.net_pnl_usd;
-  const allTimeBalance = startingBalance + (lifetimePnl ?? ((state?.stats.demo_balance_usd ?? startingBalance) - startingBalance));
+  const allTimeBalance = state?.stats.demo_equity_usd ?? state?.stats.demo_balance_usd ?? startingBalance;
   const allTimeReturnPct = ((allTimeBalance - startingBalance) / Math.max(startingBalance, 1)) * 100;
 
   const switchTab = (next: Tab) => { setTab(next); try { sessionStorage.setItem('neo-tab', next); } catch { /* optional */ } };

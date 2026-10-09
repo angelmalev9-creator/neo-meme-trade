@@ -642,6 +642,32 @@ class EffectiveConfig(EngineHarness):
                          ['RUNNER', 'STRONG', 'NORMAL', 'CAUTIOUS', 'WEAK'])
         json.dumps(config, allow_nan=False)
 
+    def test_owner_fixed_profile_keeps_gold_entries_and_forces_200_5_10(self):
+        self.addCleanup(m.apply_strategy_profile, oct4.PROFILE)
+        self.assertEqual(m.apply_strategy_profile(m.OCT4_FIXED_PROFILE), m.OCT4_FIXED_PROFILE)
+        config = m.STATE.snapshot()['config']
+        self.assertEqual(config['entry_policy_version'], 'ORDER_FLOW_GOLD_V1')
+        self.assertEqual(config['signal_strategy'], 'ORDER_FLOW_ADAPTIVE')
+        self.assertEqual(config['trade_notional_usd'], 200.0)
+        self.assertEqual(config['stop_loss_pct'], 5.0)
+        self.assertEqual(config['take_profit_pct'], 10.0)
+        self.assertEqual(config['exit_policy'], 'fixed')
+        self.assertEqual(config['exit_policy_version'], 'HONEST_NET_EXIT_V1')
+        self.assertEqual(config['public_history_min_notional_usd'], 200.0)
+
+    def test_public_history_hides_sub_200_trades_without_touching_internal_ledger(self):
+        archive = self.root / 'all_time_history.json'
+        archive.write_text(json.dumps({'history': [
+            {'id': 'small', 'notional_usd': 199.99, 'closed_at': 1},
+            {'id': 'full', 'notional_usd': 200.0, 'closed_at': 2},
+        ]}), encoding='utf-8')
+        m._ALL_TIME_HISTORY_CACHE.update(mtime_ns=None, rows=[])
+        rows = m.read_all_time_history([
+            {'id': 'current-small', 'notional_usd': 50.0, 'closed_at': 3},
+            {'id': 'current-full', 'notional_usd': 200.0, 'closed_at': 4},
+        ])
+        self.assertEqual([row['id'] for row in rows], ['current-full', 'full'])
+
     def test_environment_cannot_drift_the_strategy(self):
         self.addCleanup(m.apply_strategy_profile, oct4.PROFILE)
         drift = {'NEO_MAX_POSITIONS': '20', 'NEO_TRADE_NOTIONAL_USD': '50', 'NEO_STOP_LOSS_PCT': '4',
