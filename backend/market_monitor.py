@@ -291,17 +291,20 @@ BUY_PRESSURE_FIXED = STRATEGY_PROFILE == OCT4_FIXED_PROFILE and _env_enabled('NE
 BUY_PRESSURE_FLOW_SECONDS = max(10, min(60, int(float(os.getenv('NEO_BUY_PRESSURE_FLOW_SECONDS', '30')))))
 BUY_PRESSURE_MIN_SCORE = float(os.getenv('NEO_BUY_PRESSURE_MIN_SCORE', '60'))
 BUY_PRESSURE_MIN_LIQUIDITY_USD = float(os.getenv('NEO_BUY_PRESSURE_MIN_LIQUIDITY_USD', '15000'))
+BUY_PRESSURE_PUMPFUN_MIN_LIQUIDITY_USD = float(os.getenv('NEO_BUY_PRESSURE_PUMPFUN_MIN_LIQUIDITY_USD', '3000'))
+BUY_PRESSURE_PUMPFUN_MIN_SCORE = float(os.getenv('NEO_BUY_PRESSURE_PUMPFUN_MIN_SCORE', '45'))
+BUY_PRESSURE_PUMPFUN_MAX_AGE_MINUTES = float(os.getenv('NEO_BUY_PRESSURE_PUMPFUN_MAX_AGE_MINUTES', '45'))
 BUY_PRESSURE_MIN_CONVICTION = float(os.getenv('NEO_BUY_PRESSURE_MIN_CONVICTION', '50'))
 BUY_PRESSURE_MIN_M5_VOLUME_USD = float(os.getenv('NEO_BUY_PRESSURE_MIN_M5_VOLUME_USD', '2500'))
 BUY_PRESSURE_MIN_M5_BUYS = float(os.getenv('NEO_BUY_PRESSURE_MIN_M5_BUYS', '8'))
 BUY_PRESSURE_MIN_MARKET_RATIO = float(os.getenv('NEO_BUY_PRESSURE_MIN_MARKET_RATIO', '2.0'))
-BUY_PRESSURE_EXTREME_MARKET_RATIO = float(os.getenv('NEO_BUY_PRESSURE_EXTREME_MARKET_RATIO', '4.0'))
+BUY_PRESSURE_EXTREME_MARKET_RATIO = float(os.getenv('NEO_BUY_PRESSURE_EXTREME_MARKET_RATIO', '3.0'))
 BUY_PRESSURE_MIN_FLOW_RATIO = float(os.getenv('NEO_BUY_PRESSURE_MIN_FLOW_RATIO', '1.20'))
 BUY_PRESSURE_MIN_FLOW_TRADES = float(os.getenv('NEO_BUY_PRESSURE_MIN_FLOW_TRADES', '2'))
 BUY_PRESSURE_MIN_M5_PCT = float(os.getenv('NEO_BUY_PRESSURE_MIN_M5_PCT', '-3'))
 BUY_PRESSURE_MAX_M5_PCT = float(os.getenv('NEO_BUY_PRESSURE_MAX_M5_PCT', '18'))
 BUY_PRESSURE_MAX_AGE_MINUTES = float(os.getenv('NEO_BUY_PRESSURE_MAX_AGE_MINUTES', '180'))
-BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES = float(os.getenv('NEO_BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES', '60'))
+BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES = float(os.getenv('NEO_BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES', '30'))
 
 
 def buy_pressure_rejections(coin: dict[str, Any], flow: dict[str, Any], context: dict[str, Any]) -> list[str]:
@@ -309,6 +312,11 @@ def buy_pressure_rejections(coin: dict[str, Any], flow: dict[str, Any], context:
     score = num(coin.get('score'))
     liquidity = num(coin.get('liquidityUsd'))
     age = num(coin.get('ageMinutes'), 999999)
+    dex_id = str(coin.get('dexId') or '').lower()
+    pumpfun_early = dex_id == 'pumpfun'
+    min_score = BUY_PRESSURE_PUMPFUN_MIN_SCORE if pumpfun_early else BUY_PRESSURE_MIN_SCORE
+    min_liquidity = BUY_PRESSURE_PUMPFUN_MIN_LIQUIDITY_USD if pumpfun_early else BUY_PRESSURE_MIN_LIQUIDITY_USD
+    max_age = BUY_PRESSURE_PUMPFUN_MAX_AGE_MINUTES if pumpfun_early else BUY_PRESSURE_MAX_AGE_MINUTES
     observed_at = num(coin.get('updatedAt'))
     now = now_ms()
     m5 = num((coin.get('priceChange') or {}).get('m5'), -999)
@@ -327,25 +335,30 @@ def buy_pressure_rejections(coin: dict[str, Any], flow: dict[str, Any], context:
         reasons.append('invalid_pair')
     if num(coin.get('priceUsd')) <= 0: reasons.append('invalid_price')
     if observed_at <= 0 or not 0 <= now - observed_at <= entry_policy.MAX_FEED_AGE_MS: reasons.append('stale_feed')
-    if score < BUY_PRESSURE_MIN_SCORE: reasons.append('score')
-    if liquidity < BUY_PRESSURE_MIN_LIQUIDITY_USD: reasons.append('liquidity')
-    if age > BUY_PRESSURE_MAX_AGE_MINUTES: reasons.append('early_age')
+    if score < min_score: reasons.append('score')
+    if liquidity < min_liquidity: reasons.append('liquidity')
+    if age > max_age: reasons.append('early_age')
     if not BUY_PRESSURE_MIN_M5_PCT <= m5 <= BUY_PRESSURE_MAX_M5_PCT: reasons.append('momentum')
     if volume_m5 < BUY_PRESSURE_MIN_M5_VOLUME_USD: reasons.append('short_volume')
     if buys < BUY_PRESSURE_MIN_M5_BUYS: reasons.append('market_activity')
     if market_ratio < BUY_PRESSURE_MIN_MARKET_RATIO: reasons.append('market_buyers')
 
-    # Verified order flow is preferred and must agree with the market tape. For
-    # a brand-new pool whose wallet tape is still warming, allow only a much
-    # stronger DEX imbalance, enough real 5m volume and a very young pool.
+    extreme_setup = (
+        age <= min(BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES, max_age)
+        and market_ratio >= BUY_PRESSURE_EXTREME_MARKET_RATIO
+        and buys >= BUY_PRESSURE_MIN_M5_BUYS
+        and volume_m5 >= max(BUY_PRESSURE_MIN_M5_VOLUME_USD * 2, 5000)
+    )
+    # Verified wallet flow is preferred. But when the public 5m tape is already
+    # extremely one-sided, do not let a warming 30s wallet sample make the engine
+    # miss the very move this profile is designed to catch. Known large sells
+    # still veto the setup, and rug/price/executable-quote checks run afterwards.
     if flow_trades >= BUY_PRESSURE_MIN_FLOW_TRADES:
-        if conviction < BUY_PRESSURE_MIN_CONVICTION: reasons.append('conviction')
-        if flow_ratio < BUY_PRESSURE_MIN_FLOW_RATIO: reasons.append('flow_ratio')
         if max_sell >= max(750.0, buy_usd * 0.9): reasons.append('large_sells')
-    elif not (age <= BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES
-              and market_ratio >= BUY_PRESSURE_EXTREME_MARKET_RATIO
-              and buys >= BUY_PRESSURE_MIN_M5_BUYS
-              and volume_m5 >= max(BUY_PRESSURE_MIN_M5_VOLUME_USD * 2, 5000)):
+        if not extreme_setup:
+            if conviction < BUY_PRESSURE_MIN_CONVICTION: reasons.append('conviction')
+            if flow_ratio < BUY_PRESSURE_MIN_FLOW_RATIO: reasons.append('flow_ratio')
+    elif not extreme_setup:
         reasons.append('flow_count')
     return list(dict.fromkeys(reasons))
 
@@ -1450,6 +1463,9 @@ def effective_entry_thresholds() -> dict[str, Any]:
         return {
             'min_score': BUY_PRESSURE_MIN_SCORE,
             'min_liquidity_usd': BUY_PRESSURE_MIN_LIQUIDITY_USD,
+            'pumpfun_min_score': BUY_PRESSURE_PUMPFUN_MIN_SCORE,
+            'pumpfun_min_liquidity_usd': BUY_PRESSURE_PUMPFUN_MIN_LIQUIDITY_USD,
+            'pumpfun_max_age_minutes': BUY_PRESSURE_PUMPFUN_MAX_AGE_MINUTES,
             'min_conviction': BUY_PRESSURE_MIN_CONVICTION,
             'flow_window_seconds': BUY_PRESSURE_FLOW_SECONDS,
             'min_m5_volume_usd': BUY_PRESSURE_MIN_M5_VOLUME_USD,
@@ -1536,10 +1552,11 @@ def _iso_ms(value: Any) -> int:
 
 
 def gecko_new_pumpswap_pairs() -> list[dict[str, Any]]:
-    """Discover brand-new PumpSwap pools without waiting for profile/boost indexing.
+    """Discover brand-new Pump.fun/PumpSwap pools before profile/boost indexing.
 
-    Cached for 15s (~4 public requests/minute). These rows still pass the same
-    rug, exact-pool Jupiter, impact and stop checks before any PAPER entry.
+    The Gecko dex id for bonding-curve launches is ``pump-fun`` while migrated
+    pools use ``pumpswap``. Both are tradeable through the read-only quote model,
+    so excluding ``pump-fun`` made the scanner blind to the earliest phase.
     """
     current = now_ms()
     with _GECKO_NEW_POOLS_LOCK:
@@ -1561,8 +1578,9 @@ def gecko_new_pumpswap_pairs() -> list[dict[str, Any]]:
             attrs = row.get('attributes') or {}
             rel = row.get('relationships') or {}
             dex_id = str((((rel.get('dex') or {}).get('data') or {}).get('id')) or '').lower()
-            if dex_id != 'pumpswap':
+            if dex_id not in {'pumpswap', 'pump-fun'}:
                 continue
+            normalized_dex_id = 'pumpswap' if dex_id == 'pumpswap' else 'pumpfun'
             base_id = str((((rel.get('base_token') or {}).get('data') or {}).get('id')) or '')
             quote_id = str((((rel.get('quote_token') or {}).get('data') or {}).get('id')) or '')
             mint = base_id.removeprefix('solana_')
@@ -1601,7 +1619,7 @@ def gecko_new_pumpswap_pairs() -> list[dict[str, Any]]:
             parsed.append({
                 'chainId': 'solana',
                 'pairAddress': pair,
-                'dexId': 'pumpswap',
+                'dexId': normalized_dex_id,
                 'url': f'https://www.geckoterminal.com/solana/pools/{pair}',
                 'baseToken': {'address': mint, 'name': symbol, 'symbol': symbol},
                 'quoteToken': {'address': SOL_MINT, 'name': 'Wrapped SOL', 'symbol': 'SOL'},
@@ -2821,7 +2839,19 @@ class Monitor:
                 coin = make_coin(address, pair, metadata.get(address, {}))
                 if coin['priceUsd'] > 0:
                     feed.append(coin)
-            feed.sort(key=lambda c: (num(c.get('score')), num((c.get('volume') or {}).get('h1'))), reverse=True)
+            if BUY_PRESSURE_FIXED:
+                def pressure_rank(c):
+                    tx5 = (c.get('txns') or {}).get('m5') or {}
+                    buys = num(tx5.get('buys')); sells = num(tx5.get('sells'))
+                    ratio = buys / max(sells, 1.0)
+                    return (
+                        ratio >= BUY_PRESSURE_EXTREME_MARKET_RATIO, ratio,
+                        num((c.get('volume') or {}).get('m5')), buys,
+                        -num(c.get('ageMinutes'), 999999), num(c.get('score')),
+                    )
+                feed.sort(key=pressure_rank, reverse=True)
+            else:
+                feed.sort(key=lambda c: (num(c.get('score')), num((c.get('volume') or {}).get('h1'))), reverse=True)
             feed = feed[:MAX_FEED]
             by_address = {c['address']: c for c in feed}
             for position in STATE.positions:
