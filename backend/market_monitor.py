@@ -1736,7 +1736,9 @@ def fetch_pairs(addresses: list[str], progress=None) -> list[dict[str, Any]]:
             )
             response.raise_for_status()
             rows = response.json()
-            return rows if isinstance(rows, list) else None
+            if not isinstance(rows, list):
+                return None
+            return [row for row in rows if isinstance(row, dict)]
         except (requests.RequestException, ValueError, TypeError):
             return None
 
@@ -1791,7 +1793,7 @@ def fetch_pairs(addresses: list[str], progress=None) -> list[dict[str, Any]]:
 def best_pairs(pairs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     best: dict[str, dict[str, Any]] = {}
     for pair in pairs:
-        if pair.get('chainId') != 'solana':
+        if not isinstance(pair, dict) or pair.get('chainId') != 'solana':
             continue
         address = (pair.get('baseToken') or {}).get('address')
         if not address:
@@ -1810,7 +1812,7 @@ def exact_position_pair(position: dict[str, Any], pairs: list[dict[str, Any]]) -
     if not address or not pair_address:
         return None
     for pair in pairs:
-        if pair.get('chainId') != 'solana':
+        if not isinstance(pair, dict) or pair.get('chainId') != 'solana':
             continue
         base_address = str((pair.get('baseToken') or {}).get('address') or '')
         current_pair = str(pair.get('pairAddress') or '')
