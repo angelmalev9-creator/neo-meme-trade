@@ -564,6 +564,33 @@ def read_live_tape() -> dict[str, Any]:
     except Exception:
         return {'status': 'offline', 'events': []}
 
+
+def active_tape_pins(tape: dict[str, Any]) -> dict[str, str]:
+    """Map currently recorded mints to their exact pool so scan rotation cannot outrun flow evidence."""
+    pins: dict[str, str] = {}
+    coverage = tape.get('pair_coverage') or {}
+    if not isinstance(coverage, dict):
+        return pins
+    for row in coverage.values():
+        if not isinstance(row, dict):
+            continue
+        address = str(row.get('address') or '').strip()
+        pair = str(row.get('pairAddress') or '').strip()
+        if is_valid_solana_address(address) and is_valid_solana_address(pair):
+            pins[address] = pair
+    return pins
+
+
+def prefer_exact_tape_pairs(chosen: dict[str, dict[str, Any]], pairs: list[dict[str, Any]], pins: dict[str, str]) -> None:
+    """Use the exact pool whose on-chain tape is being verified, never a different pool for the same mint."""
+    if not pins:
+        return
+    for pair in pairs:
+        address = str((pair.get('baseToken') or {}).get('address') or '')
+        exact = pins.get(address)
+        if exact and str(pair.get('pairAddress') or '') == exact:
+            chosen[address] = pair
+
 _ALL_TIME_HISTORY_CACHE: dict[str, Any] = {'mtime_ns': None, 'rows': []}
 _ALL_TIME_HISTORY_LOCK = threading.Lock()
 
@@ -2204,8 +2231,8 @@ class Monitor:
                     'entry_network_fee_usd': round(entry_quote['network_fee_usd'], 8),
                     'entry_account_reserve_usd': entry_rent, 'token_decimals': decimals,
                     'risk_check': safety,
-                    # Adaptive holds carry their target in the live hold mode (None = trail only).
-                    'take_profit_net_pct': entry_context.get('target_pct') if is_adaptive() else TAKE_PROFIT_PCT,
+                    # The recorded exit policy is authoritative for this position.
+                    'take_profit_net_pct': TAKE_PROFIT_PCT if EXIT_POLICY == 'fixed' else entry_context.get('target_pct'),
                     'cost_assumptions': 'Jupiter AMM fees included; 10bps/leg buffer, network budget, account rent reserve',
                     'entry_price_impact_pct': round(entry_quote['impact_pct'], 6),
                     'entry_slippage_pct': round(entry_quote['slippage_pct'] + entry_quote['latency_pct'], 6),
@@ -2269,6 +2296,22 @@ class Monitor:
             addresses, universe_meta = self.universe.next_batch(
                 priority=priority_addresses, limit=DISCOVERY_SCAN_BATCH
             )
+            # Keep the small set of pools currently being verified by live_tape in
+            # every market scan. Otherwise the 240-address rotation can move on
+            # before the recorder completes its transaction bodies, leaving every
+            # evaluated candidate with zero verified flow despite healthy tape data.
+            tape_pins = active_tape_pins(read_live_tape())
+            if tape_pins:
+                addresses = list(dict.fromkeys([*tape_pins, *addresses]))[:DISCOVERY_SCAN_BATCH]
+                for address in tape_pins:
+                    info = metadata.setdefault(address, {
+                        'sources': [], 'icon': '', 'header': '', 'description': '',
+                        'links': [], 'boost_amount': 0,
+                    })
+                    sources = list(info.get('sources') or [])
+                    if 'live-tape-pinned' not in sources:
+                        sources.append('live-tape-pinned')
+                    info['sources'] = sources
             universe_stats = self.universe.stats()
             priority_selected = len(set(addresses) & set(priority_addresses))
             discovery_stats = {
@@ -2279,6 +2322,7 @@ class Monitor:
                 'rotation_last_scan': max(0, len(addresses) - priority_selected),
                 'new_universe_last_scan': newly_added,
                 'new_universe_since_start': self.new_universe_since_start,
+                'tape_pinned_last_scan': len(tape_pins),
             }
             for address, info in universe_meta.items():
                 if address not in metadata:
@@ -2338,6 +2382,7 @@ class Monitor:
             })
             pairs = list(early_pairs) + dex_pairs
             chosen = best_pairs(pairs)
+            prefer_exact_tape_pairs(chosen, pairs, tape_pins)
 
             # For the first 15 minutes, preserve the newly-created exact PumpSwap
             # pool instead of silently switching to an older/higher-liquidity pair.
