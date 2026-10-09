@@ -4,12 +4,19 @@ The historical chart stop/clamp is intentionally excluded. A planned stop is
 an exit intent, never a promise of the eventual proceeds through a price gap.
 """
 VERSION = 'HONEST_NET_EXIT_V1'
+USER_FIXED_VERSION = 'USER_FIXED_TARGETS_V1'
 ADAPTIVE_VERSION = 'GOLD_ADAPTIVE_NET_CANDIDATE_V1'
 
 def exit_reason(position, context, *, net_pct, peak_net_pct, hold_minutes,
                 stop_pct=5.0, take_profit_pct=10.0, policy='fixed'):
     if net_pct <= -stop_pct:
         return 'STOP_LOSS_NET_TARGET'
+    if policy == 'fixed_targets':
+        # User-controlled PAPER mode: only the configured executable-net SL/TP
+        # can close the position. No max-hold, conviction, liquidity or trailing
+        # shortcut is allowed to realize a trade before one of the two targets.
+        if net_pct >= take_profit_pct: return 'TAKE_PROFIT_NET_TARGET'
+        return None
     if policy == 'fixed':
         if net_pct >= take_profit_pct: return 'TAKE_PROFIT_10_NET'
         if hold_minutes >= 60: return 'MAX_HOLD_60'

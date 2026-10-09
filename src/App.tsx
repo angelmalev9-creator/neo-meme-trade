@@ -32,6 +32,7 @@ type Position = {
   why_entry: string[]; risks_at_entry: string[]; closed_at?: number;
   exit_price?: number; exit_reason?: string; trade_no?: number; session_id?: string;
   balance_before?: number; balance_after?: number; dex_url?: string;
+  stop_loss_pct?: number; take_profit_net_pct?: number; exit_policy?: string; engine_settings_version?: string;
 };
 type PricePoint = { ts: number; price: number; liquidity: number; volumeH1: number; score: number };
 type LabPosition = { symbol: string; address: string; strategy_id: string; opened_at: number; pnl_pct: number; notional_usd: number };
@@ -80,7 +81,7 @@ type MonitorState = {
     worst: { bucket: string; trades: number; mean_pct: number; win_rate: number; avoided: boolean }[];
   } | null;
   stats: { feed_count: number; open_positions: number; closed_trades: number; wins: number; win_rate: number; realized_today_usd: number; demo_starting_balance_usd: number; demo_balance_usd: number; demo_equity_usd: number; demo_available_usd: number; demo_reserved_usd: number; unrealized_pnl_usd: number; realized_total_usd: number; return_pct: number; demo_started_at: number; demo_session_id: string; metrics?: { lifetime?: { net_pnl_usd?: number } } };
-  config: { signal_strategy?: string; strategy_profile?: string; entry_policy_version?: string; exit_policy?: string; scan_seconds: number; position_scan_seconds?: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number; paper_only?: boolean };
+  config: { signal_strategy?: string; strategy_profile?: string; entry_policy_version?: string; exit_policy?: string; scan_seconds: number; position_scan_seconds?: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number; paper_only?: boolean; user_controls?: { enabled?: boolean; version?: string | null; updated_at?: number; limits?: Record<string, [number, number]>; target_only_exits?: boolean; max_hold_enabled?: boolean } };
 };
 type TokenDetail = { coin: Coin; history: PricePoint[]; position: Position | null; trades: Position[]; live_tape?: LiveTrade[]; flow?: FlowStats };
 type FlowWindow = { buys: number; sells: number; buyers: number; sellers: number; buy_usd?: number; sell_usd?: number; complete?: boolean };
@@ -143,6 +144,24 @@ async function authedJson<T>(path: string): Promise<T> {
   if (!token) throw new Error('Session expired');
   const response = await fetch(`${API}${path}`, { cache: 'no-store', headers: { Authorization: `Bearer ${token}` } });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json() as Promise<T>;
+}
+
+async function authedPost<T>(path: string, payload: Record<string, number | string | boolean>): Promise<T> {
+  if (!supabase) throw new Error('Supabase unavailable');
+  const { data: { session } } = await supabase.auth.getSession();
+  const token = session?.access_token;
+  if (!token) throw new Error('Session expired');
+  const response = await fetch(`${API}${path}`, {
+    method: 'POST', cache: 'no-store',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    let detail = '';
+    try { detail = (await response.json())?.message || ''; } catch { /* no body */ }
+    throw new Error(detail || `HTTP ${response.status}`);
+  }
   return response.json() as Promise<T>;
 }
 
@@ -212,12 +231,24 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
+  const [engineAmount, setEngineAmount] = useState('200');
+  const [engineStop, setEngineStop] = useState('5');
+  const [engineTp, setEngineTp] = useState('10');
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState('');
   const startingBalance = state?.stats.demo_starting_balance_usd ?? 1000;
   const allTimeBalance = state?.stats.demo_equity_usd ?? state?.stats.demo_balance_usd ?? startingBalance;
   const allTimeReturnPct = ((allTimeBalance - startingBalance) / Math.max(startingBalance, 1)) * 100;
 
   const switchTab = (next: Tab) => { setTab(next); try { sessionStorage.setItem('neo-tab', next); } catch { /* optional */ } };
   const openCoin = (address: string) => { setSelectedAddress(address); switchTab('coins'); };
+
+  useEffect(() => {
+    if (!state?.config?.user_controls?.enabled || settingsSaving) return;
+    setEngineAmount(String(state.config.trade_notional_usd));
+    setEngineStop(String(state.config.stop_loss_pct));
+    setEngineTp(String(state.config.take_profit_pct));
+  }, [state?.config.trade_notional_usd, state?.config.stop_loss_pct, state?.config.take_profit_pct, state?.config.user_controls?.enabled, settingsSaving]);
 
   useEffect(() => {
     let cancelled = false;
@@ -387,6 +418,19 @@ export default function App() {
   const historyRows = showAllHistory ? sortedHistory : sortedHistory.slice(0, 15);
 
   const refreshDashboard = () => { setBusy(true); setRefreshTick(value => value + 1); window.setTimeout(() => setBusy(false), 500); };
+  const saveEngineSettings = async () => {
+    const trade_notional_usd = Number(engineAmount);
+    const stop_loss_pct = Number(engineStop);
+    const take_profit_pct = Number(engineTp);
+    if (![trade_notional_usd, stop_loss_pct, take_profit_pct].every(Number.isFinite)) { setSettingsMessage('Въведи валидни числа.'); return; }
+    setSettingsSaving(true); setSettingsMessage('');
+    try {
+      const next = await authedPost<MonitorState>('/user/settings', { trade_notional_usd, stop_loss_pct, take_profit_pct });
+      setState(next);
+      setSettingsMessage('Запазено. Следващите сделки ще ползват тези стойности.');
+    } catch (err) { setSettingsMessage(err instanceof Error ? err.message : 'Неуспешно запазване.'); }
+    finally { setSettingsSaving(false); }
+  };
   const resetMyDemo = async () => {
     if (!supabase) return;
     try {
@@ -466,6 +510,16 @@ export default function App() {
           <Metric label="Статус" value={state ? (state.running ? 'РАБОТИ' : 'ПАУЗА') : '—'} hint={`${state?.config.signal_strategy ?? '—'} · стоп −${state?.config.stop_loss_pct ?? '—'}%`} tone={state?.running ? 'up' : 'down'} />
         </section>
 
+        {state?.config.user_controls?.enabled && <Card className="mt-4" kicker="Контроли" title="Настройки на главния PAPER engine" right={<div className="text-[9px] font-black text-emerald-300">GOLD входове · фиксирани цели</div>}>
+          <div className="grid gap-3 p-4 md:grid-cols-[1fr_1fr_1fr_auto] md:items-end">
+            <label className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-600">Капитал на сделка ($)<input value={engineAmount} onChange={e => setEngineAmount(e.target.value)} inputMode="decimal" className="mt-1.5 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm font-black text-white outline-none focus:border-emerald-400/30" /></label>
+            <label className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-600">Stop loss (%)<input value={engineStop} onChange={e => setEngineStop(e.target.value)} inputMode="decimal" className="mt-1.5 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm font-black text-white outline-none focus:border-emerald-400/30" /></label>
+            <label className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-600">Take profit (%)<input value={engineTp} onChange={e => setEngineTp(e.target.value)} inputMode="decimal" className="mt-1.5 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm font-black text-white outline-none focus:border-emerald-400/30" /></label>
+            <button onClick={saveEngineSettings} disabled={settingsSaving} className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-5 py-2.5 text-[10px] font-black text-emerald-200 hover:bg-emerald-400/15 disabled:opacity-40">{settingsSaving ? 'ЗАПАЗВА...' : 'ЗАПАЗИ'}</button>
+          </div>
+          <div className="border-t border-white/[0.06] px-4 py-3 text-[9px] leading-4 text-slate-500">Позицията се затваря само при избрания executable-net stop loss или take profit. Няма max-hold, conviction, stale-market, liquidity или impact shortcut за ранно затваряне. Ако няма честна sell котировка, позицията остава отворена. Настройките важат за нови сделки.{settingsMessage && <span className="ml-2 font-black text-emerald-300">{settingsMessage}</span>}</div>
+        </Card>}
+
         <section className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
           <Card kicker="Engine" title={engineQuiet ? 'Защо в момента не търгува' : 'Какво проверява преди вход'} right={<ShieldCheck className="h-4 w-4 text-emerald-300" />}>
             <div className="p-4">
@@ -487,7 +541,7 @@ export default function App() {
 
           <div className="space-y-4">
             <Card kicker="Позиции" title="Отворени PAPER позиции" right={<WalletCards className="h-4 w-4 text-emerald-300" />}>
-              <div className="space-y-2 p-4">{(state?.positions || []).length === 0 && <div className="rounded-xl border border-dashed border-white/[0.08] p-4 text-center text-[10px] leading-5 text-slate-600">Няма отворена позиция. Причината е вляво.</div>}{state?.positions.map(position => <button key={position.id} onClick={() => openCoin(position.address)} className="w-full rounded-2xl border border-white/[0.07] bg-white/[0.02] p-3 text-left hover:border-emerald-400/20"><div className="flex items-center justify-between gap-2"><div><div className="text-xs font-black text-white">${position.symbol}</div><div className="mt-0.5 text-[9px] text-slate-600">#{position.trade_no ?? '—'} · вход {fmtPrice(position.execution_entry_price ?? position.entry_price)} · ${position.notional_usd.toFixed(0)}</div></div><div className={`text-sm font-black ${position.pnl_pct >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{signed(position.pnl_pct)}%</div></div><div className="mt-2 flex items-center justify-between text-[9px] text-slate-600"><span>{signed(position.pnl_usd)}$ · score {position.current_score?.toFixed(0) ?? position.score.toFixed(0)}</span><span>{holdLabel((Date.now() - position.opened_at) / 1000)}</span></div></button>)}</div>
+              <div className="space-y-2 p-4">{(state?.positions || []).length === 0 && <div className="rounded-xl border border-dashed border-white/[0.08] p-4 text-center text-[10px] leading-5 text-slate-600">Няма отворена позиция. Причината е вляво.</div>}{state?.positions.map(position => <button key={position.id} onClick={() => openCoin(position.address)} className="w-full rounded-2xl border border-white/[0.07] bg-white/[0.02] p-3 text-left hover:border-emerald-400/20"><div className="flex items-center justify-between gap-2"><div><div className="text-xs font-black text-white">${position.symbol}</div><div className="mt-0.5 text-[9px] text-slate-600">#{position.trade_no ?? '—'} · вход {fmtPrice(position.execution_entry_price ?? position.entry_price)} · ${position.notional_usd.toFixed(0)} · SL −{position.stop_loss_pct ?? state?.config.stop_loss_pct}% · TP +{position.take_profit_net_pct ?? state?.config.take_profit_pct}%</div></div><div className={`text-sm font-black ${position.pnl_pct >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{signed(position.pnl_pct)}%</div></div><div className="mt-2 flex items-center justify-between text-[9px] text-slate-600"><span>{signed(position.pnl_usd)}$ · score {position.current_score?.toFixed(0) ?? position.score.toFixed(0)}</span><span>{holdLabel((Date.now() - position.opened_at) / 1000)}</span></div></button>)}</div>
             </Card>
             <Card kicker="Дневник" title="Какво прави NEO" right={<Bot className="h-4 w-4 text-emerald-300" />}>
               <div className="space-y-3 p-4">{journalEvents.map(event => <div key={`${event.ts}-${event.text}`} className="flex gap-2.5"><div className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${event.tone === 'error' ? 'bg-red-300' : event.tone === 'warn' ? 'bg-amber-300' : 'bg-emerald-300'}`} /><div><div className={`text-[10px] leading-4 ${event.tone === 'error' ? 'text-red-300' : event.tone === 'warn' ? 'text-amber-200' : 'text-slate-400'}`}>{event.text}</div><div className="mt-0.5 text-[8px] text-slate-700">{tapeTimeLabel(event.ts)}</div></div></div>)}</div>

@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import market_monitor as m
 import order_flow_adaptive_oct4 as oct4
+import engine_exit_policy as exit_policy
 
 A, B, C = 'A' * 44, 'B' * 44, 'C' * 44
 NOW = 1_800_000_000_000
@@ -355,6 +356,25 @@ class EngineEntries(EngineHarness):
         self.assertEqual(m.STATE.entry_diagnostics['policy_version'], 'ORDER_FLOW_GOLD_V1')
         self.assertEqual(self.mocks['flow'].call_args.args[1], 60)
 
+    def test_user_controls_are_recorded_on_the_new_position(self):
+        self.addCleanup(m.apply_strategy_profile, oct4.PROFILE)
+        m.apply_strategy_profile(m.OCT4_FIXED_PROFILE)
+        m.STATE.engine_settings = m.normalize_engine_settings({
+            'trade_notional_usd': 125, 'stop_loss_pct': 4.25, 'take_profit_pct': 11.5,
+        })
+        self.monitor.maybe_open([self.coin])
+        self.assertEqual(len(m.STATE.positions), 1)
+        pos = m.STATE.positions[0]
+        self.assertEqual(pos['notional_usd'], 125.0)
+        self.assertEqual(pos['requested_notional_usd'], 125.0)
+        self.assertEqual(pos['stop_loss_pct'], 4.25)
+        self.assertEqual(pos['planned_stop_net_pct'], -4.25)
+        self.assertEqual(pos['take_profit_net_pct'], 11.5)
+        self.assertEqual(pos['exit_policy'], 'fixed_targets')
+        self.assertEqual(pos['exit_policy_version'], exit_policy.USER_FIXED_VERSION)
+        self.assertEqual(pos['engine_settings_version'], exit_policy.USER_FIXED_VERSION)
+
+
     def test_filter_rejections_are_named_in_diagnostics_before_any_quote(self):
         self.coin['score'] = 84
         self.flow['unique_wallets'] = 0
@@ -614,6 +634,37 @@ class EngineExits(EngineHarness):
         self.assertEqual(m.STATE.demo_balance_usd, 1000)
 
 
+    def test_user_fixed_position_ignores_time_liquidity_and_impact_shortcuts(self):
+        self.position(exit_policy='fixed_targets', exit_policy_version=exit_policy.USER_FIXED_VERSION,
+                      stop_loss_pct=4.0, take_profit_net_pct=10.0,
+                      opened_at=self.clock[0] - 10_000 * 60_000)
+        self.coin = {**self.coin, 'liquidityUsd': 1.0, 'updatedAt': self.clock[0]}
+        quote = {'net_proceeds_usd': 199.0, 'gross_proceeds_usd': 199.03, 'network_fee_usd': .03,
+                 'dex_fee_usd': 0, 'fill_price': 1.99, 'impact_pct': 99.0, 'slippage_pct': .1,
+                 'latency_pct': 0, 'quoted_at': self.clock[0], 'from_cache': False,
+                 'execution_source': 'OFFLINE_FIXTURE'}
+        with patch.object(m.paper_quotes, 'position_mark', return_value=quote):
+            self.monitor.update_positions({A: self.coin})
+        self.assertFalse(m.STATE.history)
+        self.assertEqual(m.STATE.positions[0]['exit_state'], 'OPEN')
+
+    def test_user_fixed_cached_stop_must_still_hold_on_forced_fresh_quote(self):
+        self.position(exit_policy='fixed_targets', exit_policy_version=exit_policy.USER_FIXED_VERSION,
+                      stop_loss_pct=4.0, take_profit_net_pct=10.0)
+        self.coin = {**self.coin, 'updatedAt': self.clock[0]}
+        cached = {'net_proceeds_usd': 191.0, 'gross_proceeds_usd': 191.03, 'network_fee_usd': .03,
+                  'dex_fee_usd': 0, 'fill_price': 1.91, 'impact_pct': .2, 'slippage_pct': .1,
+                  'latency_pct': 0, 'quoted_at': self.clock[0], 'from_cache': True,
+                  'execution_source': 'OFFLINE_FIXTURE'}
+        recovered = {**cached, 'net_proceeds_usd': 199.0, 'gross_proceeds_usd': 199.03,
+                     'fill_price': 1.99, 'from_cache': False}
+        with patch.object(m.paper_quotes, 'position_mark', side_effect=[cached, recovered]) as mark:
+            self.monitor.update_positions({A: self.coin})
+        self.assertEqual(mark.call_count, 2)
+        self.assertFalse(m.STATE.history)
+        self.assertEqual(m.STATE.positions[0]['exit_state'], 'OPEN')
+
+
 class EffectiveConfig(EngineHarness):
     def test_state_reports_the_effective_strategy(self):
         config = m.STATE.snapshot()['config']
@@ -642,18 +693,38 @@ class EffectiveConfig(EngineHarness):
                          ['RUNNER', 'STRONG', 'NORMAL', 'CAUTIOUS', 'WEAK'])
         json.dumps(config, allow_nan=False)
 
-    def test_owner_fixed_profile_keeps_gold_entries_and_forces_200_5_10(self):
+    def test_owner_fixed_profile_keeps_gold_entries_and_exposes_user_controls(self):
         self.addCleanup(m.apply_strategy_profile, oct4.PROFILE)
         self.assertEqual(m.apply_strategy_profile(m.OCT4_FIXED_PROFILE), m.OCT4_FIXED_PROFILE)
+        m.STATE.engine_settings = m.normalize_engine_settings({'trade_notional_usd': 175, 'stop_loss_pct': 4.5, 'take_profit_pct': 12})
         config = m.STATE.snapshot()['config']
         self.assertEqual(config['entry_policy_version'], 'ORDER_FLOW_GOLD_V1')
         self.assertEqual(config['signal_strategy'], 'ORDER_FLOW_ADAPTIVE')
-        self.assertEqual(config['trade_notional_usd'], 200.0)
-        self.assertEqual(config['stop_loss_pct'], 5.0)
-        self.assertEqual(config['take_profit_pct'], 10.0)
-        self.assertEqual(config['exit_policy'], 'fixed')
-        self.assertEqual(config['exit_policy_version'], 'HONEST_NET_EXIT_V1')
+        self.assertEqual(config['trade_notional_usd'], 175.0)
+        self.assertEqual(config['stop_loss_pct'], 4.5)
+        self.assertEqual(config['take_profit_pct'], 12.0)
+        self.assertEqual(config['exit_policy'], 'fixed_targets')
+        self.assertEqual(config['exit_policy_version'], 'USER_FIXED_TARGETS_V1')
+        self.assertTrue(config['user_controls']['enabled'])
+        self.assertFalse(config['user_controls']['max_hold_enabled'])
+        self.assertIsNone(config['max_hold_minutes'])
         self.assertEqual(config['public_history_min_notional_usd'], 200.0)
+
+    def test_user_fixed_targets_have_no_time_or_emergency_exit_shortcut(self):
+        self.assertIsNone(exit_policy.exit_reason({}, {}, net_pct=0.0, peak_net_pct=50.0, hold_minutes=10000,
+                                                  stop_pct=4.0, take_profit_pct=10.0, policy='fixed_targets'))
+        self.assertEqual(exit_policy.exit_reason({}, {}, net_pct=-4.01, peak_net_pct=0.0, hold_minutes=0,
+                                                 stop_pct=4.0, take_profit_pct=10.0, policy='fixed_targets'),
+                         'STOP_LOSS_NET_TARGET')
+        self.assertEqual(exit_policy.exit_reason({}, {}, net_pct=10.01, peak_net_pct=10.01, hold_minutes=0,
+                                                 stop_pct=4.0, take_profit_pct=10.0, policy='fixed_targets'),
+                         'TAKE_PROFIT_NET_TARGET')
+
+    def test_engine_settings_validate_ranges_and_persist_shape(self):
+        row = m.normalize_engine_settings({'trade_notional_usd': 123.45, 'stop_loss_pct': 4, 'take_profit_pct': 11})
+        self.assertEqual((row['trade_notional_usd'], row['stop_loss_pct'], row['take_profit_pct']), (123.45, 4.0, 11.0))
+        self.assertEqual(row['version'], 'USER_FIXED_TARGETS_V1')
+        with self.assertRaises(ValueError): m.normalize_engine_settings({'stop_loss_pct': 0})
 
     def test_public_history_hides_sub_200_trades_without_touching_internal_ledger(self):
         archive = self.root / 'all_time_history.json'
@@ -664,9 +735,10 @@ class EffectiveConfig(EngineHarness):
         m._ALL_TIME_HISTORY_CACHE.update(mtime_ns=None, rows=[])
         rows = m.read_all_time_history([
             {'id': 'current-small', 'notional_usd': 50.0, 'closed_at': 3},
+            {'id': 'future-user-small', 'notional_usd': 50.0, 'closed_at': 5, 'engine_settings_version': m.USER_ENGINE_SETTINGS_VERSION},
             {'id': 'current-full', 'notional_usd': 200.0, 'closed_at': 4},
         ])
-        self.assertEqual([row['id'] for row in rows], ['current-full', 'full'])
+        self.assertEqual([row['id'] for row in rows], ['future-user-small', 'current-full', 'full'])
 
     def test_environment_cannot_drift_the_strategy(self):
         self.addCleanup(m.apply_strategy_profile, oct4.PROFILE)

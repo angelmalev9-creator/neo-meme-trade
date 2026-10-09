@@ -26,6 +26,8 @@ def setUpModule():
 
 class EngineEntryTests(unittest.TestCase):
     def setUp(self):
+        # Keep this legacy suite isolated from profile mutations in other test modules.
+        m.apply_strategy_profile(m.V10_PROFILE)
         m.STATE_PATH.unlink(missing_ok=True)
         m.STATE = m.State()
         self.monitor = m.Monitor()

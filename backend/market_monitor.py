@@ -101,7 +101,19 @@ if MAX_POSITION_RISK_USD <= 0 or not 0 < MAX_TOTAL_EXPOSURE_PCT <= 100 or not 0 
 # EARLY_SCOUT_V10 keeps the 2026-10-05 environment-driven values captured
 # above. An unknown profile refuses to start.
 V10_PROFILE = 'EARLY_SCOUT_V10'
-OCT4_FIXED_PROFILE = 'ORDER_FLOW_OCT4_FIXED_5_10'
+OCT4_FIXED_PROFILE = 'ORDER_FLOW_OCT4_USER_FIXED'
+OCT4_FIXED_PROFILE_LEGACY = 'ORDER_FLOW_OCT4_FIXED_5_10'
+USER_ENGINE_SETTINGS_VERSION = exit_policy.USER_FIXED_VERSION
+USER_ENGINE_SETTINGS_DEFAULTS = {
+    'trade_notional_usd': 200.0,
+    'stop_loss_pct': 5.0,
+    'take_profit_pct': 10.0,
+}
+USER_ENGINE_SETTINGS_LIMITS = {
+    'trade_notional_usd': (10.0, 5000.0),
+    'stop_loss_pct': (0.5, 50.0),
+    'take_profit_pct': (0.5, 200.0),
+}
 DEFAULT_STRATEGY_PROFILE = learner.PROFILE
 _V10_SETTINGS = dict(
     SCAN_SECONDS=SCAN_SECONDS, POSITION_SCAN_SECONDS=POSITION_SCAN_SECONDS, MAX_POSITIONS=MAX_POSITIONS,
@@ -158,20 +170,23 @@ def _oct4_settings() -> dict[str, Any]:
 
 
 def _oct4_fixed_settings() -> dict[str, Any]:
-    """Oct-4 GOLD entries with owner-requested fixed $200 / -5% / +10% exits.
+    """Oct-4 GOLD entries with user-controlled PAPER size and fixed SL/TP.
 
-    This deliberately keeps the Oct-4 entry signal and all modern rug, price,
-    quote and execution checks. Only position sizing and exit targets are
-    overlaid; no adaptive/trailing/conviction exit can replace the fixed TP.
+    Entry selection and every rug/price/quote check stay identical to Oct-4.
+    Position exits are target-only: the position remains open until its own
+    executable-net stop or take-profit is reached (or no sell route exists).
     """
     settings = _oct4_settings()
     settings.update(
-        STOP_LOSS_PCT=5.0, TAKE_PROFIT_PCT=10.0, MAX_HOLD_MINUTES=60,
-        TRADE_NOTIONAL_USD=200.0,
-        STRATEGY_VERSION='gold-2026-10-04-fixed-5-10-20261009',
-        EXIT_POLICY='fixed', EXIT_POLICY_VERSION=exit_policy.VERSION,
-        LEARNING_MODE='OCT4_GOLD_FIXED_200_SL5_TP10',
-        CONFIG_SOURCE='order_flow_adaptive_oct4.CONFIG + owner fixed 200/5/10 overlay',
+        STOP_LOSS_PCT=USER_ENGINE_SETTINGS_DEFAULTS['stop_loss_pct'],
+        TAKE_PROFIT_PCT=USER_ENGINE_SETTINGS_DEFAULTS['take_profit_pct'],
+        MAX_HOLD_MINUTES=0,
+        TRADE_NOTIONAL_USD=USER_ENGINE_SETTINGS_DEFAULTS['trade_notional_usd'],
+        MAX_POSITION_RISK_USD=USER_ENGINE_SETTINGS_LIMITS['trade_notional_usd'][1] + 50.0,
+        STRATEGY_VERSION='gold-2026-10-04-user-fixed-targets-20261009',
+        EXIT_POLICY='fixed_targets', EXIT_POLICY_VERSION=exit_policy.USER_FIXED_VERSION,
+        LEARNING_MODE='OCT4_GOLD_USER_FIXED_TARGETS',
+        CONFIG_SOURCE='order_flow_adaptive_oct4.CONFIG + persisted user PAPER controls',
     )
     return settings
 
@@ -217,8 +232,9 @@ def apply_strategy_profile(name: str | None = None) -> str:
         settings = _learner_settings()
     elif profile == oct4.PROFILE:
         settings = _oct4_settings()
-    elif profile == OCT4_FIXED_PROFILE:
+    elif profile in (OCT4_FIXED_PROFILE, OCT4_FIXED_PROFILE_LEGACY):
         settings = _oct4_fixed_settings()
+        profile = OCT4_FIXED_PROFILE
     elif profile == V10_PROFILE:
         settings = _V10_SETTINGS
     else:
@@ -235,11 +251,6 @@ def is_learner() -> bool:
 def is_adaptive() -> bool:
     """Profiles that use the Oct-4 conviction/GOLD entry family."""
     return STRATEGY_PROFILE in (oct4.PROFILE, OCT4_FIXED_PROFILE, learner.PROFILE)
-
-
-def is_oct4_fixed_size() -> bool:
-    """Oct-4 profiles that must never resize the owner-requested $200 notional."""
-    return STRATEGY_PROFILE in (oct4.PROFILE, OCT4_FIXED_PROFILE)
 
 
 def policy_module():
@@ -295,6 +306,30 @@ def num(value: Any, default: float = 0.0) -> float:
         return out if math.isfinite(out) else default
     except Exception:
         return default
+
+
+def normalize_engine_settings(raw: Any, current: dict[str, Any] | None = None) -> dict[str, Any]:
+    base = dict(USER_ENGINE_SETTINGS_DEFAULTS)
+    if isinstance(current, dict):
+        for key in USER_ENGINE_SETTINGS_DEFAULTS:
+            if key in current:
+                base[key] = current[key]
+    if raw is not None and not isinstance(raw, dict):
+        raise ValueError('settings payload must be an object')
+    for key, (minimum, maximum) in USER_ENGINE_SETTINGS_LIMITS.items():
+        if isinstance(raw, dict) and key in raw:
+            try:
+                value = float(raw[key])
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f'invalid {key}') from exc
+            if not math.isfinite(value) or value < minimum or value > maximum:
+                raise ValueError(f'{key} must be between {minimum:g} and {maximum:g}')
+            base[key] = round(value, 4)
+    return {
+        'version': USER_ENGINE_SETTINGS_VERSION,
+        'updated_at': int((current or {}).get('updated_at') or 0),
+        **{key: float(base[key]) for key in USER_ENGINE_SETTINGS_DEFAULTS},
+    }
 
 
 def clamp(value: float) -> float:
@@ -628,14 +663,16 @@ def prefer_exact_tape_pairs(chosen: dict[str, dict[str, Any]], pairs: list[dict[
             chosen[address] = pair
 
 PUBLIC_HISTORY_MIN_NOTIONAL_USD = 200.0
+
 _ALL_TIME_HISTORY_CACHE: dict[str, Any] = {'mtime_ns': None, 'rows': []}
 _ALL_TIME_HISTORY_LOCK = threading.Lock()
 
 def public_history_trade_visible(trade: dict[str, Any]) -> bool:
-    """Hide known sub-$200 trades; legacy rows without size remain readable."""
+    """Hide legacy sub-$200 rows but show future owner-selected sizes."""
     if 'notional_usd' not in trade or trade.get('notional_usd') is None:
         return True
-    return num(trade.get('notional_usd')) + 1e-9 >= PUBLIC_HISTORY_MIN_NOTIONAL_USD
+    return (num(trade.get('notional_usd')) + 1e-9 >= PUBLIC_HISTORY_MIN_NOTIONAL_USD
+            or trade.get('engine_settings_version') == USER_ENGINE_SETTINGS_VERSION)
 
 def read_all_time_history(current_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge restored PAPER history for display without touching engine state."""
@@ -682,7 +719,8 @@ def compact_public_trade(trade: dict[str, Any]) -> dict[str, Any]:
         'balance_after', 'dex_url', 'strategy_id', 'entry_policy_version',
         'exit_policy_version', 'signal_pnl_pct', 'entry_roundtrip_pnl_pct',
         'observed_exit_pnl_pct', 'observed_exit_pnl_usd', 'paper_stop_capped',
-        'stop_execution_source',
+        'stop_execution_source', 'stop_loss_pct', 'take_profit_net_pct',
+        'exit_policy', 'engine_settings_version',
     )
     return {field: trade.get(field) for field in fields if field in trade}
 
@@ -765,6 +803,7 @@ class State:
         self.equity_peak_usd = STARTING_BALANCE_USD
         self.entry_diagnostics = {'status': 'starting', 'policy_version': ENTRY_POLICY_VERSION}
         self.discovery_stats: dict[str, Any] = {}
+        self.engine_settings = normalize_engine_settings(None)
         self.risk_day_key = time.strftime('%Y-%m-%d', time.gmtime())
         self.risk_day_start_balance_usd = STARTING_BALANCE_USD
         if load_state: self.load()
@@ -797,6 +836,7 @@ class State:
             self.demo_started_at = int(data.get('demo_started_at') or self.demo_started_at)
             self.demo_session_id = str(data.get('demo_session_id') or self.demo_session_id)
             self.trade_seq = int(data.get('trade_seq') or 0)
+            self.engine_settings = normalize_engine_settings(data.get('engine_settings'), self.engine_settings)
             today = time.strftime('%Y-%m-%d', time.gmtime())
             if str(data.get('risk_day_key') or '') == today:
                 self.risk_day_key = today
@@ -834,6 +874,7 @@ class State:
             'demo_started_at': self.demo_started_at,
             'demo_session_id': self.demo_session_id,
             'trade_seq': self.trade_seq,
+            'engine_settings': self.engine_settings,
             'risk_day_key': self.risk_day_key,
             'risk_day_start_balance_usd': self.risk_day_start_balance_usd,
             'price_history': price_history,
@@ -1029,6 +1070,14 @@ class State:
                 'checked_at': now_ms(), 'market_data': market_health, 'discovery': discovery_health,
                 'order_flow': tape_health, 'active_issues': active_issues,
             }
+            user_controls_enabled = STRATEGY_PROFILE == OCT4_FIXED_PROFILE
+            controls = normalize_engine_settings(None, self.engine_settings) if user_controls_enabled else {
+                'trade_notional_usd': TRADE_NOTIONAL_USD, 'stop_loss_pct': STOP_LOSS_PCT,
+                'take_profit_pct': TAKE_PROFIT_PCT, 'version': None, 'updated_at': 0,
+            }
+            effective_notional = num(controls.get('trade_notional_usd'), TRADE_NOTIONAL_USD)
+            effective_stop = num(controls.get('stop_loss_pct'), STOP_LOSS_PCT)
+            effective_tp = num(controls.get('take_profit_pct'), TAKE_PROFIT_PCT)
             return {
                 'running': self.running,
                 'status': self.status,
@@ -1090,9 +1139,9 @@ class State:
                     'position_scan_seconds': POSITION_SCAN_SECONDS,
                     'entry_score': STRICT_ENTRY_SCORE,
                     'max_positions': MAX_POSITIONS,
-                    'stop_loss_pct': STOP_LOSS_PCT,
+                    'stop_loss_pct': effective_stop,
                     'stop_loss_basis': 'EXECUTABLE_NET_PNL',
-                    'stop_trigger_net_pct': -STOP_LOSS_PCT,
+                    'stop_trigger_net_pct': -effective_stop,
                     'take_profit_basis': 'EXECUTABLE_NET_PNL',
                     'reentry_seconds': WIN_REENTRY_SECONDS, 'loss_reentry_seconds': LOSS_REENTRY_SECONDS,
                     'signal_strategy': SIGNAL_STRATEGY,
@@ -1109,15 +1158,21 @@ class State:
                     'execution_verification_version': 'QUOTE_EVIDENCE_V9',
                     'rug_guard': rug_guard.VERSION,
                     'paper_only': True, 'public_history_min_notional_usd': PUBLIC_HISTORY_MIN_NOTIONAL_USD,
+                    'user_controls': {
+                        'enabled': user_controls_enabled, 'version': controls.get('version'),
+                        'updated_at': controls.get('updated_at'), 'limits': USER_ENGINE_SETTINGS_LIMITS,
+                        'target_only_exits': user_controls_enabled,
+                        'max_hold_enabled': False if user_controls_enabled else MAX_HOLD_MINUTES > 0,
+                    },
                     'runtime_version': runtime.VERSION,
                     'daily_budget_sizing': DAILY_BUDGET_SIZING,
                     'stop_execution_buffer_pct': STOP_EXECUTION_BUFFER_PCT,
-                    'exit_impact_emergency_pct': EXIT_IMPACT_EMERGENCY_PCT,
-                    'take_profit_pct': TAKE_PROFIT_PCT,
+                    'exit_impact_emergency_pct': None if user_controls_enabled else EXIT_IMPACT_EMERGENCY_PCT,
+                    'take_profit_pct': effective_tp,
                     'trailing_pct': TRAILING_PCT,
-                    'max_hold_minutes': MAX_HOLD_MINUTES,
+                    'max_hold_minutes': None if user_controls_enabled else MAX_HOLD_MINUTES,
                     'min_liquidity_usd': STRICT_MIN_LIQUIDITY_USD,
-                    'trade_notional_usd': TRADE_NOTIONAL_USD,
+                    'trade_notional_usd': effective_notional,
                     'max_daily_loss_usd': MAX_DAILY_LOSS_USD,
                     'max_position_full_loss_risk_usd': MAX_POSITION_RISK_USD,
                     'max_total_exposure_pct': MAX_TOTAL_EXPOSURE_PCT,
@@ -1858,7 +1913,12 @@ class Monitor:
             coin = coin or position.get('coin_snapshot') or {}
             if coin.get('pairAddress') != pair: coin = {}
             stamp = now_ms()
-            reason = position.get('pending_exit_reason')
+            policy = str(position.get('exit_policy') or 'fixed')
+            target_only = policy == 'fixed_targets'
+            # Target-only positions always re-evaluate against the current fresh
+            # executable mark; a previously queued stop/TP may disappear if the
+            # market recovered before a sell route became available.
+            reason = None if target_only else position.get('pending_exit_reason')
             quote_at = num(position.get('execution_quote_at'), num(position.get('updated_at')))
             if stamp < num(position.get('next_exit_retry_at')):
                 with STATE.lock:
@@ -1866,9 +1926,9 @@ class Monitor:
                     if live is not None: live['valuation_age_ms'] = max(0, stamp-quote_at)
                 continue
             fresh_market = 0 <= stamp-num(coin.get('updatedAt')) <= entry_policy.MAX_FEED_AGE_MS
-            if fresh_market and num(coin.get('liquidityUsd')) < num(position.get('entry_liquidity_usd'))*.80:
+            if not target_only and fresh_market and num(coin.get('liquidityUsd')) < num(position.get('entry_liquidity_usd'))*.80:
                 reason = reason or 'LIQUIDITY_EMERGENCY'
-            if not fresh_market and stamp-num(coin.get('updatedAt')) > 60_000:
+            if not target_only and not fresh_market and stamp-num(coin.get('updatedAt')) > 60_000:
                 reason = reason or 'STALE_MARKET_EXIT'
             is_quote = position.get('execution_mode') in {'JUPITER_QUOTE_V2', 'PUMPSWAP_RPC_ENTRY_V1'}
             sol_usd = sol_usd_from_coin(coin) or sol_usd_market_price()
@@ -1896,7 +1956,6 @@ class Monitor:
             hold = (now_ms()-int(position.get('opened_at',now_ms())))/60000
             # A position is managed by the policy recorded when it was opened,
             # so changing the active profile never rewrites an open trade's rules.
-            policy = str(position.get('exit_policy') or 'fixed')
             context = self.market_context(coin,position) if policy in ('adaptive', oct4.EXIT_POLICY) else {}
             market = num(coin.get('priceUsd'), num(position.get('current_price')))
             entry = num(position.get('entry_price'))
@@ -1914,10 +1973,10 @@ class Monitor:
                         signal_pct=signal_pct, peak_signal_pct=peak_signal_pct, stop_pct=own_stop)
                 return exit_policy.exit_reason(position, context, net_pct=net_now, peak_net_pct=peak_now,
                     hold_minutes=hold, stop_pct=own_stop,
-                    take_profit_pct=num(position.get('take_profit_net_pct'), TAKE_PROFIT_PCT) if policy == 'fixed' else TAKE_PROFIT_PCT,
+                    take_profit_pct=num(position.get('take_profit_net_pct'), TAKE_PROFIT_PCT) if policy in ('fixed', 'fixed_targets') else TAKE_PROFIT_PCT,
                     policy=policy)
             reason = reason or decide(pct, peak_pct)
-            if num(quote.get('impact_pct')) >= max(EXIT_IMPACT_EMERGENCY_PCT,num(position.get('entry_price_impact_pct'))+.50):
+            if not target_only and num(quote.get('impact_pct')) >= max(EXIT_IMPACT_EMERGENCY_PCT,num(position.get('entry_price_impact_pct'))+.50):
                 reason = reason or 'EXIT_IMPACT_EMERGENCY'
             if reason and is_quote and quote.get('from_cache'):
                 quote = paper_quotes.position_mark(position,coin,network,force=True)
@@ -1933,8 +1992,9 @@ class Monitor:
                 pnl = num(quote.get('net_proceeds_usd'))-notional-entry_cost
                 pct = pnl/max(notional,1e-18)*100
                 peak_pct = max(peak_pct,pct)
-                # A profit signal must still hold at the actual simulated sale.
-                if reason.startswith(('TAKE_PROFIT', 'ADAPTIVE_TP', 'ADAPTIVE_TRAILING', 'CONVICTION_PROFIT')):
+                # For target-only mode both TP and SL must still hold on the
+                # forced fresh quote. Never realize an old cached threshold.
+                if target_only or reason.startswith(('TAKE_PROFIT', 'ADAPTIVE_TP', 'ADAPTIVE_TRAILING', 'CONVICTION_PROFIT')):
                     reason = decide(pct, peak_pct)
             adaptive_fields = {}
             if policy == oct4.EXIT_POLICY:
@@ -1958,7 +2018,8 @@ class Monitor:
                 execution_quote_source=quote.get('execution_source','MODEL_V1'), updated_at=now_ms(),
                 pending_exit_reason=reason,exit_state='PENDING_EXIT' if reason else 'OPEN',exit_retry_count=0,next_exit_retry_at=0,
                 exit_policy_version=(oct4.EXIT_POLICY_VERSION if policy == oct4.EXIT_POLICY
-                    else exit_policy.ADAPTIVE_VERSION if policy == 'adaptive' else exit_policy.VERSION),
+                    else exit_policy.ADAPTIVE_VERSION if policy == 'adaptive'
+                    else exit_policy.USER_FIXED_VERSION if policy == 'fixed_targets' else exit_policy.VERSION),
                 market_context=context, estimated_exit_dex_fee_usd=num(quote.get('dex_fee_usd')),
                 estimated_exit_network_fee_usd=num(quote.get('network_fee_usd')),
                 estimated_exit_price_impact_pct=num(quote.get('impact_pct')),
@@ -2017,6 +2078,14 @@ class Monitor:
                 training_bridge.observe(coin,STATE.live_flow(coin.get('address'),pair_address=coin.get('pairAddress')),
                     reasons=reasons,now=now_ms())
         session_at_check = STATE.demo_session_id
+        with STATE.lock:
+            trade_controls = normalize_engine_settings(None, STATE.engine_settings) if STRATEGY_PROFILE == OCT4_FIXED_PROFILE else {
+                'trade_notional_usd': TRADE_NOTIONAL_USD, 'stop_loss_pct': STOP_LOSS_PCT,
+                'take_profit_pct': TAKE_PROFIT_PCT, 'version': None,
+            }
+        configured_notional = num(trade_controls.get('trade_notional_usd'), TRADE_NOTIONAL_USD)
+        configured_stop = num(trade_controls.get('stop_loss_pct'), STOP_LOSS_PCT)
+        configured_tp = num(trade_controls.get('take_profit_pct'), TAKE_PROFIT_PCT)
         if STATE.pending_audit:
             with STATE.lock: STATE.save()
             if STATE.pending_audit:
@@ -2039,7 +2108,7 @@ class Monitor:
         if slots_in_use(STATE.positions) >= MAX_POSITIONS:
             reject(report, ['position_open'])
             return
-        if STATE.available_balance_usd() < min(TRADE_NOTIONAL_USD, 10.0):
+        if STATE.available_balance_usd() < min(configured_notional, 10.0):
             reject(report, ['balance'])
             return
         open_addresses = {p.get('address') for p in STATE.positions}
@@ -2187,24 +2256,25 @@ class Monitor:
                 base_notional = max(sizing['min_notional_usd'], min(
                     sizing['max_notional_usd'], learner.base_notional(coin, entry_mode) * learning['size_multiplier']))
             else:
-                base_notional = TRADE_NOTIONAL_USD if is_adaptive() else early_requested_notional(coin, learning)
-            requested_notional = min(base_notional,MAX_POSITION_RISK_USD-fixed_cost_budget)
+                base_notional = configured_notional if STRATEGY_PROFILE == OCT4_FIXED_PROFILE else (TRADE_NOTIONAL_USD if is_adaptive() else early_requested_notional(coin, learning))
+            requested_notional = (base_notional if STRATEGY_PROFILE == OCT4_FIXED_PROFILE
+                                  else min(base_notional,MAX_POSITION_RISK_USD-fixed_cost_budget))
             # With budget sizing off the daily limit stays a hard gate above
             # and never shrinks the position.
             sizing_day_limit = MAX_DAILY_LOSS_USD if DAILY_BUDGET_SIZING else 0.0
             notional = runtime.plan_notional(
                 requested_notional,available_before,sizing_day_limit,
                 STATE.risk_day_pnl()-open_planned_risk,
-                STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
+                configured_stop,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
             )
-            if is_oct4_fixed_size() and notional + 1e-9 < TRADE_NOTIONAL_USD:
-                # The Oct-4 family is fixed-size. Never silently create a
-                # smaller trade; if $200 plus costs does not fit, skip it.
+            if STRATEGY_PROFILE == OCT4_FIXED_PROFILE and notional + 1e-9 < configured_notional:
+                # User-fixed sizing never silently shrinks the requested trade.
+                # If the selected amount plus costs does not fit, skip it.
                 reject(report,['balance'],coin); return
             if notional < 10:
                 reject(report,['risk_budget_unavailable' if DAILY_BUDGET_SIZING else 'balance'],coin); return
-            if is_oct4_fixed_size():
-                notional = TRADE_NOTIONAL_USD
+            if STRATEGY_PROFILE == OCT4_FIXED_PROFILE:
+                notional = configured_notional
             report['quoted'] += 1
             dex_id = str(coin.get('dexId') or '').lower()
             if dex_id == 'pumpswap':
@@ -2295,9 +2365,9 @@ class Monitor:
                 permitted = runtime.plan_notional(
                     requested_notional,min(STATE.available_balance_usd(),current_exposure_available),sizing_day_limit,
                     STATE.risk_day_pnl()-live_open_risk,
-                    STOP_LOSS_PCT,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
+                    configured_stop,STOP_EXECUTION_BUFFER_PCT,fixed_cost_budget,
                 )
-                if is_oct4_fixed_size() and permitted + 1e-9 < TRADE_NOTIONAL_USD:
+                if STRATEGY_PROFILE == OCT4_FIXED_PROFILE and permitted + 1e-9 < configured_notional:
                     reject(report,['balance'],coin); return
                 if notional>permitted:
                     reject(report,['risk_budget_unavailable'],coin); return
@@ -2322,8 +2392,9 @@ class Monitor:
                     'learning_loss_streak_brake': learning.get('loss_streak_brake'),
                     'provisional_early_safety': bool(safety.get('provisional_early')),
                     'strategy_profile': STRATEGY_PROFILE, 'strategy_version': STRATEGY_VERSION,
+                    'engine_settings_version': trade_controls.get('version'),
                     'learning_mode': LEARNING_MODE, 'entry_flow': final_flow,
-                    'entry_flow_window_seconds': flow_seconds, 'stop_loss_pct': STOP_LOSS_PCT,
+                    'entry_flow_window_seconds': flow_seconds, 'stop_loss_pct': configured_stop,
                     'entry_context': entry_context, 'entry_conviction': entry_context.get('conviction'),
                     'entry_hold_mode': entry_context.get('mode'), 'learning_sample': learning['sample'],
                     'learning_win_rate': learning['win_rate'], 'learning_profit_factor': learning['profit_factor'],
@@ -2332,8 +2403,8 @@ class Monitor:
                     'learning_size_multiplier': learning.get('size_multiplier'),
                     'requested_notional_usd': round(requested_notional, 8),
                     'notional_usd': round(notional, 8),
-                    'size_limited_by_daily_budget': notional<min(TRADE_NOTIONAL_USD,available_before-fixed_cost_budget),
-                    'planned_risk_usd': notional*(STOP_LOSS_PCT+STOP_EXECUTION_BUFFER_PCT)/100+fixed_cost_budget,
+                    'size_limited_by_daily_budget': notional<min(configured_notional if STRATEGY_PROFILE == OCT4_FIXED_PROFILE else TRADE_NOTIONAL_USD,available_before-fixed_cost_budget),
+                    'planned_risk_usd': notional*(configured_stop+STOP_EXECUTION_BUFFER_PCT)/100+fixed_cost_budget,
                     'conservative_risk_usd': notional+quote_network_fee+entry_rent,
                     'original_notional_usd': notional,
                     'capital_committed_usd': round(entry_quote['capital_committed_usd'], 8),
@@ -2367,14 +2438,14 @@ class Monitor:
                     'preflight_is_cost_estimate_not_same_time_fill': True,
                     'entry_worst_case_roundtrip_pnl_pct': round(worst_case_roundtrip_pct, 4),
                     'stop_signal_trigger_pct': None,
-                    'hard_stop_net_pct': None, 'planned_stop_net_pct': -STOP_LOSS_PCT,
+                    'hard_stop_net_pct': None, 'planned_stop_net_pct': -configured_stop,
                     'entry_dex_fee_bps': round(entry_quote['dex_fee_bps'], 4),
                     'entry_dex_fee_usd': round(entry_quote['dex_fee_usd'], 8),
                     'entry_network_fee_usd': round(entry_quote['network_fee_usd'], 8),
                     'entry_account_reserve_usd': entry_rent, 'token_decimals': decimals,
                     'risk_check': safety,
                     # The recorded exit policy is authoritative for this position.
-                    'take_profit_net_pct': TAKE_PROFIT_PCT if EXIT_POLICY == 'fixed' else entry_context.get('target_pct'),
+                    'take_profit_net_pct': configured_tp if EXIT_POLICY in ('fixed', 'fixed_targets') else entry_context.get('target_pct'),
                     'cost_assumptions': 'Jupiter AMM fees included; 10bps/leg buffer, network budget, account rent reserve',
                     'entry_price_impact_pct': round(entry_quote['impact_pct'], 6),
                     'entry_slippage_pct': round(entry_quote['slippage_pct'] + entry_quote['latency_pct'], 6),
@@ -2653,6 +2724,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         if parsed.path == '/state':
             self.send_json(STATE.snapshot())
             return
+        if parsed.path == '/settings':
+            self.send_json({'settings': STATE.engine_settings, 'enabled': STRATEGY_PROFILE == OCT4_FIXED_PROFILE,
+                            'limits': USER_ENGINE_SETTINGS_LIMITS})
+            return
         if parsed.path == '/token':
             address = (parse_qs(parsed.query).get('address') or [''])[0]
             result = STATE.token_snapshot(address)
@@ -2674,8 +2749,35 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         self.send_json({'error': 'not_found'}, 404)
 
+    def read_json_body(self) -> dict[str, Any]:
+        length = int(self.headers.get('Content-Length') or 0)
+        if length <= 0:
+            return {}
+        if length > 16_384:
+            raise ValueError('request body too large')
+        payload = json.loads(self.rfile.read(length).decode('utf-8'))
+        if not isinstance(payload, dict):
+            raise ValueError('request body must be an object')
+        return payload
+
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path == '/control/settings':
+            if STRATEGY_PROFILE != OCT4_FIXED_PROFILE:
+                self.send_json({'error': 'settings_not_enabled_for_profile'}, 409)
+                return
+            try:
+                payload = self.read_json_body()
+                with STATE.lock:
+                    updated = normalize_engine_settings(payload, STATE.engine_settings)
+                    updated['updated_at'] = now_ms()
+                    STATE.engine_settings = updated
+                    STATE.event(f"PAPER controls updated: ${updated['trade_notional_usd']:.2f} / SL {updated['stop_loss_pct']:.2f}% / TP {updated['take_profit_pct']:.2f}%")
+                    STATE.save()
+                self.send_json(STATE.snapshot())
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_json({'error': 'invalid_settings', 'message': str(exc)}, 400)
+            return
         if path == '/control/start':
             with STATE.lock:
                 STATE.running = True

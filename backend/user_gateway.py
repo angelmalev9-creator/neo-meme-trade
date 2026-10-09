@@ -302,6 +302,11 @@ def start_engine(user, account):
         "NEO_ENGINE_MODE": "PAPER",
         "NEO_TRAINING_ROOT": str(engine_dir(user_id) / 'training'),
     })
+    # A per-account profile is explicit and survives gateway-spawned restarts.
+    # Accounts without one keep the normal default profile.
+    profile = str(account.get("strategy_profile") or "").strip()
+    if profile:
+        env["NEO_STRATEGY_PROFILE"] = profile
 
     engine_dir(user_id).mkdir(parents=True, exist_ok=True)
     process = subprocess.Popen(
@@ -329,11 +334,11 @@ def ensure_engine(user):
         return start_engine(user, account)
 
 
-def proxy_user_engine(user, method, path):
+def proxy_user_engine(user, method, path, payload=None):
     port = ensure_engine(user)
     url = f"http://127.0.0.1:{port}{path}"
     if method == "POST":
-        response = SESSION.post(url, timeout=15)
+        response = SESSION.post(url, json=payload if payload is not None else None, timeout=15)
     else:
         response = SESSION.get(url, timeout=15)
     response.raise_for_status()
@@ -451,6 +456,9 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/user/state":
                 self.json_response(proxy_user_engine(user, "GET", "/state"))
                 return
+            if parsed.path == "/user/settings":
+                self.json_response(proxy_user_engine(user, "GET", "/settings"))
+                return
             if parsed.path == "/user/token":
                 suffix = f"?{parsed.query}" if parsed.query else ""
                 self.json_response(proxy_user_engine(user, "GET", f"/token{suffix}"))
@@ -477,12 +485,27 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.json_response({"error": "gateway_error", "message": str(exc)}, 502)
 
+    def read_json_body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            return {}
+        if length > 16_384:
+            raise ValueError("request body too large")
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("request body must be an object")
+        return payload
+
     def do_POST(self):
         parsed = urlparse(self.path)
         user = self.authenticated()
         if not user:
             return
         try:
+            if parsed.path == "/user/settings":
+                payload = self.read_json_body()
+                self.json_response(proxy_user_engine(user, "POST", "/control/settings", payload))
+                return
             if parsed.path == "/user/reset":
                 self.json_response(proxy_user_engine(user, "POST", "/control/reset"))
                 return

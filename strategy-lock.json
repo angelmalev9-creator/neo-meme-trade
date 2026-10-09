@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-09",
   "source_commit": "MAIN_FIXED_NET_4_10_20261009",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "695db2f12eeb2f1c68d2afd3ec6c8e5a5cf8322c8a677461cef4391b443db4be",
+  "sha256": "3d3a26dc21d5438dc44f6235bf0dba403b3368b8295f37e75430eb71b19ceb1a",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE_LEARNING",
   "rules": {
     "max_positions": 8,
@@ -72,7 +72,7 @@
     "backend/compat_file_lock.py": "8ba79d6e53250fba0a3f0dc2f997ed89094210d170d84c4b66c200f5ab9d64df",
     "backend/engine_entry_policy.py": "cf4edec87f066dd662528336cdf5b7b22c36d217b6cc1d1d7a0b32b0148c297c",
     "backend/engine_execution.py": "2a4f68ef51327a1fbc5cb1a80c2de2ddbae2a52a39ac7dcdc495fa686dabb20a",
-    "backend/engine_exit_policy.py": "667010bcc5e047996d90a9bcecb7b9eaf9baeee10864aeb2dfa9b23a8dbd0e3c",
+    "backend/engine_exit_policy.py": "1246662f1f31d8bdcec33dfab86857952d0fa6a238e09e44334d310e0e876667",
     "backend/engine_rug_guard.py": "5c732df903fdfcb692a8b2d64afd1276f1350658471d17c4c8363cefd58ae7e3",
     "backend/engine_runtime.py": "1a4bfef255d8ffe5de44f1553266683a04a7a55044987c897469c7936516efb9",
     "backend/gold_order_flow.py": "850a5afdbb907da50a68cb9b965743053c866cc7aed9d49509ff365aedf6efb8",
@@ -89,7 +89,7 @@
     "backend/strategy_lab.py": "a445aa349b8bd6c5985bd51f9f26ed4115331d91d69086c41172367dc9cc3637",
     "backend/training_bridge.py": "c45341b7b0fb12d034de94d3f39aaeadccefddff135c8cdcae6dd9775f728936",
     "backend/training_worker.py": "75a48c03cbdf7274a74d6701f8e2f45ce618337caf135fde9dfe05bc3bbeba81",
-    "backend/user_gateway.py": "e51ce4a6e0077df26d0804356dc463ba0350bb3904c7b24291d12892bbfc70f3",
+    "backend/user_gateway.py": "7437ac6d3a4f2afabebf7c5b26715aed2d99f29494ca28e15b9d11c36adc7741",
     "backend/lab_activity.py": "deb81c318f6c0419ed6237a40288cbb175bd8f7c1fca42adc431029ec06a1c14",
     "backend/x_signal_monitor.py": "eb7c3f952a8f4048ebfd956c2d6a479fb04c31c83b9925b2a3ebb691a138298a",
     "backend/discovery_universe.py": "3230e27acec26b08e867298cfcda34e9b128d79b39b88a02a9e61bbeaac06d93",
@@ -141,10 +141,10 @@
   "hash_basis": "UTF8_LF",
   "exit_policy_version": "HONEST_NET_EXIT_V1",
   "hash_change_reasons": {
-    "backend/market_monitor.py": "2026-10-08: explicit strategy profile selection; ORDER_FLOW_ADAPTIVE (2026-10-04) is the primary profile with module-owned configuration, BALANCED_V4 entry filter, 60s flow window, fixed $200 size, $100 daily gate, 20-minute same-token cooldown, one position and adaptive conviction exits. EARLY_SCOUT_V10 behavior is unchanged when selected. Open positions keep the exit policy recorded at entry. ORDER_FLOW_ADAPTIVE_LEARNING becomes the default profile: eight positions, tiered entries, learned sizing, outcome-aware cooldown; an unsellable position no longer freezes entries under this profile; every position keeps the stop recorded at entry. Adds the read-only /lab-book endpoint (trade list of one Strategy Lab book); no trading logic changed. Adds the read-only /coin-flow endpoint (buyers/sellers windows for the dashboard); no trading logic changed. Adds the read-only /coin-wallets endpoint (per-wallet trades and top holders via GeckoTerminal + Solana RPC, dashboard only). Adds the read-only /hype-radar endpoint (themes file + feed matches, dashboard only). 2026-10-09: /coin-wallets now adds a read-only on-demand direct Solana RPC wallet feed for the selected pool; main engine entry/exit/sizing logic is unchanged. 2026-10-09: dashboard-only coin-flow/wallet pair resolution now falls back by mint for stale browser selections and accepts exact frontend pair forwarding; trading rules are unchanged. 2026-10-09: discovery scheduling now prioritizes only genuinely new provider addresses plus urgent newborn pools, guaranteeing remaining batch capacity rotates through the persistent universe; adds read-only discovery telemetry only. Trading rules are unchanged. 2026-10-09: new positions record the fixed profile take-profit when the active strategy exit policy is fixed; existing positions retain their recorded policy. 2026-10-09: pins current live-tape mints into the rotating scan and prefers their exact taped pool so verified flow evidence overlaps entry evaluation; thresholds are unchanged. 2026-10-09: provider-resilience only: DexScreener discovery retries one transient failure and failed 30-token market batches retry as two 15-token reads; scoring, GOLD/CORE/EXPLORE thresholds, rug/risk gates, sizing, quotes and exits are unchanged. 2026-10-09: adds read-only current backend health projection (market data, discovery, order-flow coverage, active issues) and retry outcome telemetry for truthful dashboard status; entry, exit, sizing and execution rules are unchanged. 2026-10-09: adds owner-selected ORDER_FLOW_OCT4_FIXED_5_10 overlay: the Oct-4 GOLD entry rule and all rug/price/quote gates stay unchanged, while new main PAPER positions are fixed at $200 and use HONEST_NET_EXIT_V1 with a -5% net stop trigger and +10% net take-profit target; adaptive/trailing/conviction exits are disabled for this overlay. Public dashboard history now excludes trades below $200 without deleting the internal audit/ledger, and the Oct-4 family refuses to silently resize below $200.",
+    "backend/market_monitor.py": "2026-10-08: explicit strategy profile selection; ORDER_FLOW_ADAPTIVE (2026-10-04) is the primary profile with module-owned configuration, BALANCED_V4 entry filter, 60s flow window, fixed $200 size, $100 daily gate, 20-minute same-token cooldown, one position and adaptive conviction exits. EARLY_SCOUT_V10 behavior is unchanged when selected. Open positions keep the exit policy recorded at entry. ORDER_FLOW_ADAPTIVE_LEARNING becomes the default profile: eight positions, tiered entries, learned sizing, outcome-aware cooldown; an unsellable position no longer freezes entries under this profile; every position keeps the stop recorded at entry. Adds the read-only /lab-book endpoint (trade list of one Strategy Lab book); no trading logic changed. Adds the read-only /coin-flow endpoint (buyers/sellers windows for the dashboard); no trading logic changed. Adds the read-only /coin-wallets endpoint (per-wallet trades and top holders via GeckoTerminal + Solana RPC, dashboard only). Adds the read-only /hype-radar endpoint (themes file + feed matches, dashboard only). 2026-10-09: /coin-wallets now adds a read-only on-demand direct Solana RPC wallet feed for the selected pool; main engine entry/exit/sizing logic is unchanged. 2026-10-09: dashboard-only coin-flow/wallet pair resolution now falls back by mint for stale browser selections and accepts exact frontend pair forwarding; trading rules are unchanged. 2026-10-09: discovery scheduling now prioritizes only genuinely new provider addresses plus urgent newborn pools, guaranteeing remaining batch capacity rotates through the persistent universe; adds read-only discovery telemetry only. Trading rules are unchanged. 2026-10-09: new positions record the fixed profile take-profit when the active strategy exit policy is fixed; existing positions retain their recorded policy. 2026-10-09: pins current live-tape mints into the rotating scan and prefers their exact taped pool so verified flow evidence overlaps entry evaluation; thresholds are unchanged. 2026-10-09: provider-resilience only: DexScreener discovery retries one transient failure and failed 30-token market batches retry as two 15-token reads; scoring, GOLD/CORE/EXPLORE thresholds, rug/risk gates, sizing, quotes and exits are unchanged. 2026-10-09: adds read-only current backend health projection (market data, discovery, order-flow coverage, active issues) and retry outcome telemetry for truthful dashboard status; entry, exit, sizing and execution rules are unchanged. 2026-10-09: adds owner-selected ORDER_FLOW_OCT4_FIXED_5_10 overlay: the Oct-4 GOLD entry rule and all rug/price/quote gates stay unchanged, while new main PAPER positions are fixed at $200 and use HONEST_NET_EXIT_V1 with a -5% net stop trigger and +10% net take-profit target; adaptive/trailing/conviction exits are disabled for this overlay. Public dashboard history now excludes trades below $200 without deleting the internal audit/ledger, and the Oct-4 family refuses to silently resize below $200. 2026-10-09: owner-controlled PAPER settings replace the fixed 200/5/10 overlay: the Oct-4 GOLD entry/rug/price/quote gates are unchanged, while each new position records the owner-selected notional, executable-net stop and executable-net take-profit. USER_FIXED_TARGETS_V1 has no max-hold, conviction, order-flow, stale-market, liquidity or impact early-exit shortcut; cached threshold intents are revalidated on a forced fresh sell quote. Settings persist per account and do not rewrite existing positions.",
     "backend/engine_entry_policy.py": "Raised validated quote throughput to 12 candidates per scan and versioned V10 high-frequency scout policy. Unchanged on 2026-10-08; used only by the EARLY_SCOUT_V10 profile. 2026-10-08: adds the learned_avoid rejection label only.",
     "backend/gold_order_flow.py": "Added MICRO_SCOUT before ULTRA_EARLY with lower early thresholds while leaving safety/price/execution vetoes outside and mandatory. Unchanged on 2026-10-08; used only by the EARLY_SCOUT_V10 profile.",
-    "backend/engine_exit_policy.py": "Versioned net fixed policy and original adaptive candidate, no chart stop",
+    "backend/engine_exit_policy.py": "Versioned net fixed policy and original adaptive candidate, no chart stop 2026-10-09: adds USER_FIXED_TARGETS_V1 for PAPER positions; only the position-recorded executable-net stop or take-profit can produce an exit decision, with no time/adaptive shortcut.",
     "backend/engine_execution.py": "Fresh exact-quantity quote path, landing delay, final signal age and forced refresh",
     "backend/honest_quote_transport.py": "Shared cross-platform budget with exit priority and explicit API errors",
     "backend/live_tape.py": "Durable retry/pagination, successful IDL swaps, coverage and quote reference",
@@ -158,7 +158,7 @@
     "backend/training_bridge.py": "Bounded no-API journal bridge with actual evidence timestamps",
     "backend/training_worker.py": "Independent process, durable reset boundary and restart",
     "backend/paper_state_reset.py": "User-authorized checksum archives and all PAPER reset/restore",
-    "backend/user_gateway.py": "Independent private PAPER accounts with cached Supabase verification and stable configured-port reuse; a slow health probe can no longer churn through new per-user engine ports. 2026-10-08: CORS allowlist adds the Vercel frontend origin and exact extra origins from NEO_ALLOWED_ORIGINS; no account, auth or engine logic changed. Adds the authenticated /user/lab-book route that forwards only a book id. Adds the authenticated /user/coin-flow route that forwards only an address and pool id. Adds /user/coin-wallets (address and pool id only). Adds /user/hype-radar.",
+    "backend/user_gateway.py": "Independent private PAPER accounts with cached Supabase verification and stable configured-port reuse; a slow health probe can no longer churn through new per-user engine ports. 2026-10-08: CORS allowlist adds the Vercel frontend origin and exact extra origins from NEO_ALLOWED_ORIGINS; no account, auth or engine logic changed. Adds the authenticated /user/lab-book route that forwards only a book id. Adds the authenticated /user/coin-flow route that forwards only an address and pool id. Adds /user/coin-wallets (address and pool id only). Adds /user/hype-radar. 2026-10-09: adds authenticated per-user GET/POST settings forwarding to the isolated PAPER engine; no live execution or cross-account access. The gateway also forwards an explicit per-account strategy_profile into a gateway-spawned PAPER restart so the account cannot fall back to a different default profile.",
     "backend/strategy_lab.py": "Inert import, complete histories and truthful profit factor Includes the isolated PAPER MOMENTUM_HUNTER challenger and ranking diagnostics. 2026-10-08: adds the isolated PAPER TikTok Strategy book (light filter, min $30k market cap, net stop -12% / target +17%, 1s exit re-check while it holds) through per-strategy exit and cost-cap overrides; all other books keep 3:10 and the shared cost model. 2026-10-08: the TikTok take profit is booked as a limit at exactly +17% net (never above); stops stay market sales at the observed mark, and each exit records the previous mark and the seconds between the two observations. 2026-10-08: adds isolated X_SIGNAL PAPER book; it can enter only when a fresh literal Solana address from x_signal.json matches a normal feed candidate, after the existing price-integrity, liquidity, cost and cooldown checks. It uses the same -12% market-stop trigger and exact +17% limit target as TikTok. 2026-10-08: per-book cumulative entry-rejection counters (which rule keeps a quiet book out) for the dashboard; the Astra snapshot is no longer merged into the lab view. No entry or exit rule changed. 2026-10-08: adds the isolated PAPER HYPE_RADAR book (LLM theme match + rug gate, net -12%/+17% limit TP); other books unchanged.",
     "backend/astra6_brain.py": "Shared exit-priority quote transport, cache/backoff, UTF-8 persistence and truthful profit factor",
     "backend/lab_paired_runner.py": "Cross-platform file locking and UTF-8 persistence",
@@ -236,24 +236,43 @@
       },
       "documentation": "docs/ORDER_FLOW_ADAPTIVE_OCT4.md"
     },
-    "ORDER_FLOW_OCT4_FIXED_5_10": {
-      "selected_by": "NEO_STRATEGY_PROFILE=ORDER_FLOW_OCT4_FIXED_5_10",
+    "ORDER_FLOW_OCT4_USER_FIXED": {
+      "selected_by": "NEO_STRATEGY_PROFILE=ORDER_FLOW_OCT4_USER_FIXED",
+      "legacy_alias": "ORDER_FLOW_OCT4_FIXED_5_10",
       "production_strategy_id": "ORDER_FLOW_ADAPTIVE",
-      "strategy_version": "gold-2026-10-04-fixed-5-10-20261009",
+      "strategy_version": "gold-2026-10-04-user-fixed-targets-20261009",
       "entry_policy_version": "ORDER_FLOW_GOLD_V1",
-      "exit_policy": "fixed",
-      "exit_policy_version": "HONEST_NET_EXIT_V1",
+      "exit_policy": "fixed_targets",
+      "exit_policy_version": "USER_FIXED_TARGETS_V1",
       "rules": {
-        "trade_notional_usd": 200,
-        "stop_loss_pct": 5,
-        "take_profit_pct": 10,
+        "default_trade_notional_usd": 200,
+        "default_stop_loss_pct": 5,
+        "default_take_profit_pct": 10,
+        "trade_notional_usd_range": [
+          10,
+          5000
+        ],
+        "stop_loss_pct_range": [
+          0.5,
+          50
+        ],
+        "take_profit_pct_range": [
+          0.5,
+          200
+        ],
         "max_positions": 1,
         "scan_seconds": 15,
         "position_scan_seconds": 2,
         "same_token_cooldown_seconds": 1200,
-        "public_history_min_notional_usd": 200,
         "entry_rule": "same ORDER_FLOW_GOLD_V1 thresholds as ORDER_FLOW_ADAPTIVE_OCT4",
-        "safety_checks_unchanged": true,
+        "target_only_exits": true,
+        "max_hold_exit": false,
+        "conviction_exit": false,
+        "orderflow_exit": false,
+        "stale_market_exit": false,
+        "liquidity_emergency_exit": false,
+        "impact_emergency_exit": false,
+        "safety_checks_before_entry_unchanged": true,
         "stop_fill_guaranteed": false
       }
     }
