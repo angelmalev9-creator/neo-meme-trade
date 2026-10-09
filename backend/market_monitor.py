@@ -788,6 +788,7 @@ class State:
         self.message = 'Starting NEO live market monitor.'
         self.last_scan_at = 0
         self.scan_count = 0
+        self.scanned_address_slots_total = 0
         self.feed: list[dict[str, Any]] = []
         self.positions: list[dict[str, Any]] = []
         self.position_market: dict[str, dict[str, Any]] = {}
@@ -838,6 +839,8 @@ class State:
             self.demo_started_at = int(data.get('demo_started_at') or self.demo_started_at)
             self.demo_session_id = str(data.get('demo_session_id') or self.demo_session_id)
             self.trade_seq = int(data.get('trade_seq') or 0)
+            self.scan_count = max(0, int(data.get('scan_count') or 0))
+            self.scanned_address_slots_total = max(0, int(data.get('scanned_address_slots_total') or 0))
             self.engine_settings = normalize_engine_settings(data.get('engine_settings'), self.engine_settings)
             today = time.strftime('%Y-%m-%d', time.gmtime())
             if str(data.get('risk_day_key') or '') == today:
@@ -876,6 +879,8 @@ class State:
             'demo_started_at': self.demo_started_at,
             'demo_session_id': self.demo_session_id,
             'trade_seq': self.trade_seq,
+            'scan_count': self.scan_count,
+            'scanned_address_slots_total': self.scanned_address_slots_total,
             'engine_settings': self.engine_settings,
             'risk_day_key': self.risk_day_key,
             'risk_day_start_balance_usd': self.risk_day_start_balance_usd,
@@ -1768,7 +1773,7 @@ class Monitor:
         self.universe_seeded = self.universe.stats()['size'] > 0
         self.last_discovery_snapshot: set[str] = set()
         self.new_universe_since_start = 0
-        self.scanned_address_slots_since_start = 0
+        self.scanned_address_slots_since_start = int(getattr(STATE, 'scanned_address_slots_total', 0) or 0)
 
     def ensure_universe_seeded(self) -> None:
         if self.universe_seeded:
@@ -2062,8 +2067,9 @@ class Monitor:
     def maybe_open(self, feed: list[dict[str, Any]]) -> None:
         if not STATE.running or not self.entry_lock.acquire(blocking=False): return
         report = {'policy_version': ENTRY_POLICY_VERSION, 'strategy': SIGNAL_STRATEGY, 'checked_at': now_ms(),
-                  'candidates': len(feed), 'evaluated': 0, 'signal_passed': 0,
-                  'quoted': 0, 'opened': 0, 'rejections': {}, 'examples': [], 'max_positions': MAX_POSITIONS}
+                  'candidates': len(feed), 'evaluated': 0, 'signal_passed': 0, 'safety_passed': 0,
+                  'quoted': 0, 'quote_returned': 0, 'quote_passed': 0, 'opened': 0,
+                  'rejections': {}, 'post_signal_rejections': {}, 'examples': [], 'max_positions': MAX_POSITIONS}
         try:
             self._maybe_open_checked(feed, report)
         except Exception as exc:
@@ -2074,8 +2080,13 @@ class Monitor:
             self.entry_lock.release()
 
     def _maybe_open_checked(self, feed: list[dict[str, Any]], report: dict[str, Any]) -> None:
+        post_signal_addresses: set[str] = set()
         def reject(report, reasons, coin=None, metrics=None):
             entry_policy.record(report,reasons,coin,metrics)
+            if coin and str(coin.get('address') or '') in post_signal_addresses:
+                post = report.setdefault('post_signal_rejections', {})
+                for reason in reasons:
+                    post[reason] = post.get(reason, 0) + 1
             if coin:
                 training_bridge.observe(coin,STATE.live_flow(coin.get('address'),pair_address=coin.get('pairAddress')),
                     reasons=reasons,now=now_ms())
@@ -2180,6 +2191,7 @@ class Monitor:
                 } if is_adaptive() else None)
                 continue
             report['signal_passed'] += 1
+            post_signal_addresses.add(str(address))
             entry_mode = (tier_seen.get('tier') if is_learner() else oct4.ENTRY_MODE if is_adaptive()
                           else order_flow.entry_mode(coin, flow, context, EFFECTIVE_ENTRY_THRESHOLDS))
             if not entry_mode:
@@ -2205,6 +2217,7 @@ class Monitor:
             if safety.get('status') != 'pass' or safety.get('provisional_early'):
                 reject(report, safety.get('reasons') or ['risk_check_pending'], coin)
                 continue
+            report['safety_passed'] += 1
             if report['quoted'] >= MAX_QUOTED_CANDIDATES:
                 reject(report, ['quote_budget'], coin)
                 continue
@@ -2292,6 +2305,7 @@ class Monitor:
             if not prepared:
                 reject(report,['quote_inconsistent'],coin)
                 continue
+            report['quote_returned'] += 1
             live_quote,initial_exit=prepared
             entry_network_fee=pre_network_fee
             expected_token_raw=int(live_quote['token_raw_amount'])
@@ -2317,6 +2331,7 @@ class Monitor:
                     'entry_impact_pct': round(impact_pct, 4),
                 })
                 continue
+            report['quote_passed'] += 1
             stop_signal_trigger_pct = None
             quote_slippage_pct = paper_quotes.BUFFER_BPS / 100.0
             quote_network_fee = entry_network_fee
@@ -2578,6 +2593,7 @@ class Monitor:
                 progress_done = int(done)
                 self.scanned_address_slots_since_start += delta
                 with STATE.lock:
+                    STATE.scanned_address_slots_total = self.scanned_address_slots_since_start
                     live_stats = dict(STATE.discovery_stats or discovery_stats)
                     if int(live_stats.get('scan_sequence') or 0) != scan_sequence:
                         return
@@ -2818,6 +2834,9 @@ def main() -> None:
     if mode not in {'PAPER', 'REPLAY', 'SHADOW'}:
         raise ValueError('Only PAPER/REPLAY/SHADOW modes are supported')
     STATE.load()
+    MONITOR.scanned_address_slots_since_start = max(
+        MONITOR.scanned_address_slots_since_start, STATE.scanned_address_slots_total
+    )
     STATE.save()
     training_bridge.start(STATE_PATH.parent / 'training')
     thread = threading.Thread(target=MONITOR.run, name='neo-market-monitor', daemon=True)

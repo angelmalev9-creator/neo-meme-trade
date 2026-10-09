@@ -61,8 +61,8 @@ type RuntimeHealth = {
 };
 type EntryDiagnostics = {
   status?: string; message?: string; policy_version?: string; strategy?: string; checked_at?: number;
-  candidates?: number; evaluated?: number; signal_passed?: number; quoted?: number; opened?: number; max_positions?: number;
-  rejections?: Record<string, number>; reason_labels?: Record<string, string>;
+  candidates?: number; evaluated?: number; signal_passed?: number; safety_passed?: number; quoted?: number; quote_returned?: number; quote_passed?: number; opened?: number; max_positions?: number;
+  rejections?: Record<string, number>; post_signal_rejections?: Record<string, number>; reason_labels?: Record<string, string>;
   examples?: { symbol: string; reasons: string[]; metrics: Record<string, unknown> }[];
 };
 type MonitorState = {
@@ -353,15 +353,16 @@ export default function App() {
   const chartData = useMemo(() => (detail?.history || []).map(p => ({ ...p, label: timeLabel(p.ts) })), [detail]);
   const diagnostics = state?.entry_diagnostics;
   const rejectionRows = useMemo(() => Object.entries(diagnostics?.rejections || {}).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([key, count]) => ({ key, count, label: diagnostics?.reason_labels?.[key] || key })), [diagnostics]);
+  const postGoldRejectionRows = useMemo(() => Object.entries(diagnostics?.post_signal_rejections || {}).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([key, count]) => ({ key, count, label: diagnostics?.reason_labels?.[key] || key })), [diagnostics]);
   const engineScanSummary = diagnostics
-    ? `Проверени ${diagnostics.evaluated ?? 0} от ${diagnostics.candidates ?? 0} token-а; ${diagnostics.signal_passed ?? 0} минаха GOLD сигнала; ${diagnostics.quoted ?? 0} стигнаха до котировка; ${diagnostics.opened ?? 0} отворени.`
+    ? `Batch ${state?.discovery_stats?.selected_last_scan ?? diagnostics.candidates ?? 0} адреса → ${diagnostics.candidates ?? 0} валидни пазара → ${diagnostics.evaluated ?? 0} входни проверки → ${diagnostics.signal_passed ?? 0} GOLD → ${diagnostics.safety_passed ?? 0} price/rug/risk OK → ${diagnostics.quoted ?? 0} към котировка → ${diagnostics.quote_passed ?? 0} валидни quote → ${diagnostics.opened ?? 0} отворени.`
     : state?.message || '—';
   const journalEvents = useMemo(() => {
     const rows: { ts: number; text: string; tone?: 'ok' | 'warn' | 'error' }[] = [];
     const health = state?.runtime_health;
     if (diagnostics) rows.push({
       ts: diagnostics.checked_at || state?.last_scan_at || Date.now(),
-      text: `Scan #${state?.discovery_stats?.scan_sequence ?? state?.scan_count ?? '—'}: ${diagnostics.evaluated ?? 0} проверени · ${diagnostics.signal_passed ?? 0} GOLD сигнал · ${diagnostics.quoted ?? 0} до quote · ${diagnostics.opened ?? 0} отворени`,
+      text: `Scan #${state?.discovery_stats?.scan_sequence ?? state?.scan_count ?? '—'}: ${diagnostics.evaluated ?? 0} входни проверки · ${diagnostics.signal_passed ?? 0} GOLD · ${diagnostics.safety_passed ?? 0} safety OK · ${diagnostics.quote_passed ?? 0} валидни quote · ${diagnostics.opened ?? 0} отворени`,
       tone: 'ok',
     });
     if (health?.order_flow?.checked_at) {
@@ -525,13 +526,14 @@ export default function App() {
             <div className="p-4">
               {!diagnostics ? <div className="text-xs text-slate-500">Чакам първия scan…</div> : <>
                 <div className={`rounded-2xl border p-3 text-xs leading-5 ${engineQuiet ? 'border-amber-400/20 bg-amber-400/[0.05] text-amber-100' : 'border-emerald-400/15 bg-emerald-400/[0.04] text-emerald-100'}`}>{engineScanSummary}</div>
-                {state?.discovery_stats && <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-emerald-400/10 bg-emerald-400/[0.03] px-3 py-2 text-[9px] text-slate-500"><span className="flex items-center gap-1.5 font-black text-emerald-300"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-300" />НЕПРЕКЪСНАТ SCAN</span><span>scan <b className="text-white">#{state.discovery_stats.scan_sequence ?? state.scan_count}</b></span><span>жив прогрес <b className="text-emerald-300">{state.discovery_stats.refresh_completed ?? state.discovery_stats.selected_last_scan}/{state.discovery_stats.refresh_total ?? state.discovery_stats.selected_last_scan}</b></span><span>общо проверки <b className="text-white">{(state.discovery_stats.scanned_address_slots_since_start ?? 0).toLocaleString()}</b></span><span>уникални койнове <b className="text-white">{state.discovery_stats.size}</b></span><span>нови <b className="text-emerald-300">+{state.discovery_stats.new_universe_last_scan}</b></span><span>избрани за scan <b className="text-white">{state.discovery_stats.selected_last_scan}</b></span><span>cursor {state.discovery_stats.cursor}/{state.discovery_stats.size}</span></div>}
-                <div className="mt-3 grid grid-cols-5 gap-2 text-center">
-                  {([['Валиден feed', diagnostics.candidates], ['Проверени за вход', diagnostics.evaluated], ['GOLD сигнал', diagnostics.signal_passed], ['До котировка', diagnostics.quoted], ['Отворени', diagnostics.opened]] as [string, number | undefined][]).map(([label, value]) => <div key={label} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-2"><div className="text-base font-black text-white">{value ?? 0}</div><div className="mt-0.5 text-[8px] font-black uppercase tracking-wider text-slate-600">{label}</div></div>)}
+                {state?.discovery_stats && <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-emerald-400/10 bg-emerald-400/[0.03] px-3 py-2 text-[9px] text-slate-500"><span className="flex items-center gap-1.5 font-black text-emerald-300"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-300" />НЕПРЕКЪСНАТА РОТАЦИЯ</span><span>scan <b className="text-white">#{state.discovery_stats.scan_sequence ?? state.scan_count}</b></span><span>текущ batch <b className="text-emerald-300">{state.discovery_stats.refresh_completed ?? 0}/{state.discovery_stats.refresh_total ?? state.discovery_stats.selected_last_scan}</b></span><span>общо проверени slots <b className="text-white">{(state.discovery_stats.scanned_address_slots_since_start ?? 0).toLocaleString()}</b></span><span>активен universe <b className="text-white">{state.discovery_stats.size}</b></span><span>нови <b className="text-emerald-300">+{state.discovery_stats.new_universe_last_scan}</b></span><span>ротация <b className="text-white">{state.discovery_stats.cursor}/{state.discovery_stats.size}</b></span><span className="font-black text-emerald-300">следващият batch стартира автоматично</span></div>}
+                <div className="mt-3 grid grid-cols-2 gap-2 text-center sm:grid-cols-4 xl:grid-cols-7">
+                  {([['Batch', state?.discovery_stats?.selected_last_scan], ['Валиден feed', diagnostics.candidates], ['Входни проверки', diagnostics.evaluated], ['GOLD', diagnostics.signal_passed], ['Price/Rug OK', diagnostics.safety_passed], ['Quote OK', diagnostics.quote_passed], ['Отворени', diagnostics.opened]] as [string, number | undefined][]).map(([label, value]) => <div key={label} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-2"><div className="text-base font-black text-white">{value ?? 0}</div><div className="mt-0.5 text-[8px] font-black uppercase tracking-wider text-slate-600">{label}</div></div>)}
                 </div>
-                <div className="mt-2 text-[9px] leading-4 text-slate-600">GOLD сигнал = стратегията харесва входа. След него задължително минават отделните price / rug / risk проверки; едва тогава се прави котировка.</div>
-                <div className="mt-4 text-[9px] font-black uppercase tracking-[0.16em] text-slate-600">Откази на последния scan · {agoLabel(diagnostics.checked_at)}</div>
-                <div className="mt-2"><RejectionBars rows={rejectionRows} total={diagnostics.candidates ?? 0} /></div>
+                <div className="mt-2 text-[9px] leading-4 text-slate-600">Текущият batch е само provider-safe порция, не лимит на сканирането. Universe-ът се върти непрекъснато и новите токени се добавят динамично. GOLD е само първият входен етап; след него има отделни price / rug / risk и quote проверки.</div>
+                {postGoldRejectionRows.length > 0 && <><div className="mt-4 text-[9px] font-black uppercase tracking-[0.16em] text-amber-300/80">След GOLD — защо не стигна до сделка</div><div className="mt-2"><RejectionBars rows={postGoldRejectionRows} total={Math.max(1, diagnostics.signal_passed ?? 0)} /></div></>}
+                <div className="mt-4 text-[9px] font-black uppercase tracking-[0.16em] text-slate-600">Всички причини за отказ · могат да се застъпват · {agoLabel(diagnostics.checked_at)}</div>
+                <div className="mt-2"><RejectionBars rows={rejectionRows} total={diagnostics.evaluated ?? diagnostics.candidates ?? 0} /></div>
                 {!!diagnostics.examples?.length && <details className="mt-3 text-[10px] text-slate-500"><summary className="cursor-pointer font-black text-slate-400">Примери ({diagnostics.examples.length})</summary>
                   <div className="mt-2 space-y-1">{diagnostics.examples.map((ex, i) => <div key={`${ex.symbol}-${i}`} className="rounded-lg border border-white/[0.05] px-2 py-1.5"><span className="font-black text-white">${ex.symbol}</span> · {ex.reasons.map(r => diagnostics.reason_labels?.[r] || r).join(', ')}</div>)}</div></details>}
                 <div className="mt-3 text-[9px] text-slate-600">Стратегия {diagnostics.strategy ?? state?.config.signal_strategy} · {diagnostics.policy_version} · scan на {state?.config.scan_seconds}s · позиции на {state?.config.position_scan_seconds ?? 1}s</div>

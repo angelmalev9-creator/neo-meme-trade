@@ -354,6 +354,9 @@ class EngineEntries(EngineHarness):
         self.assertLess(pos['entry_roundtrip_pnl_pct'], 0)
         self.assertEqual(m.STATE.entry_diagnostics['status'], 'opened')
         self.assertEqual(m.STATE.entry_diagnostics['policy_version'], 'ORDER_FLOW_GOLD_V1')
+        self.assertEqual((m.STATE.entry_diagnostics['safety_passed'], m.STATE.entry_diagnostics['quoted'],
+                          m.STATE.entry_diagnostics['quote_returned'], m.STATE.entry_diagnostics['quote_passed']),
+                         (1, 1, 1, 1))
         self.assertEqual(self.mocks['flow'].call_args.args[1], 60)
 
     def test_user_controls_are_recorded_on_the_new_position(self):
@@ -374,6 +377,19 @@ class EngineEntries(EngineHarness):
         self.assertEqual(pos['exit_policy_version'], exit_policy.USER_FIXED_VERSION)
         self.assertEqual(pos['engine_settings_version'], exit_policy.USER_FIXED_VERSION)
 
+
+    def test_post_gold_rejection_is_reported_separately(self):
+        self.safety = {
+            'status': 'blocked', 'reasons': ['reported_linked_insiders'],
+            'metrics': {'decimals': 6, 'token_account_rent_lamports': 1_650_000},
+        }
+        self.monitor.maybe_open([self.coin])
+        diagnostics = m.STATE.entry_diagnostics
+        self.assertEqual(diagnostics['signal_passed'], 1)
+        self.assertEqual(diagnostics['safety_passed'], 0)
+        self.assertEqual(diagnostics['quoted'], 0)
+        self.assertEqual(diagnostics['post_signal_rejections'], {'reported_linked_insiders': 1})
+        self.mocks['prepare'].assert_not_called()
 
     def test_filter_rejections_are_named_in_diagnostics_before_any_quote(self):
         self.coin['score'] = 84
@@ -719,6 +735,14 @@ class EffectiveConfig(EngineHarness):
         self.assertEqual(exit_policy.exit_reason({}, {}, net_pct=10.01, peak_net_pct=10.01, hold_minutes=0,
                                                  stop_pct=4.0, take_profit_pct=10.0, policy='fixed_targets'),
                          'TAKE_PROFIT_NET_TARGET')
+
+    def test_scan_counters_persist_across_engine_restart(self):
+        m.STATE.scan_count = 321
+        m.STATE.scanned_address_slots_total = 76_543
+        m.STATE.save()
+        restored = m.State()
+        self.assertEqual(restored.scan_count, 321)
+        self.assertEqual(restored.scanned_address_slots_total, 76_543)
 
     def test_engine_settings_validate_ranges_and_persist_shape(self):
         row = m.normalize_engine_settings({'trade_notional_usd': 123.45, 'stop_loss_pct': 4, 'take_profit_pct': 11, 'updated_at': 123456})
