@@ -106,6 +106,23 @@ class DirectWalletFeed(unittest.TestCase):
         self.assertIs(second, first)
         self.assertEqual(len(calls), 2)
 
+
+    def test_onchain_windows_count_direct_rows_even_when_period_is_partial(self):
+        rows = [
+            {'ts': NOW - 10_000, 'direction': 'BUY', 'wallet': W1, 'signature': 'b1', 'usd_amount': 5, 'source': 'rpc_live'},
+            {'ts': NOW - 20_000, 'direction': 'BUY', 'wallet': W2, 'signature': 'b2', 'usd_amount': 7, 'source': 'rpc_live'},
+            {'ts': NOW - 30_000, 'direction': 'SELL', 'wallet': W3, 'signature': 's1', 'usd_amount': 3, 'source': 'tape'},
+            {'ts': NOW - 40_000, 'direction': 'SELL', 'wallet': W3, 'signature': 'g1', 'usd_amount': 99, 'source': 'geckoterminal'},
+        ]
+        windows = cw.onchain_windows(rows, now=NOW)
+        self.assertEqual((windows['m5']['buys'], windows['m5']['sells'], windows['m5']['buyers'], windows['m5']['sellers']), (2, 1, 2, 1))
+        self.assertEqual((windows['m5']['buy_usd'], windows['m5']['sell_usd']), (12.0, 3.0))
+        self.assertFalse(windows['m5']['complete'])
+        self.assertEqual(windows['m5']['observed_seconds'], 30)
+        proven = cw.onchain_windows(rows, now=NOW, coverage_since_ms=NOW - 400_000)
+        self.assertTrue(proven['m5']['complete'])
+        self.assertEqual(proven['m5']['observed_seconds'], 300)
+
     def test_rpc_live_beats_gecko_but_verified_tape_beats_rpc_live(self):
         gecko = [{'ts': NOW, 'direction': 'BUY', 'wallet': W1, 'signature': 'same', 'usd_amount': 10,
                   'token_amount': 100, 'price_usd': .1, 'source': 'geckoterminal'}]
@@ -163,6 +180,7 @@ class Holders(unittest.TestCase):
         self.assertIn('rpc down', out['holders_meta']['error'])
         self.assertEqual(out['trade_sources']['gecko_rows'], 0)
         self.assertEqual(out['trade_sources']['rpc_live_rows'], 1)
+        self.assertEqual((out['onchain_windows']['m1']['buys'], out['onchain_windows']['m1']['sells']), (1, 0))
         self.assertEqual(out['trades'][0]['wallet'], W1)
         self.assertEqual(out['links']['token'], f'https://solscan.io/token/{MINT}')
 

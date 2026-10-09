@@ -29,10 +29,12 @@ ENTRY_TTL_MS = 600_000
 ERROR_TTL_MS = 30_000
 DIRECT_TTL_MS = 2_500
 DIRECT_ERROR_TTL_MS = 4_000
-DIRECT_SIGNATURE_LIMIT = 60
+DIRECT_SIGNATURE_LIMIT = 240
 DIRECT_TX_BUDGET = 12
 MAX_WALLET_ROWS = 60
 MAX_TRADE_ROWS = 120
+DIRECT_HISTORY_ROWS = 600
+ONCHAIN_WINDOW_SECONDS = {'m1': 60, 'm5': 300, 'm15': 900, 'm30': 1800, 'h1': 3600}
 SIGNATURE_PAGE = 1000
 _B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 # Vault owners that are liquidity, not holders: Raydium AMM authority. PumpSwap
@@ -202,7 +204,11 @@ def direct_pool_trades(pair: str, mint: str, *, coin: dict[str, Any] | None = No
                               'quote_amount': _num(event.get('quote_amount')),
                               'quote_asset': event.get('quote_asset'), 'usd_estimated': bool(flags),
                               'source': 'rpc_live'})
-        rows = merge_trades(fresh, previous_rows)[:MAX_TRADE_ROWS]
+        rows = merge_trades(fresh, previous_rows)[:DIRECT_HISTORY_ROWS]
+        successful = [row for row in signatures if not row.get('err')]
+        page_drained = all(row['signature'] in seen for row in successful)
+        oldest_signature_ms = min((int(_num(row.get('blockTime')) * 1000) for row in signatures if _num(row.get('blockTime')) > 0), default=0)
+        coverage_since_ms = oldest_signature_ms if page_drained and oldest_signature_ms > 0 else None
         # Keep bounded signature memory. Current RPC head comes first, then any
         # still-useful older values so a pool with no new trades stays cheap.
         ordered_seen = [row['signature'] for row in signatures if row['signature'] in seen]
@@ -210,7 +216,8 @@ def direct_pool_trades(pair: str, mint: str, *, coin: dict[str, Any] | None = No
             if signature not in ordered_seen:
                 ordered_seen.append(signature)
         result = {'fetched_at': now, 'error': None, 'rows': rows, 'seen': ordered_seen[:300],
-                  'attempted': len(candidates), 'signature_rows': len(signatures)}
+                  'attempted': len(candidates), 'signature_rows': len(signatures),
+                  'page_drained': page_drained, 'coverage_since_ms': coverage_since_ms}
     except Exception as exc:
         result = {'fetched_at': now, 'error': str(exc)[:160], 'rows': previous_rows,
                   'seen': list(seen)[:300], 'attempted': 0, 'signature_rows': 0}
@@ -253,6 +260,38 @@ def merge_trades(*sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
             order.append(seen[key])
     order.sort(key=lambda r: r.get('ts') or 0, reverse=True)
     return order
+
+
+def onchain_windows(trades: list[dict[str, Any]], *, now: int, coverage_since_ms: int | None = None) -> dict[str, dict[str, Any]]:
+    """Aggregate direct/tape evidence for the dashboard period cards.
+
+    Counts remain useful while the direct scanner is still warming up, but the
+    response says when a window is only partially observed so the UI never
+    presents a lower bound as a complete period total.
+    """
+    rows = [row for row in trades if row.get('source') in ('rpc_live', 'tape')
+            and 0 < _num(row.get('ts')) <= now and row.get('direction') in ('BUY', 'SELL')]
+    oldest = min((int(_num(row.get('ts'))) for row in rows), default=now)
+    observed_since = int(coverage_since_ms or oldest)
+    available_seconds = max(0, (now - observed_since) // 1000) if rows else 0
+    coverage_proven = bool(coverage_since_ms)
+    windows: dict[str, dict[str, Any]] = {}
+    for key, seconds in ONCHAIN_WINDOW_SECONDS.items():
+        cutoff = now - seconds * 1000
+        inside = [row for row in rows if _num(row.get('ts')) >= cutoff]
+        buys = [row for row in inside if row.get('direction') == 'BUY']
+        sells = [row for row in inside if row.get('direction') == 'SELL']
+        windows[key] = {
+            'buys': len(buys), 'sells': len(sells),
+            'buyers': len({row.get('wallet') for row in buys if row.get('wallet')}),
+            'sellers': len({row.get('wallet') for row in sells if row.get('wallet')}),
+            'buy_usd': round(sum(_num(row.get('usd_amount')) for row in buys), 2),
+            'sell_usd': round(sum(_num(row.get('usd_amount')) for row in sells), 2),
+            'observed_seconds': min(seconds, int(available_seconds)),
+            'complete': bool(rows) and coverage_proven and available_seconds >= seconds,
+            'trades': len(inside),
+        }
+    return windows
 
 
 def wallet_activity(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -392,6 +431,7 @@ def build(address: str, pair: str, *, tape: dict[str, Any], fetch: Callable[[str
     tape_list = tape_rows(tape.get('events') or [], address, pair, now=now)
     direct = direct or {'rows': [], 'error': None, 'fetched_at': now, 'attempted': 0}
     direct_rows = list(direct.get('rows') or [])
+    onchain_rows = merge_trades(direct_rows, tape_list)
     trades = merge_trades(gecko['rows'], direct_rows, tape_list)
     pools = set(pool_accounts or set()) | KNOWN_POOL_AUTHORITIES | ({pair} if pair else set())
     holder_view = holders(address, rpc, pool_accounts=pools, now=now, max_entry_lookups=8)
@@ -399,8 +439,10 @@ def build(address: str, pair: str, *, tape: dict[str, Any], fetch: Callable[[str
         'address': address, 'pairAddress': pair, 'at': now,
         'trades': trades[:MAX_TRADE_ROWS],
         'wallets': wallet_activity(trades),
+        'onchain_windows': onchain_windows(onchain_rows, now=now, coverage_since_ms=direct.get('coverage_since_ms')),
         'trade_sources': {'tape_rows': len(tape_list), 'rpc_live_rows': len(direct_rows), 'rpc_live_error': direct.get('error'),
                           'rpc_live_fetched_at': direct.get('fetched_at'), 'rpc_live_attempted': direct.get('attempted', 0),
+                          'rpc_live_page_drained': direct.get('page_drained'), 'rpc_live_coverage_since_ms': direct.get('coverage_since_ms'),
                           'gecko_rows': len(gecko['rows']), 'gecko_error': gecko.get('error'),
                           'gecko_fetched_at': gecko.get('fetched_at'), 'tape_coverage': ((tape.get('pair_coverage') or {}).get(pair) or {}).get('status')},
         'holders': holder_view.get('holders') or [],
