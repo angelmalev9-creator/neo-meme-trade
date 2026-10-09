@@ -84,9 +84,9 @@ class MarketRefreshProgressTests(unittest.TestCase):
             order, metadata = monitor.discover()
         self.assertEqual(order, [])
         self.assertEqual(metadata, {})
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 6)
         self.assertEqual(monitor._DISCOVERY_HEALTH['status'], 'degraded')
-        self.assertEqual(monitor._DISCOVERY_HEALTH['sources_ok'], 4)
+        self.assertEqual(monitor._DISCOVERY_HEALTH['sources_ok'], 5)
         self.assertEqual(monitor._DISCOVERY_HEALTH['sources_failed'], 1)
 
     def test_discovery_api_retries_one_transient_timeout(self):

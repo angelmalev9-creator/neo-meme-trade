@@ -1656,6 +1656,7 @@ def discover() -> tuple[list[str], dict[str, dict[str, Any]]]:
     sources_ok = 0
     sources = [
         ('latest', '/token-profiles/latest/v1'),
+        ('recent-updates', '/token-profiles/recent-updates/v1'),
         ('boosted', '/token-boosts/top/v1'),
         ('boosted-latest', '/token-boosts/latest/v1'),
         ('community-takeover', '/community-takeovers/latest/v1'),
@@ -2692,7 +2693,12 @@ class Monitor:
         try:
             self.ensure_universe_seeded()
             addresses, metadata = self.discovery.get()
-            early_pairs = gecko_new_pumpswap_pairs()
+            # The owner-selected EARLY_BUY_PRESSURE_FIXED profile must scan the
+            # current DexScreener discovery snapshot directly, not a fixed-size
+            # slice of the historical rolling universe. Other profiles keep the
+            # broader newborn-pool discovery path unchanged.
+            direct_dex_latest = BUY_PRESSURE_FIXED
+            early_pairs = [] if direct_dex_latest else gecko_new_pumpswap_pairs()
             for early_pair in early_pairs:
                 address = str((early_pair.get('baseToken') or {}).get('address') or '')
                 if not address:
@@ -2715,22 +2721,49 @@ class Monitor:
                 for pair in early_pairs
             ]
             discovered_snapshot = list(dict.fromkeys(addresses))
+            if direct_dex_latest:
+                # Only the genuinely fresh DexScreener surfaces belong in this
+                # strategy's candidate set. "top boosts" can be old, so it remains
+                # available to the rolling-universe profiles but does not pad this
+                # latest-candidate scan with stale names.
+                latest_sources = {
+                    'latest', 'recent-updates', 'boosted-latest',
+                    'community-takeover', 'ads-latest',
+                }
+                discovered_snapshot = [
+                    address for address in discovered_snapshot
+                    if latest_sources.intersection(set((metadata.get(address) or {}).get('sources') or []))
+                ]
             priority_addresses = discovery_universe.fresh_priority(
                 discovered_snapshot, self.last_discovery_snapshot, early_addresses
             )
+            previous_snapshot = set(self.last_discovery_snapshot)
             self.last_discovery_snapshot = set(discovered_snapshot)
+            fresh_provider_last_scan = len(set(discovered_snapshot) - previous_snapshot)
             newly_added = self.universe.observe(discovered_snapshot, metadata)
             self.new_universe_since_start += newly_added
-            addresses, universe_meta = self.universe.next_batch(
-                priority=priority_addresses, limit=DISCOVERY_SCAN_BATCH
-            )
+            if direct_dex_latest:
+                # No 240-address padding/rotation here: every cycle evaluates the
+                # exact current direct-DexScreener snapshot. The count is therefore
+                # truthful and may rise/fall as the latest feeds change.
+                addresses = list(discovered_snapshot)
+                universe_meta = {address: dict(metadata.get(address) or {}) for address in addresses}
+            else:
+                addresses, universe_meta = self.universe.next_batch(
+                    priority=priority_addresses, limit=DISCOVERY_SCAN_BATCH
+                )
             # Keep the small set of pools currently being verified by live_tape in
             # every market scan. Otherwise the 240-address rotation can move on
             # before the recorder completes its transaction bodies, leaving every
             # evaluated candidate with zero verified flow despite healthy tape data.
             tape_pins = active_tape_pins(read_live_tape())
+            if direct_dex_latest:
+                current_latest = set(addresses)
+                tape_pins = [address for address in tape_pins if address in current_latest]
             if tape_pins:
-                addresses = list(dict.fromkeys([*tape_pins, *addresses]))[:DISCOVERY_SCAN_BATCH]
+                addresses = list(dict.fromkeys([*tape_pins, *addresses]))
+                if not direct_dex_latest:
+                    addresses = addresses[:DISCOVERY_SCAN_BATCH]
                 for address in tape_pins:
                     info = metadata.setdefault(address, {
                         'sources': [], 'icon': '', 'header': '', 'description': '',
@@ -2744,10 +2777,12 @@ class Monitor:
             priority_selected = len(set(addresses) & set(priority_addresses))
             discovery_stats = {
                 **universe_stats,
+                'mode': 'dexscreener_latest_direct' if direct_dex_latest else 'rolling_universe',
                 'provider_snapshot_size': len(discovered_snapshot),
                 'selected_last_scan': len(addresses),
                 'priority_last_scan': priority_selected,
-                'rotation_last_scan': max(0, len(addresses) - priority_selected),
+                'rotation_last_scan': 0 if direct_dex_latest else max(0, len(addresses) - priority_selected),
+                'fresh_provider_last_scan': fresh_provider_last_scan,
                 'new_universe_last_scan': newly_added,
                 'new_universe_since_start': self.new_universe_since_start,
                 'tape_pinned_last_scan': len(tape_pins),
@@ -2779,7 +2814,7 @@ class Monitor:
             discovery_stats.update({
                 'scan_sequence': scan_sequence,
                 'phase': 'market_data',
-                'continuous_rotation': True,
+                'continuous_rotation': not direct_dex_latest,
                 'refresh_completed': 0,
                 'refresh_total': len(addresses),
                 'scanned_address_slots_since_start': self.scanned_address_slots_since_start,
