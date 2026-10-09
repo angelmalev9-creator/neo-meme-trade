@@ -3,10 +3,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from discovery_universe import RollingUniverse
+from discovery_universe import RollingUniverse, fresh_priority
 
 
 class RollingUniverseTests(unittest.TestCase):
+    def test_fresh_priority_does_not_reprioritize_the_whole_snapshot(self):
+        previous = ['a', 'b', 'c', 'd']
+        current = ['a', 'b', 'c', 'd', 'new1', 'new2']
+        self.assertEqual(fresh_priority(current, previous, urgent=['d', 'new2']), ['d', 'new2', 'new1'])
+
     def test_priority_then_rotation_covers_the_universe(self):
         with tempfile.TemporaryDirectory() as td:
             now = [1_000_000]

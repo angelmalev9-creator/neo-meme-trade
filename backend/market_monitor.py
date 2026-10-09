@@ -676,6 +676,7 @@ class State:
         self.audit_status = 'ok'
         self.equity_peak_usd = STARTING_BALANCE_USD
         self.entry_diagnostics = {'status': 'starting', 'policy_version': ENTRY_POLICY_VERSION}
+        self.discovery_stats: dict[str, Any] = {}
         self.risk_day_key = time.strftime('%Y-%m-%d', time.gmtime())
         self.risk_day_start_balance_usd = STARTING_BALANCE_USD
         if load_state: self.load()
@@ -922,6 +923,7 @@ class State:
                 'events': self.events[:30],
                 'source_status': self.source_status,
                 'entry_diagnostics': self.entry_diagnostics,
+                'discovery_stats': self.discovery_stats,
                 'learning': learner.summary(learning_table(self.history, now_ms())) if is_learner() else None,
                 'live_tape': [],
                 'live_tape_status': {k: tape.get(k) for k in ('status','tracked_pairs','updated_at','source','error')},
@@ -1536,6 +1538,8 @@ class Monitor:
             writer=runtime.atomic_json,
         )
         self.universe_seeded = self.universe.stats()['size'] > 0
+        self.last_discovery_snapshot: set[str] = set()
+        self.new_universe_since_start = 0
 
     def ensure_universe_seeded(self) -> None:
         if self.universe_seeded:
@@ -2236,13 +2240,35 @@ class Monitor:
                 if 'gecko-new-pools' not in info['sources']:
                     info['sources'].append('gecko-new-pools')
             # Persist every genuinely observed token and rotate the larger universe.
-            # Fresh discovery stays first so newborn pools are never delayed behind
-            # the historical/backfill portion of the scan.
-            self.universe.observe(addresses, metadata)
-            fresh_addresses = list(addresses)
-            addresses, universe_meta = self.universe.next_batch(
-                priority=fresh_addresses, limit=DISCOVERY_SCAN_BATCH
+            # Only addresses that are NEW since the previous discovery snapshot are
+            # priority. Treating the whole provider snapshot as fresh on every scan
+            # can starve the rotation when discovery itself is close to batch size.
+            # Brand-new Gecko pools are always urgent and remain at the front.
+            early_addresses = [
+                str((pair.get('baseToken') or {}).get('address') or '')
+                for pair in early_pairs
+            ]
+            discovered_snapshot = list(dict.fromkeys(addresses))
+            priority_addresses = discovery_universe.fresh_priority(
+                discovered_snapshot, self.last_discovery_snapshot, early_addresses
             )
+            self.last_discovery_snapshot = set(discovered_snapshot)
+            newly_added = self.universe.observe(discovered_snapshot, metadata)
+            self.new_universe_since_start += newly_added
+            addresses, universe_meta = self.universe.next_batch(
+                priority=priority_addresses, limit=DISCOVERY_SCAN_BATCH
+            )
+            universe_stats = self.universe.stats()
+            priority_selected = len(set(addresses) & set(priority_addresses))
+            discovery_stats = {
+                **universe_stats,
+                'provider_snapshot_size': len(discovered_snapshot),
+                'selected_last_scan': len(addresses),
+                'priority_last_scan': priority_selected,
+                'rotation_last_scan': max(0, len(addresses) - priority_selected),
+                'new_universe_last_scan': newly_added,
+                'new_universe_since_start': self.new_universe_since_start,
+            }
             for address, info in universe_meta.items():
                 if address not in metadata:
                     metadata[address] = info
@@ -2321,6 +2347,7 @@ class Monitor:
                 STATE.scan_count += 1
                 STATE.status = 'monitoring'
                 STATE.source_status = {'dexscreener': 'online'}
+                STATE.discovery_stats = discovery_stats
                 self.update_price_history(feed)
                 setups = sum(1 for c in feed if c.get('posture') == 'SETUP')
                 STATE.message = STATE.entry_diagnostics.get('message') or f'Проверени {len(feed)} token-а; отворени позиции: {len(STATE.positions)}.'
