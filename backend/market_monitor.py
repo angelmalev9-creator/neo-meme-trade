@@ -2765,7 +2765,10 @@ class Monitor:
             tape_pins = active_tape_pins(read_live_tape())
             if direct_dex_latest:
                 current_latest = set(addresses)
-                tape_pins = [address for address in tape_pins if address in current_latest]
+                tape_pins = {
+                    address: pair_address for address, pair_address in tape_pins.items()
+                    if address in current_latest
+                }
             if tape_pins:
                 addresses = list(dict.fromkeys([*tape_pins, *addresses]))
                 if not direct_dex_latest:
