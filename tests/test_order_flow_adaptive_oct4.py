@@ -721,9 +721,10 @@ class EffectiveConfig(EngineHarness):
                          'TAKE_PROFIT_NET_TARGET')
 
     def test_engine_settings_validate_ranges_and_persist_shape(self):
-        row = m.normalize_engine_settings({'trade_notional_usd': 123.45, 'stop_loss_pct': 4, 'take_profit_pct': 11})
+        row = m.normalize_engine_settings({'trade_notional_usd': 123.45, 'stop_loss_pct': 4, 'take_profit_pct': 11, 'updated_at': 123456})
         self.assertEqual((row['trade_notional_usd'], row['stop_loss_pct'], row['take_profit_pct']), (123.45, 4.0, 11.0))
         self.assertEqual(row['version'], 'USER_FIXED_TARGETS_V1')
+        self.assertEqual(row['updated_at'], 123456)
         with self.assertRaises(ValueError): m.normalize_engine_settings({'stop_loss_pct': 0})
 
     def test_public_history_hides_sub_200_trades_without_touching_internal_ledger(self):

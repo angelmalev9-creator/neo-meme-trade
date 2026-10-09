@@ -325,9 +325,11 @@ def normalize_engine_settings(raw: Any, current: dict[str, Any] | None = None) -
             if not math.isfinite(value) or value < minimum or value > maximum:
                 raise ValueError(f'{key} must be between {minimum:g} and {maximum:g}')
             base[key] = round(value, 4)
+    updated_at = ((raw or {}).get('updated_at') if isinstance(raw, dict) and 'updated_at' in raw
+                  else (current or {}).get('updated_at'))
     return {
         'version': USER_ENGINE_SETTINGS_VERSION,
-        'updated_at': int((current or {}).get('updated_at') or 0),
+        'updated_at': int(updated_at or 0),
         **{key: float(base[key]) for key in USER_ENGINE_SETTINGS_DEFAULTS},
     }
 
