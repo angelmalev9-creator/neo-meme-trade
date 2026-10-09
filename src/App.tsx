@@ -315,12 +315,38 @@ export default function App() {
   const chartData = useMemo(() => (detail?.history || []).map(p => ({ ...p, label: timeLabel(p.ts) })), [detail]);
   const diagnostics = state?.entry_diagnostics;
   const rejectionRows = useMemo(() => Object.entries(diagnostics?.rejections || {}).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([key, count]) => ({ key, count, label: diagnostics?.reason_labels?.[key] || key })), [diagnostics]);
+  const engineScanSummary = diagnostics
+    ? `Проверени ${diagnostics.evaluated ?? 0} от ${diagnostics.candidates ?? 0} token-а; ${diagnostics.signal_passed ?? 0} минаха GOLD сигнала; ${diagnostics.quoted ?? 0} стигнаха до котировка; ${diagnostics.opened ?? 0} отворени.`
+    : state?.message || '—';
+  const journalEvents = useMemo(() => {
+    const rows: { ts: number; text: string }[] = [];
+    if (diagnostics) rows.push({
+      ts: diagnostics.checked_at || state?.last_scan_at || Date.now(),
+      text: `Scan #${state?.discovery_stats?.scan_sequence ?? state?.scan_count ?? '—'}: ${diagnostics.evaluated ?? 0} проверени · ${diagnostics.signal_passed ?? 0} GOLD сигнал · ${diagnostics.quoted ?? 0} до quote · ${diagnostics.opened ?? 0} отворени`,
+    });
+    if (state?.live_tape_status?.updated_at) rows.push({
+      ts: state.live_tape_status.updated_at,
+      text: `Order flow: ${(state.live_tape_status.status || 'unknown').toUpperCase()} · ${state.live_tape_status.tracked_pairs ?? 0} следени pool-а`,
+    });
+    const seen = new Set<string>();
+    for (const event of state?.events || []) {
+      const key = event.text.startsWith('Market data warning:')
+        ? 'dex-market-warning'
+        : event.text.startsWith('latest discovery warning:')
+          ? 'dex-discovery-warning'
+          : event.text;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push(event);
+      if (rows.length >= 8) break;
+    }
+    return rows.slice(0, 8);
+  }, [diagnostics, state?.discovery_stats?.scan_sequence, state?.events, state?.last_scan_at, state?.live_tape_status, state?.scan_count]);
   const labBooks = useMemo(() => Object.values(state?.strategy_lab?.books || {}).filter(book => book.id !== 'ASTRA_6_BRAIN').sort((a, b) => (state?.strategy_lab?.stats?.[b.id]?.equity ?? b.balance) - (state?.strategy_lab?.stats?.[a.id]?.equity ?? a.balance)), [state]);
   const activeBooks = labBooks.filter(book => (state?.strategy_lab?.stats?.[book.id]?.trades ?? 0) > 0 || book.position);
   const quietBooks = labBooks.filter(book => !activeBooks.includes(book));
   const labLabels = state?.strategy_lab?.activity_config?.rejection_labels || {};
   const exitOverrides = state?.strategy_lab?.activity_config?.exit_overrides || {};
-  const setupCount = state?.feed.filter(c => c.posture === 'SETUP').length || 0;
   const sortedHistory = useMemo(() => [...(state?.history || [])].sort((a, b) => (b.closed_at ?? b.updated_at ?? 0) - (a.closed_at ?? a.updated_at ?? 0)), [state?.history]);
   const historyRows = showAllHistory ? sortedHistory : sortedHistory.slice(0, 15);
 
@@ -400,7 +426,7 @@ export default function App() {
           <Metric label="Днес" value={`${signed(state?.stats.realized_today_usd ?? 0)}$`} hint={`нереализирано ${signed(state?.stats.unrealized_pnl_usd ?? 0)}$`} tone={(state?.stats.realized_today_usd ?? 0) >= 0 ? 'up' : 'down'} />
           <Metric label="Отворени" value={`${state?.stats.open_positions ?? 0} / ${state?.config.max_positions ?? '—'}`} hint={`до $${state?.config.trade_notional_usd ?? '—'} на позиция`} />
           <Metric label="Затворени" value={String(state?.stats.closed_trades ?? 0)} hint={state?.stats.closed_trades ? `win rate ${state.stats.win_rate.toFixed(0)}%` : 'още няма'} />
-          <Metric label="Последен scan" value={state?.last_scan_at ? agoLabel(state.last_scan_at) : '—'} hint={`${(state?.discovery_stats?.scanned_address_slots_since_start ?? 0).toLocaleString()} общо проверки · ${state?.stats.feed_count ?? 0} в текущия batch · ${setupCount} SETUP`} />
+          <Metric label="Последен scan" value={state?.last_scan_at ? agoLabel(state.last_scan_at) : '—'} hint={`${(state?.discovery_stats?.scanned_address_slots_since_start ?? 0).toLocaleString()} общо проверки · ${state?.stats.feed_count ?? 0} валидни в batch · ${diagnostics?.signal_passed ?? 0} GOLD сигнал`} />
           <Metric label="Статус" value={state ? (state.running ? 'РАБОТИ' : 'ПАУЗА') : '—'} hint={`${state?.config.signal_strategy ?? '—'} · стоп −${state?.config.stop_loss_pct ?? '—'}%`} tone={state?.running ? 'up' : 'down'} />
         </section>
 
@@ -408,11 +434,12 @@ export default function App() {
           <Card kicker="Engine" title={engineQuiet ? 'Защо в момента не търгува' : 'Какво проверява преди вход'} right={<ShieldCheck className="h-4 w-4 text-emerald-300" />}>
             <div className="p-4">
               {!diagnostics ? <div className="text-xs text-slate-500">Чакам първия scan…</div> : <>
-                <div className={`rounded-2xl border p-3 text-xs leading-5 ${engineQuiet ? 'border-amber-400/20 bg-amber-400/[0.05] text-amber-100' : 'border-emerald-400/15 bg-emerald-400/[0.04] text-emerald-100'}`}>{diagnostics.message || state?.message || '—'}</div>
-                {state?.discovery_stats && <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-emerald-400/10 bg-emerald-400/[0.03] px-3 py-2 text-[9px] text-slate-500"><span className="flex items-center gap-1.5 font-black text-emerald-300"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-300" />НЕПРЕКЪСНАТ SCAN</span><span>scan <b className="text-white">#{state.discovery_stats.scan_sequence ?? state.scan_count}</b></span><span>жив прогрес <b className="text-emerald-300">{state.discovery_stats.refresh_completed ?? state.discovery_stats.selected_last_scan}/{state.discovery_stats.refresh_total ?? state.discovery_stats.selected_last_scan}</b></span><span>общо проверки <b className="text-white">{(state.discovery_stats.scanned_address_slots_since_start ?? 0).toLocaleString()}</b></span><span>уникални койнове <b className="text-white">{state.discovery_stats.size}</b></span><span>нови <b className="text-emerald-300">+{state.discovery_stats.new_universe_last_scan}</b></span><span>ротация <b className="text-white">{state.discovery_stats.rotation_last_scan}</b></span><span>cursor {state.discovery_stats.cursor}/{state.discovery_stats.size}</span></div>}
+                <div className={`rounded-2xl border p-3 text-xs leading-5 ${engineQuiet ? 'border-amber-400/20 bg-amber-400/[0.05] text-amber-100' : 'border-emerald-400/15 bg-emerald-400/[0.04] text-emerald-100'}`}>{engineScanSummary}</div>
+                {state?.discovery_stats && <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-emerald-400/10 bg-emerald-400/[0.03] px-3 py-2 text-[9px] text-slate-500"><span className="flex items-center gap-1.5 font-black text-emerald-300"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-300" />НЕПРЕКЪСНАТ SCAN</span><span>scan <b className="text-white">#{state.discovery_stats.scan_sequence ?? state.scan_count}</b></span><span>жив прогрес <b className="text-emerald-300">{state.discovery_stats.refresh_completed ?? state.discovery_stats.selected_last_scan}/{state.discovery_stats.refresh_total ?? state.discovery_stats.selected_last_scan}</b></span><span>общо проверки <b className="text-white">{(state.discovery_stats.scanned_address_slots_since_start ?? 0).toLocaleString()}</b></span><span>уникални койнове <b className="text-white">{state.discovery_stats.size}</b></span><span>нови <b className="text-emerald-300">+{state.discovery_stats.new_universe_last_scan}</b></span><span>избрани за scan <b className="text-white">{state.discovery_stats.selected_last_scan}</b></span><span>cursor {state.discovery_stats.cursor}/{state.discovery_stats.size}</span></div>}
                 <div className="mt-3 grid grid-cols-5 gap-2 text-center">
-                  {([['Валиден feed', diagnostics.candidates], ['Проверени за вход', diagnostics.evaluated], ['Минали филтъра', diagnostics.signal_passed], ['Котирани', diagnostics.quoted], ['Отворени', diagnostics.opened]] as [string, number | undefined][]).map(([label, value]) => <div key={label} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-2"><div className="text-base font-black text-white">{value ?? 0}</div><div className="mt-0.5 text-[8px] font-black uppercase tracking-wider text-slate-600">{label}</div></div>)}
+                  {([['Валиден feed', diagnostics.candidates], ['Проверени за вход', diagnostics.evaluated], ['GOLD сигнал', diagnostics.signal_passed], ['До котировка', diagnostics.quoted], ['Отворени', diagnostics.opened]] as [string, number | undefined][]).map(([label, value]) => <div key={label} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-2"><div className="text-base font-black text-white">{value ?? 0}</div><div className="mt-0.5 text-[8px] font-black uppercase tracking-wider text-slate-600">{label}</div></div>)}
                 </div>
+                <div className="mt-2 text-[9px] leading-4 text-slate-600">GOLD сигнал = стратегията харесва входа. След него задължително минават отделните price / rug / risk проверки; едва тогава се прави котировка.</div>
                 <div className="mt-4 text-[9px] font-black uppercase tracking-[0.16em] text-slate-600">Откази на последния scan · {agoLabel(diagnostics.checked_at)}</div>
                 <div className="mt-2"><RejectionBars rows={rejectionRows} total={diagnostics.candidates ?? 0} /></div>
                 {!!diagnostics.examples?.length && <details className="mt-3 text-[10px] text-slate-500"><summary className="cursor-pointer font-black text-slate-400">Примери ({diagnostics.examples.length})</summary>
@@ -427,7 +454,7 @@ export default function App() {
               <div className="space-y-2 p-4">{(state?.positions || []).length === 0 && <div className="rounded-xl border border-dashed border-white/[0.08] p-4 text-center text-[10px] leading-5 text-slate-600">Няма отворена позиция. Причината е вляво.</div>}{state?.positions.map(position => <button key={position.id} onClick={() => openCoin(position.address)} className="w-full rounded-2xl border border-white/[0.07] bg-white/[0.02] p-3 text-left hover:border-emerald-400/20"><div className="flex items-center justify-between gap-2"><div><div className="text-xs font-black text-white">${position.symbol}</div><div className="mt-0.5 text-[9px] text-slate-600">#{position.trade_no ?? '—'} · вход {fmtPrice(position.execution_entry_price ?? position.entry_price)} · ${position.notional_usd.toFixed(0)}</div></div><div className={`text-sm font-black ${position.pnl_pct >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{signed(position.pnl_pct)}%</div></div><div className="mt-2 flex items-center justify-between text-[9px] text-slate-600"><span>{signed(position.pnl_usd)}$ · score {position.current_score?.toFixed(0) ?? position.score.toFixed(0)}</span><span>{holdLabel((Date.now() - position.opened_at) / 1000)}</span></div></button>)}</div>
             </Card>
             <Card kicker="Дневник" title="Какво прави NEO" right={<Bot className="h-4 w-4 text-emerald-300" />}>
-              <div className="space-y-3 p-4">{(state?.events || []).slice(0, 8).map(event => <div key={`${event.ts}-${event.text}`} className="flex gap-2.5"><div className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-300" /><div><div className="text-[10px] leading-4 text-slate-400">{event.text}</div><div className="mt-0.5 text-[8px] text-slate-700">{tapeTimeLabel(event.ts)}</div></div></div>)}</div>
+              <div className="space-y-3 p-4">{journalEvents.map(event => <div key={`${event.ts}-${event.text}`} className="flex gap-2.5"><div className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-300" /><div><div className="text-[10px] leading-4 text-slate-400">{event.text}</div><div className="mt-0.5 text-[8px] text-slate-700">{tapeTimeLabel(event.ts)}</div></div></div>)}</div>
             </Card>
           </div>
         </section>
