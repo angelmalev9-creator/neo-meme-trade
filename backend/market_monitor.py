@@ -69,7 +69,7 @@ STALE_EXIT_MINUTES = 7
 STALE_MIN_PROFIT_PCT = 3.0
 LEARNING_WINDOW = 60
 HEALTH_WINDOW = 12
-STARTING_BALANCE_USD = 1000.0
+STARTING_BALANCE_USD = float(os.getenv('NEO_STARTING_BALANCE_USD', '1000'))
 TRADE_NOTIONAL_USD = float(os.getenv('NEO_TRADE_NOTIONAL_USD', '200'))
 MAX_DAILY_LOSS_USD = float(os.getenv('NEO_MAX_DAILY_LOSS_USD', '0'))
 MAX_POSITION_RISK_USD = float(os.getenv('NEO_MAX_POSITION_RISK_USD', '250'))
@@ -276,6 +276,93 @@ def learning_table(history, now: int) -> dict[str, Any]:
 
 
 apply_strategy_profile()
+
+# User-specific PAPER overlay for the fixed-target main engine. It looks for
+# very early, strongly one-sided buy pressure in the DEX 5m tape while keeping
+# the existing rug, price-integrity and executable quote/cost vetoes intact.
+def _env_enabled(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+BUY_PRESSURE_FIXED = STRATEGY_PROFILE == OCT4_FIXED_PROFILE and _env_enabled('NEO_BUY_PRESSURE_FIXED')
+BUY_PRESSURE_FLOW_SECONDS = max(10, min(60, int(float(os.getenv('NEO_BUY_PRESSURE_FLOW_SECONDS', '30')))))
+BUY_PRESSURE_MIN_SCORE = float(os.getenv('NEO_BUY_PRESSURE_MIN_SCORE', '60'))
+BUY_PRESSURE_MIN_LIQUIDITY_USD = float(os.getenv('NEO_BUY_PRESSURE_MIN_LIQUIDITY_USD', '15000'))
+BUY_PRESSURE_MIN_CONVICTION = float(os.getenv('NEO_BUY_PRESSURE_MIN_CONVICTION', '50'))
+BUY_PRESSURE_MIN_M5_VOLUME_USD = float(os.getenv('NEO_BUY_PRESSURE_MIN_M5_VOLUME_USD', '2500'))
+BUY_PRESSURE_MIN_M5_BUYS = float(os.getenv('NEO_BUY_PRESSURE_MIN_M5_BUYS', '8'))
+BUY_PRESSURE_MIN_MARKET_RATIO = float(os.getenv('NEO_BUY_PRESSURE_MIN_MARKET_RATIO', '2.0'))
+BUY_PRESSURE_EXTREME_MARKET_RATIO = float(os.getenv('NEO_BUY_PRESSURE_EXTREME_MARKET_RATIO', '4.0'))
+BUY_PRESSURE_MIN_FLOW_RATIO = float(os.getenv('NEO_BUY_PRESSURE_MIN_FLOW_RATIO', '1.20'))
+BUY_PRESSURE_MIN_FLOW_TRADES = float(os.getenv('NEO_BUY_PRESSURE_MIN_FLOW_TRADES', '2'))
+BUY_PRESSURE_MIN_M5_PCT = float(os.getenv('NEO_BUY_PRESSURE_MIN_M5_PCT', '-3'))
+BUY_PRESSURE_MAX_M5_PCT = float(os.getenv('NEO_BUY_PRESSURE_MAX_M5_PCT', '18'))
+BUY_PRESSURE_MAX_AGE_MINUTES = float(os.getenv('NEO_BUY_PRESSURE_MAX_AGE_MINUTES', '180'))
+BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES = float(os.getenv('NEO_BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES', '60'))
+
+
+def buy_pressure_rejections(coin: dict[str, Any], flow: dict[str, Any], context: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    score = num(coin.get('score'))
+    liquidity = num(coin.get('liquidityUsd'))
+    age = num(coin.get('ageMinutes'), 999999)
+    observed_at = num(coin.get('updatedAt'))
+    now = now_ms()
+    m5 = num((coin.get('priceChange') or {}).get('m5'), -999)
+    volume_m5 = num((coin.get('volume') or {}).get('m5'))
+    tx5 = (coin.get('txns') or {}).get('m5') or {}
+    buys = num(tx5.get('buys'))
+    sells = num(tx5.get('sells'))
+    market_ratio = buys / max(sells, 1.0)
+    conviction = num(context.get('conviction'), -1)
+    flow_trades = num(flow.get('trades'))
+    flow_ratio = num(flow.get('buy_sell_usd_ratio'))
+    max_sell = num(flow.get('max_sell_usd'))
+    buy_usd = num(flow.get('buy_usd'))
+
+    if not is_valid_solana_address(coin.get('address')) or not is_valid_solana_address(coin.get('pairAddress')):
+        reasons.append('invalid_pair')
+    if num(coin.get('priceUsd')) <= 0: reasons.append('invalid_price')
+    if observed_at <= 0 or not 0 <= now - observed_at <= entry_policy.MAX_FEED_AGE_MS: reasons.append('stale_feed')
+    if score < BUY_PRESSURE_MIN_SCORE: reasons.append('score')
+    if liquidity < BUY_PRESSURE_MIN_LIQUIDITY_USD: reasons.append('liquidity')
+    if age > BUY_PRESSURE_MAX_AGE_MINUTES: reasons.append('early_age')
+    if not BUY_PRESSURE_MIN_M5_PCT <= m5 <= BUY_PRESSURE_MAX_M5_PCT: reasons.append('momentum')
+    if volume_m5 < BUY_PRESSURE_MIN_M5_VOLUME_USD: reasons.append('short_volume')
+    if buys < BUY_PRESSURE_MIN_M5_BUYS: reasons.append('market_activity')
+    if market_ratio < BUY_PRESSURE_MIN_MARKET_RATIO: reasons.append('market_buyers')
+
+    # Verified order flow is preferred and must agree with the market tape. For
+    # a brand-new pool whose wallet tape is still warming, allow only a much
+    # stronger DEX imbalance, enough real 5m volume and a very young pool.
+    if flow_trades >= BUY_PRESSURE_MIN_FLOW_TRADES:
+        if conviction < BUY_PRESSURE_MIN_CONVICTION: reasons.append('conviction')
+        if flow_ratio < BUY_PRESSURE_MIN_FLOW_RATIO: reasons.append('flow_ratio')
+        if max_sell >= max(750.0, buy_usd * 0.9): reasons.append('large_sells')
+    elif not (age <= BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES
+              and market_ratio >= BUY_PRESSURE_EXTREME_MARKET_RATIO
+              and buys >= BUY_PRESSURE_MIN_M5_BUYS
+              and volume_m5 >= max(BUY_PRESSURE_MIN_M5_VOLUME_USD * 2, 5000)):
+        reasons.append('flow_count')
+    return list(dict.fromkeys(reasons))
+
+
+if BUY_PRESSURE_FIXED:
+    SCAN_SECONDS = min(float(SCAN_SECONDS), 5.0)
+    MAX_QUOTED_CANDIDATES = max(int(MAX_QUOTED_CANDIDATES), 4)
+    STRICT_ENTRY_SCORE = BUY_PRESSURE_MIN_SCORE
+    STRICT_MIN_LIQUIDITY_USD = BUY_PRESSURE_MIN_LIQUIDITY_USD
+    STRICT_MIN_CONVICTION = BUY_PRESSURE_MIN_CONVICTION
+    EFFECTIVE_ENTRY_THRESHOLDS = order_flow.EntryThresholds(
+        STRICT_ENTRY_SCORE, STRICT_MIN_LIQUIDITY_USD, STRICT_MIN_CONVICTION
+    )
+    SIGNAL_STRATEGY = 'EARLY_BUY_PRESSURE_FIXED'
+    ENTRY_POLICY_VERSION = 'EARLY_BUY_PRESSURE_V1'
+    STRATEGY_VERSION = f'{STRATEGY_VERSION}+buy-pressure-v1'
+    CONFIG_SOURCE = f'{CONFIG_SOURCE} + early buy-pressure PAPER overlay'
 
 # Legacy deterministic PAPER friction model; quote-backed positions use the
 # versioned engine_execution adapter. PumpSwap canonical fee tiers mirror pump.fun fees
@@ -1210,10 +1297,14 @@ class State:
                     'config_source': CONFIG_SOURCE,
                     'ignored_env_overrides': list(IGNORED_ENV_OVERRIDES),
                     'same_token_cooldown_seconds': LOSS_REENTRY_SECONDS if is_adaptive() and not is_learner() else None,
-                    'entry_flow_window_seconds': policy_module().CONFIG['entry_flow_window_seconds'] if is_adaptive() else None,
+                    'entry_flow_window_seconds': (BUY_PRESSURE_FLOW_SECONDS if BUY_PRESSURE_FIXED else
+                                                  policy_module().CONFIG['entry_flow_window_seconds']) if is_adaptive() else None,
                     'entry_on_position_guard': ENTRY_ON_POSITION_GUARD,
                     'unsellable_blocks_entries': UNSELLABLE_BLOCKS_ENTRIES,
-                    'adaptive_strategy': policy_module().describe() if is_adaptive() else None,
+                    'adaptive_strategy': ({
+                        **policy_module().describe(),
+                        'buy_pressure_overlay': effective_entry_thresholds(),
+                    } if BUY_PRESSURE_FIXED else policy_module().describe()) if is_adaptive() else None,
                     'risk_overlay': 'PLANNED_NET_STOP_NO_FILL_GUARANTEE',
                     'execution_verification_version': 'QUOTE_EVIDENCE_V9',
                     'rug_guard': rug_guard.VERSION,
@@ -1246,6 +1337,9 @@ class State:
                         'with ORDER_FLOW_ADAPTIVE conviction exits. Observed quotes with modeled fills, full fees and uncapped gap losses; '
                         'learned results are small paper samples, not a forecast.'
                         if is_learner() else
+                        'PAPER only; early buy-pressure entries prioritize strongly one-sided 5m buyer/seller activity, '
+                        'then require the existing rug, price and executable quote/cost checks. Fixed user SL/TP remain authoritative.'
+                        if BUY_PRESSURE_FIXED else
                         'PAPER only; 2026-10-04 ORDER_FLOW_ADAPTIVE decisions with adaptive conviction holds. '
                         'Observed quotes with modeled fills, full fees and uncapped gap losses; a planned stop is not a guaranteed fill.'
                         if is_adaptive() else
@@ -1344,12 +1438,31 @@ def effective_config_hash():
         # The whole owned policy is part of the identity of an ORDER_FLOW_ADAPTIVE run.
         for key in ('micro_flow_seconds', 'ultra_flow_seconds'): config.pop(key)
         config['adaptive_strategy'] = policy_module().describe()
+        if BUY_PRESSURE_FIXED:
+            config['buy_pressure_overlay'] = effective_entry_thresholds()
     return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
 
 
 def effective_entry_thresholds() -> dict[str, Any]:
     if is_learner():
         return {tier: dict(limits) for tier, limits in learner.TIER_LIMITS.items()}
+    if BUY_PRESSURE_FIXED:
+        return {
+            'min_score': BUY_PRESSURE_MIN_SCORE,
+            'min_liquidity_usd': BUY_PRESSURE_MIN_LIQUIDITY_USD,
+            'min_conviction': BUY_PRESSURE_MIN_CONVICTION,
+            'flow_window_seconds': BUY_PRESSURE_FLOW_SECONDS,
+            'min_m5_volume_usd': BUY_PRESSURE_MIN_M5_VOLUME_USD,
+            'min_m5_buys': BUY_PRESSURE_MIN_M5_BUYS,
+            'min_market_buy_sell_ratio': BUY_PRESSURE_MIN_MARKET_RATIO,
+            'extreme_market_buy_sell_ratio': BUY_PRESSURE_EXTREME_MARKET_RATIO,
+            'min_verified_flow_trades': BUY_PRESSURE_MIN_FLOW_TRADES,
+            'min_verified_flow_ratio': BUY_PRESSURE_MIN_FLOW_RATIO,
+            'min_m5_pct': BUY_PRESSURE_MIN_M5_PCT,
+            'max_m5_pct': BUY_PRESSURE_MAX_M5_PCT,
+            'max_age_minutes': BUY_PRESSURE_MAX_AGE_MINUTES,
+            'extreme_unverified_max_age_minutes': BUY_PRESSURE_EXTREME_MAX_AGE_MINUTES,
+        }
     return dict(oct4.ENTRY_LIMITS) if is_adaptive() else EFFECTIVE_ENTRY_THRESHOLDS.as_dict()
 
 
@@ -2224,9 +2337,14 @@ class Monitor:
                     tier_seen.setdefault('tier', tier)
                     return []
             elif is_adaptive():
-                flow_seconds = int(oct4.CONFIG['entry_flow_window_seconds'])
-                def signal_check(c, f, ctx):
-                    return oct4.signal_rejections(c, f, ctx, now=now_ms())
+                if BUY_PRESSURE_FIXED:
+                    flow_seconds = BUY_PRESSURE_FLOW_SECONDS
+                    def signal_check(c, f, ctx):
+                        return buy_pressure_rejections(c, f, ctx)
+                else:
+                    flow_seconds = int(oct4.CONFIG['entry_flow_window_seconds'])
+                    def signal_check(c, f, ctx):
+                        return oct4.signal_rejections(c, f, ctx, now=now_ms())
             else:
                 flow_seconds = 10 if age <= 15 else 20 if age <= 45 else 30
                 def signal_check(c, f, ctx):
@@ -2241,12 +2359,18 @@ class Monitor:
                 reject(report, rejected, coin, {
                     'score': score, 'liquidity_usd': liquidity, 'conviction': context.get('conviction'),
                     'flow_trades': flow.get('trades'), 'flow_ratio': flow.get('buy_sell_usd_ratio'),
+                    'market_buys_m5': buys_m5, 'market_sells_m5': sells_m5,
+                    'market_buy_sell_ratio_m5': round(buy_sell_ratio, 3),
+                    'volume_m5_usd': num((coin.get('volume') or {}).get('m5')),
+                    'age_minutes': age, 'move_m5_pct': change_m5,
                 } if is_adaptive() else None)
                 continue
             report['signal_passed'] += 1
             post_signal_addresses.add(str(address))
-            entry_mode = (tier_seen.get('tier') if is_learner() else oct4.ENTRY_MODE if is_adaptive()
-                          else order_flow.entry_mode(coin, flow, context, EFFECTIVE_ENTRY_THRESHOLDS))
+            entry_mode = (tier_seen.get('tier') if is_learner() else
+                          'BUY_PRESSURE_EARLY' if BUY_PRESSURE_FIXED else
+                          oct4.ENTRY_MODE if is_adaptive() else
+                          order_flow.entry_mode(coin, flow, context, EFFECTIVE_ENTRY_THRESHOLDS))
             if not entry_mode:
                 reject(report, ['gold_signal'], coin)
                 continue
