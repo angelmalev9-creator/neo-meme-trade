@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import copy, hashlib, json, math, os, re, shutil, threading, time, uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from datetime import datetime
@@ -1319,7 +1319,7 @@ def discover() -> tuple[list[str], dict[str, dict[str, Any]]]:
     return order, metadata
 
 
-def fetch_pairs(addresses: list[str]) -> list[dict[str, Any]]:
+def fetch_pairs(addresses: list[str], progress=None) -> list[dict[str, Any]]:
     """Refresh a rotating token batch without serially blocking the scan loop.
 
     DexScreener supports up to 30 token addresses per call. Four workers keep a
@@ -1352,12 +1352,22 @@ def fetch_pairs(addresses: list[str]) -> list[dict[str, Any]]:
 
     pairs: list[dict[str, Any]] = []
     failures = 0
+    completed_addresses = 0
+    total_addresses = len(clean)
     with ThreadPoolExecutor(max_workers=min(MARKET_BATCH_WORKERS, len(batches))) as pool:
-        for rows in pool.map(one, batches):
+        futures = {pool.submit(one, batch): len(batch) for batch in batches}
+        for future in as_completed(futures):
+            rows = future.result()
             if rows:
                 pairs.extend(rows)
             else:
                 failures += 1
+            completed_addresses += futures[future]
+            if progress is not None:
+                try:
+                    progress(completed_addresses, total_addresses)
+                except Exception:
+                    pass
     if failures:
         STATE.event(f'Market data warning: {failures}/{len(batches)} DexScreener batches unavailable')
     return pairs
@@ -1540,6 +1550,7 @@ class Monitor:
         self.universe_seeded = self.universe.stats()['size'] > 0
         self.last_discovery_snapshot: set[str] = set()
         self.new_universe_since_start = 0
+        self.scanned_address_slots_since_start = 0
 
     def ensure_universe_seeded(self) -> None:
         if self.universe_seeded:
@@ -1707,7 +1718,7 @@ class Monitor:
             quote = (paper_quotes.position_mark(position,coin,network,force=bool(reason)) if is_quote
                      else exit_execution(coin,num(position.get('quantity'))) if fresh_market else None)
             mark_valid = quote is not None and math.isfinite(num(quote.get('net_proceeds_usd'),math.nan)) and (not is_quote or 0 <= now_ms()-num(quote.get('quoted_at')) <= entry_policy.MAX_ENTRY_QUOTE_AGE_MS)
-            if training_bridge.enabled():
+            if training_bridge.accepting():
                 training_bridge.observe(coin,STATE.live_flow(address,pair_address=pair),
                     safety=rug_guard.check(coin),validation=price_integrity.check(coin),
                     context=self.market_context(coin,position),
@@ -2291,7 +2302,40 @@ class Monitor:
                     STATE.status = 'discovering'
                     STATE.message = 'Проверява пазарните източници.'
                 return
-            dex_pairs = fetch_pairs(addresses)
+            scan_sequence = STATE.scan_count + 1
+            progress_done = 0
+            discovery_stats.update({
+                'scan_sequence': scan_sequence,
+                'refresh_completed': 0,
+                'refresh_total': len(addresses),
+                'scanned_address_slots_since_start': self.scanned_address_slots_since_start,
+            })
+            with STATE.lock:
+                STATE.discovery_stats = dict(discovery_stats)
+
+            def market_refresh_progress(done: int, total: int) -> None:
+                nonlocal progress_done
+                delta = max(0, int(done) - progress_done)
+                progress_done = int(done)
+                self.scanned_address_slots_since_start += delta
+                with STATE.lock:
+                    live_stats = dict(STATE.discovery_stats or discovery_stats)
+                    if int(live_stats.get('scan_sequence') or 0) != scan_sequence:
+                        return
+                    live_stats.update({
+                        'refresh_completed': int(done),
+                        'refresh_total': int(total),
+                        'scanned_address_slots_since_start': self.scanned_address_slots_since_start,
+                    })
+                    STATE.discovery_stats = live_stats
+
+            dex_pairs = fetch_pairs(addresses, progress=market_refresh_progress)
+            discovery_stats.update({
+                'scan_sequence': scan_sequence,
+                'refresh_completed': progress_done,
+                'refresh_total': len(addresses),
+                'scanned_address_slots_since_start': self.scanned_address_slots_since_start,
+            })
             pairs = list(early_pairs) + dex_pairs
             chosen = best_pairs(pairs)
 
@@ -2353,7 +2397,7 @@ class Monitor:
                 STATE.message = STATE.entry_diagnostics.get('message') or f'Проверени {len(feed)} token-а; отворени позиции: {len(STATE.positions)}.'
                 STATE.save()
             # Prewarm provider checks before the short EARLY flow window fires.
-            if training_bridge.enabled():
+            if training_bridge.accepting():
                 for coin in feed:
                     training_bridge.observe(coin,STATE.live_flow(coin['address'],pair_address=coin.get('pairAddress')),
                         context=self.market_context(coin,{}),now=now_ms())
@@ -2374,8 +2418,13 @@ class Monitor:
             STATE.status = 'starting'
             STATE.event('NEO public market monitor started.')
         while not self.stop_event.is_set():
+            started = time.monotonic()
             self.scan_once()
-            self.stop_event.wait(SCAN_SECONDS)
+            # SCAN_SECONDS is a target cadence, not an extra sleep added after
+            # network work. If a scan itself takes longer, start the next one
+            # immediately instead of compounding the delay.
+            remaining = max(0.0, SCAN_SECONDS - (time.monotonic() - started))
+            self.stop_event.wait(remaining)
 
     def stop(self) -> None:
         self.stop_event.set()
