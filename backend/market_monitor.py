@@ -2812,6 +2812,17 @@ class ApiHandler(BaseHTTPRequestHandler):
         if parsed.path == '/state':
             self.send_json(STATE.snapshot())
             return
+        if parsed.path == '/feed':
+            # Lightweight market-only payload for Strategy Lab. The full /state
+            # snapshot also contains history/lab/training data and is much heavier.
+            with STATE.lock:
+                payload = {
+                    'feed': [dict(coin) for coin in STATE.feed],
+                    'last_scan_at': STATE.last_scan_at,
+                    'scan_count': STATE.scan_count,
+                }
+            self.send_json(payload)
+            return
         if parsed.path == '/settings':
             self.send_json({'settings': STATE.engine_settings, 'enabled': STRATEGY_PROFILE == OCT4_FIXED_PROFILE,
                             'limits': USER_ENGINE_SETTINGS_LIMITS})
