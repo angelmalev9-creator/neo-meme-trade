@@ -289,6 +289,7 @@ def _env_enabled(name: str, default: bool = False) -> bool:
 
 BUY_PRESSURE_FIXED = STRATEGY_PROFILE == OCT4_FIXED_PROFILE and _env_enabled('NEO_BUY_PRESSURE_FIXED')
 BUY_PRESSURE_FLOW_SECONDS = max(10, min(60, int(float(os.getenv('NEO_BUY_PRESSURE_FLOW_SECONDS', '30')))))
+BUY_PRESSURE_SCAN_SECONDS = max(4.0, float(os.getenv('NEO_BUY_PRESSURE_SCAN_SECONDS', '6')))
 BUY_PRESSURE_MIN_SCORE = float(os.getenv('NEO_BUY_PRESSURE_MIN_SCORE', '60'))
 BUY_PRESSURE_MIN_LIQUIDITY_USD = float(os.getenv('NEO_BUY_PRESSURE_MIN_LIQUIDITY_USD', '15000'))
 BUY_PRESSURE_PUMPFUN_MIN_LIQUIDITY_USD = float(os.getenv('NEO_BUY_PRESSURE_PUMPFUN_MIN_LIQUIDITY_USD', '3000'))
@@ -364,7 +365,8 @@ def buy_pressure_rejections(coin: dict[str, Any], flow: dict[str, Any], context:
 
 
 if BUY_PRESSURE_FIXED:
-    SCAN_SECONDS = min(float(SCAN_SECONDS), 5.0)
+    # Keep scanning continuously without overrunning shared public API quotas.
+    SCAN_SECONDS = min(float(SCAN_SECONDS), BUY_PRESSURE_SCAN_SECONDS)
     MAX_QUOTED_CANDIDATES = max(int(MAX_QUOTED_CANDIDATES), 4)
     STRICT_ENTRY_SCORE = BUY_PRESSURE_MIN_SCORE
     STRICT_MIN_LIQUIDITY_USD = BUY_PRESSURE_MIN_LIQUIDITY_USD
@@ -1461,6 +1463,7 @@ def effective_entry_thresholds() -> dict[str, Any]:
         return {tier: dict(limits) for tier, limits in learner.TIER_LIMITS.items()}
     if BUY_PRESSURE_FIXED:
         return {
+            'scan_seconds': BUY_PRESSURE_SCAN_SECONDS,
             'min_score': BUY_PRESSURE_MIN_SCORE,
             'min_liquidity_usd': BUY_PRESSURE_MIN_LIQUIDITY_USD,
             'pumpfun_min_score': BUY_PRESSURE_PUMPFUN_MIN_SCORE,
