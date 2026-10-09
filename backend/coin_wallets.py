@@ -17,6 +17,7 @@ stays far under the public rate limits.
 """
 import base64
 import math
+import re
 import threading
 import time
 from typing import Any, Callable
@@ -127,6 +128,158 @@ def gecko_trades(pair: str, mint: str, fetch: Callable[[str], dict[str, Any]], *
 _DASHBOARD_VALUATION_FLAGS = {'QUOTE_ASSET_USD_REFERENCE_ESTIMATE', 'QUOTE_USD_UNKNOWN'}
 
 
+def _quote_mint_pumpswap_events(tx: dict[str, Any], metadata: dict[str, Any], tape: Any, *,
+                                observed_at: int, ingested_at: int) -> list[dict[str, Any]]:
+    """Decode PumpSwap when the selected token is the pool's quote mint.
+
+    The engine tape intentionally keeps its stricter historical assumption that
+    the tracked meme token is the pool base mint.  The dashboard can open any
+    DexScreener pool, including valid PumpSwap pools whose SOL/USDC leg is base
+    and the selected token is quote.  For this fallback we still require the
+    official Pump AMM instruction discriminator *and* matching emitted
+    BuyEvent/SellEvent; no balance-delta guessing is used.
+    """
+    if not isinstance(tx, dict) or not isinstance(tx.get('meta'), dict) or tx['meta'].get('err') is not None:
+        return []
+    if observed_at <= 0 or ingested_at <= 0 or observed_at > ingested_at:
+        return []
+    try:
+        keys, instructions = tape._instruction_records(tx)
+    except Exception:
+        return []
+    message = ((tx.get('transaction') or {}).get('message') or {})
+    signers = {tape.key_of(key) for key in message.get('accountKeys') or [] if isinstance(key, dict) and key.get('signer')}
+    if not signers and type((message.get('header') or {}).get('numRequiredSignatures')) is int:
+        signers = set(keys[:message['header']['numRequiredSignatures']])
+
+    swaps = []
+    for index, program, accounts, data in instructions:
+        if program != tape.PUMP_AMM or metadata.get('pair') not in accounts or data[:8] not in tape.SWAP_DISCRIMINATORS:
+            continue
+        if len(accounts) < 7:
+            continue
+        # Inverted orientation: counter asset is pool base, selected meme token
+        # is pool quote.  This is the layout seen on valid PumpSwap pools such
+        # as Hook; direction must therefore be flipped for the selected token.
+        if (accounts[0] == metadata.get('pair') and accounts[4] == metadata.get('address')
+                and accounts[3] in (tape.USDC, tape.WSOL)):
+            swaps.append((index, tape.SWAP_DISCRIMINATORS[data[:8]], accounts))
+    if not swaps:
+        return []
+
+    decimals: dict[str, tuple[str, int]] = {}
+    meta = tx['meta']
+    for balance in (meta.get('preTokenBalances') or []) + (meta.get('postTokenBalances') or []):
+        try:
+            account = keys[int(balance['accountIndex'])]
+            entry = (balance['mint'], int(balance['uiTokenAmount']['decimals']))
+            if account in decimals and decimals[account] != entry:
+                return []
+            decimals[account] = entry
+        except (IndexError, KeyError, ValueError, TypeError):
+            return []
+
+    # Prefer Anchor emit_cpi when supplied, exactly like the verified tape, so
+    # dual log/CPI representations do not double-count one swap.
+    cpi = [(index, data[8:]) for index, program, _, data in instructions
+           if program == tape.PUMP_AMM and data[:8] == tape.ANCHOR_EVENT_CPI
+           and data[8:16] in tape.EVENT_DISCRIMINATORS]
+    event_payloads: list[tuple[int, bytes]] = []
+    if cpi:
+        event_payloads = [(1_000_000 + index, payload) for index, payload in cpi]
+    else:
+        stack: list[str] = []
+        for log_index, line in enumerate(meta.get('logMessages') or []):
+            invoke = re.match(r'^Program (\w+) invoke \[(\d+)\]$', line)
+            if invoke:
+                stack = stack[:int(invoke.group(2)) - 1] + [invoke.group(1)]
+                continue
+            if re.match(r'^Program \w+ (success|failed)', line):
+                if stack:
+                    stack.pop()
+                continue
+            if not line.startswith('Program data: ') or not stack or stack[-1] != tape.PUMP_AMM:
+                continue
+            try:
+                payload = base64.b64decode(line[14:], validate=True)
+            except (ValueError, TypeError):
+                continue
+            if payload[:8] in tape.EVENT_DISCRIMINATORS:
+                event_payloads.append((log_index, payload))
+
+    decoded: list[dict[str, Any]] = []
+    for event_index, payload in event_payloads:
+        raw_direction = tape.EVENT_DISCRIMINATORS.get(payload[:8])
+        if not raw_direction or len(payload) < 248:
+            continue
+        pool, wallet, pool_base_account, pool_quote_account = [tape._b58encode(payload[a:a + 32])
+                                                                for a in (120, 152, 184, 216)]
+        matches = [item for item in swaps if item[1] == raw_direction and item[2][0] == pool
+                   and item[2][1] == wallet and item[2][5] == pool_base_account
+                   and item[2][6] == pool_quote_account]
+        if not matches or pool != metadata.get('pair'):
+            continue
+        accounts = matches[0][2]
+        counter_mint, selected_mint = accounts[3], accounts[4]
+        counter_info, token_info = decimals.get(pool_base_account), decimals.get(pool_quote_account)
+        if not token_info or token_info[0] != selected_mint or selected_mint != metadata.get('address'):
+            continue
+        if counter_mint not in (tape.USDC, tape.WSOL):
+            continue
+        counter_decimals = 6 if counter_mint == tape.USDC else 9
+        if counter_info and counter_info != (counter_mint, counter_decimals):
+            continue
+        try:
+            event_time = int.from_bytes(payload[8:16], 'little', signed=True) * 1000
+            block_time = int(tx.get('blockTime') or 0) * 1000
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not block_time or not 0 < event_time <= ingested_at or abs(event_time - block_time) > 2000:
+            continue
+        pool_base_raw = int.from_bytes(payload[16:24], 'little')
+        pool_quote_raw = int.from_bytes(payload[112:120], 'little')
+        if pool_base_raw <= 0 or pool_quote_raw <= 0 or not 0 <= token_info[1] <= 18:
+            continue
+
+        token_amount = pool_quote_raw / 10 ** token_info[1]
+        counter_amount = pool_base_raw / 10 ** counter_decimals
+        flags: list[str] = []
+        if wallet not in signers:
+            flags.append('SWAP_ACTOR_NOT_TRANSACTION_SIGNER')
+        usd, valuation = None, 'UNKNOWN'
+        if counter_mint == tape.USDC:
+            usd, valuation = counter_amount, 'ACTUAL_USDC_QUOTE_LEG'
+        else:
+            reference = metadata.get('quote_usd_reference')
+            reference_time = int(metadata.get('quote_reference_at') or 0)
+            try:
+                valid_reference = reference is not None and math.isfinite(float(reference)) and float(reference) > 0
+            except (TypeError, ValueError, OverflowError):
+                valid_reference = False
+            if valid_reference and 0 <= ingested_at - reference_time <= 60_000 and abs(event_time - reference_time) <= 60_000:
+                usd = counter_amount * float(reference)
+                valuation = metadata.get('quote_reference_source') or 'QUOTE_ASSET_REFERENCE_ESTIMATE'
+                if valuation != 'JUPITER_CONVERSION_QUOTE_REFERENCE':
+                    flags.append('QUOTE_ASSET_USD_REFERENCE_ESTIMATE')
+            else:
+                flags.append('QUOTE_USD_UNKNOWN')
+
+        direction = 'BUY' if raw_direction == 'SELL' else 'SELL'
+        decoded.append({
+            'ts': event_time, 'event_time': event_time, 'observed_at': observed_at, 'ingested_at': ingested_at,
+            'available_at': ingested_at, 'event_index': event_index, 'direction': direction, 'wallet': wallet,
+            'address': selected_mint, 'pairAddress': pool, 'symbol': metadata.get('symbol', '?'),
+            'token_raw_amount': str(pool_quote_raw), 'token_decimals': token_info[1], 'token_amount': token_amount,
+            'quote_asset': counter_mint, 'quote_raw_amount': str(pool_base_raw), 'quote_decimals': counter_decimals,
+            'quote_amount': counter_amount, 'usd_amount': round(usd, 8) if usd is not None else None,
+            'usd_valuation_source': valuation, 'quality_flags': flags, 'program_id': tape.PUMP_AMM,
+            'slot': tx.get('slot'), 'usd_valuation_estimated': counter_mint != tape.USDC,
+            'quote_reference_at': metadata.get('quote_reference_at') if counter_mint != tape.USDC else None,
+            'provider': metadata.get('provider', 'solana-rpc'), 'note': direction, 'confirmed_swap': True,
+        })
+    return decoded
+
+
 def direct_pool_trades(pair: str, mint: str, *, coin: dict[str, Any] | None = None,
                        batch_rpc: Callable[[list[tuple[str, list[Any]]]], list[dict[str, Any]]] | None = None,
                        classifier: Callable[..., tuple[str, list[dict[str, Any]], str | None]] | None = None,
@@ -149,6 +302,7 @@ def direct_pool_trades(pair: str, mint: str, *, coin: dict[str, Any] | None = No
     if cached and 0 <= now - int(cached.get('fetched_at') or 0) <= ttl:
         return cached
 
+    verified_tape = None
     if batch_rpc is None or classifier is None:
         import live_tape as verified_tape
         batch_rpc = batch_rpc or verified_tape.rpc_batch
@@ -184,6 +338,8 @@ def direct_pool_trades(pair: str, mint: str, *, coin: dict[str, Any] | None = No
             seen.add(signature)
             try:
                 _classification, events, _reason = classifier(tx, metadata, observed_at=now, ingested_at=now)
+                if not events and _reason == 'UNSUPPORTED_POOL_INSTRUCTION' and verified_tape is not None:
+                    events = _quote_mint_pumpswap_events(tx, metadata, verified_tape, observed_at=now, ingested_at=now)
             except (ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError):
                 continue
             for event in events:

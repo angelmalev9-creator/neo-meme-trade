@@ -1,7 +1,9 @@
 import base64
+import base64
 import unittest
 
 import coin_wallets as cw
+import live_tape as tape
 
 NOW = 1_800_000_000_000
 MINT, PAIR = cw.b58encode(bytes([7]) * 32), cw.b58encode(bytes([9]) * 32)
@@ -15,6 +17,30 @@ def gecko_trade(ts, kind, wallet, usd, tx, tokens=1000):
                            'to_token_amount': str(tokens) if kind == 'buy' else '0.5',
                            'from_token_amount': '0.5' if kind == 'buy' else str(tokens),
                            'price_to_in_usd': '0.001', 'price_from_in_usd': '0.001'}}
+
+
+def inverted_pumpswap_transaction(direction='SELL'):
+    # Pool base is WSOL, selected token is pool quote: raw SELL means BUY of MINT.
+    keys = [PAIR, W1, cw.b58encode(bytes([6]) * 32), tape.WSOL, MINT,
+            cw.b58encode(bytes([7]) * 32), cw.b58encode(bytes([8]) * 32),
+            cw.b58encode(bytes([9]) * 32), cw.b58encode(bytes([10]) * 32)]
+    ix_data = next(k for k, v in tape.SWAP_DISCRIMINATORS.items() if v == direction)
+    ev_data = next(k for k, v in tape.EVENT_DISCRIMINATORS.items() if v == direction)
+    values = [NOW // 1000, 150_000_000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1_234_000_000]
+    payload = ev_data + b''.join(int(x).to_bytes(8, 'little') for x in values)
+    payload += b''.join(tape._b58decode(x) for x in [PAIR, W1, keys[5], keys[6]])
+    logs = [f'Program {tape.PUMP_AMM} invoke [1]', 'Program data: ' + base64.b64encode(payload).decode(),
+            f'Program {tape.PUMP_AMM} success']
+    return {
+        'slot': 55, 'blockTime': NOW // 1000,
+        'transaction': {'message': {'accountKeys': [{'pubkey': x, 'signer': x == W1} for x in keys],
+            'instructions': [{'programId': tape.PUMP_AMM, 'accounts': keys, 'data': tape._b58encode(ix_data)}]}},
+        'meta': {'err': None, 'logMessages': logs,
+                 'preTokenBalances': [
+                     {'accountIndex': 5, 'mint': tape.WSOL, 'uiTokenAmount': {'amount': '0', 'decimals': 9}},
+                     {'accountIndex': 6, 'mint': MINT, 'uiTokenAmount': {'amount': '0', 'decimals': 6}}],
+                 'postTokenBalances': []},
+    }
 
 
 class Trades(unittest.TestCase):
@@ -122,6 +148,27 @@ class DirectWalletFeed(unittest.TestCase):
         proven = cw.onchain_windows(rows, now=NOW, coverage_since_ms=NOW - 400_000)
         self.assertTrue(proven['m5']['complete'])
         self.assertEqual(proven['m5']['observed_seconds'], 300)
+
+    def test_quote_mint_pumpswap_is_normalized_to_selected_token_direction(self):
+        calls = []
+        tx = inverted_pumpswap_transaction('SELL')
+        def batch_rpc(batch):
+            calls.append(batch)
+            if batch[0][0] == 'getSignaturesForAddress':
+                return [{'result': [{'signature': 'hook-buy', 'blockTime': NOW // 1000, 'err': None}]}]
+            return [{'result': tx}]
+        out = cw.direct_pool_trades(
+            PAIR, MINT,
+            coin={'symbol': 'HOOK', 'dexId': 'pumpswap', 'priceUsd': 0.018, 'priceNative': 0.0001},
+            batch_rpc=batch_rpc, now=NOW,
+        )
+        self.assertEqual(len(out['rows']), 1)
+        row = out['rows'][0]
+        self.assertEqual((row['direction'], row['wallet'], row['token_amount'], row['quote_asset']),
+                         ('BUY', W1, 1234.0, tape.WSOL))
+        self.assertAlmostEqual(row['quote_amount'], 0.15)
+        self.assertAlmostEqual(row['usd_amount'], 27.0)
+        self.assertTrue(row['usd_estimated'])
 
     def test_rpc_live_beats_gecko_but_verified_tape_beats_rpc_live(self):
         gecko = [{'ts': NOW, 'direction': 'BUY', 'wallet': W1, 'signature': 'same', 'usd_amount': 10,
