@@ -16,6 +16,7 @@ Every answer is cached per pool so a dashboard polling every few seconds
 stays far under the public rate limits.
 """
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import math
 import re
 import threading
@@ -46,6 +47,8 @@ _DIRECT: dict[str, dict[str, Any]] = {}
 _HOLDERS: dict[str, dict[str, Any]] = {}
 _ENTRY: dict[str, dict[str, Any]] = {}
 _LOCK = threading.Lock()
+_HOLDER_REFRESHING: set[str] = set()
+_HOLDER_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix='neo-dashboard-holders')
 
 
 def now_ms() -> int:
@@ -576,6 +579,36 @@ def holders(mint: str, rpc: Callable[[str, list[Any]], Any], *, pool_accounts: s
         holder['entry_status'] = info.get('status')
         holder['first_signature'] = info.get('first_signature')
     return view
+
+
+def holder_snapshot(mint: str) -> dict[str, Any]:
+    """Return the last holder snapshot immediately; never performs network I/O."""
+    with _LOCK:
+        cached = _HOLDERS.get(mint)
+        if not cached:
+            return {'fetched_at': None, 'error': None, 'holders': [], 'supply': None, 'decimals': None}
+        return {**cached, 'holders': [dict(row) for row in (cached.get('holders') or []) if isinstance(row, dict)]}
+
+
+def refresh_holders_async(mint: str, rpc: Callable[[str, list[Any]], Any], *, pool_accounts: set[str], now: int) -> None:
+    """Refresh top holders off the HTTP critical path (stale-while-revalidate)."""
+    with _LOCK:
+        cached = _HOLDERS.get(mint)
+        ttl = ERROR_TTL_MS if cached and cached.get('error') else HOLDERS_TTL_MS
+        if cached and 0 <= now - int(cached.get('fetched_at') or 0) <= ttl:
+            return
+        if mint in _HOLDER_REFRESHING:
+            return
+        _HOLDER_REFRESHING.add(mint)
+
+    def work() -> None:
+        try:
+            holders(mint, rpc, pool_accounts=pool_accounts, now=now, max_entry_lookups=0)
+        finally:
+            with _LOCK:
+                _HOLDER_REFRESHING.discard(mint)
+
+    _HOLDER_POOL.submit(work)
 
 
 # ------------------------------------------------------------------ build --

@@ -702,13 +702,13 @@ def read_coin_wallets(address: str, pair: str) -> dict[str, Any]:
     now = now_ms()
     tape = read_live_tape()
     pools = set(coin_wallets.KNOWN_POOL_AUTHORITIES) | ({pair} if pair else set())
-    with ThreadPoolExecutor(max_workers=3, thread_name_prefix='neo-dashboard-wallets') as pool:
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix='neo-dashboard-wallets') as pool:
         direct_future = pool.submit(coin_wallets.direct_pool_trades, pair, address, coin=coin, batch_rpc=_dashboard_rpc_batch, now=now) if pair else None
         gecko_future = pool.submit(coin_wallets.gecko_trades, pair, address, _gecko_json, now=now) if pair else None
-        holders_future = pool.submit(coin_wallets.holders, address, _dashboard_rpc, pool_accounts=pools, now=now, max_entry_lookups=0)
         direct = direct_future.result() if direct_future else None
         gecko = gecko_future.result() if gecko_future else {'rows': [], 'error': 'no_pair', 'fetched_at': now}
-        holder_view = holders_future.result()
+    holder_view = coin_wallets.holder_snapshot(address)
+    coin_wallets.refresh_holders_async(address, _dashboard_rpc, pool_accounts=pools, now=now)
     return coin_wallets.build(address, pair, tape=tape, fetch=_gecko_json, rpc=_dashboard_rpc,
                               direct=direct, gecko=gecko, holder_view=holder_view,
                               max_entry_lookups=0, now=now)
