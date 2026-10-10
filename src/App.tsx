@@ -122,6 +122,8 @@ const shortAddress = (value: string) => `${value.slice(0, 4)}…${value.slice(-4
 const timeLabel = (stamp: number) => stamp ? new Date(stamp).toLocaleTimeString('bg-BG', { hour: '2-digit', minute: '2-digit' }) : '—';
 const tapeTimeLabel = (stamp: number) => stamp ? new Date(stamp).toLocaleTimeString('bg-BG', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
 const fullTimeLabel = (stamp: number) => stamp ? new Date(stamp).toLocaleString('bg-BG', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
+const exactTradeTimeLabel = (stamp: number) => stamp ? new Date(stamp).toLocaleTimeString('bg-BG', { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 }) : '—';
+const exactTradePrice = (value = 0) => value > 0 ? `$${value.toPrecision(10)}` : '—';
 const holdLabel = (seconds: number | null) => {
   if (seconds == null) return '—';
   const total = Math.max(0, Math.round(seconds));
@@ -770,7 +772,16 @@ export default function App() {
                   <div className="mt-0.5 text-slate-500"><span className="font-black text-red-300">ИЗХОД</span> {trade.closed_at ? `${fullTimeLabel(trade.closed_at)} · ${fmtPrice(trade.execution_exit_price ?? trade.exit_price ?? trade.current_price)}` : 'позицията още е отворена'}</div>
                 </div>)}</div>
               </div>}
-              {dexEmbed ? <iframe title={`${selectedCoin.symbol} live chart`} src={dexEmbed} className="h-[430px] w-full border-0 bg-[#07090b]" loading="lazy" /> : <div className="flex h-[430px] items-center justify-center text-xs text-slate-600">Няма pair chart.</div>}
+              <div className="relative h-[430px] w-full overflow-hidden bg-[#07090b]">
+                {dexEmbed ? <iframe title={`${selectedCoin.symbol} live chart`} src={dexEmbed} className="h-full w-full border-0 bg-[#07090b]" loading="lazy" /> : <div className="flex h-full items-center justify-center text-xs text-slate-600">Няма pair chart.</div>}
+                {coinTrades.length > 0 && <div className="pointer-events-none absolute left-3 top-3 z-20 flex max-w-[calc(100%-24px)] flex-wrap gap-2">
+                  {coinTrades.slice(0, 4).flatMap(trade => {
+                    const entry = <div key={`${trade.id}-overlay-entry`} className="rounded-lg border border-emerald-300/40 bg-[#07110d]/95 px-2.5 py-1.5 shadow-xl backdrop-blur-sm"><div className="text-[9px] font-black text-emerald-300">▲ ВХОД #{trade.trade_no ?? '—'} · {exactTradeTimeLabel(trade.opened_at)}</div><div className="mt-0.5 font-mono text-[9px] text-white">{exactTradePrice(trade.execution_entry_price ?? trade.entry_price)}</div></div>;
+                    if (!trade.closed_at) return [entry];
+                    return [entry, <div key={`${trade.id}-overlay-exit`} className="rounded-lg border border-red-300/40 bg-[#130809]/95 px-2.5 py-1.5 shadow-xl backdrop-blur-sm"><div className="text-[9px] font-black text-red-300">▼ ИЗХОД #{trade.trade_no ?? '—'} · {exactTradeTimeLabel(trade.closed_at)}</div><div className="mt-0.5 font-mono text-[9px] text-white">{exactTradePrice(trade.execution_exit_price ?? trade.exit_price ?? trade.current_price)} · <span className={(trade.pnl_pct ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}>{signed(trade.pnl_pct ?? 0)}%</span></div></div>];
+                  })}
+                </div>}
+              </div>
             </Card>
             <div className="grid gap-4 lg:grid-cols-[1.1fr_.9fr]">
               <Card kicker="NEO" title="Цена по scan-ове" right={<Gauge className="h-4 w-4 text-emerald-300" />}>
