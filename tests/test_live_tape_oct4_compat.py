@@ -35,5 +35,45 @@ class Oct4CompatRpcTests(unittest.TestCase):
         request.assert_called_once()
 
 
+class _StateResponse:
+    def __init__(self, payload):
+        self.payload = payload
+    def raise_for_status(self):
+        return None
+    def json(self):
+        return self.payload
+
+
+class Oct4CompatPrewarmTests(unittest.TestCase):
+    def setUp(self):
+        tape.TRACKED.clear()
+        tape.INITIALIZED_PAIRS.clear()
+        tape.PAIR_STARTED.clear()
+        tape.PAIR_LAST_POLL.clear()
+        tape.PAIR_LATEST_EVENT.clear()
+
+    def coin(self, symbol, *, score=50, liquidity=9000, age=40, m5=4, buys=20, sells=10, volume=2500):
+        return {
+            'address': f'addr-{symbol}', 'pairAddress': f'pair-{symbol}', 'symbol': symbol,
+            'priceUsd': 0.001, 'score': score, 'liquidityUsd': liquidity, 'ageMinutes': age,
+            'priceChange': {'m5': m5}, 'volume': {'m5': volume},
+            'txns': {'m5': {'buys': buys, 'sells': sells}},
+        }
+
+    def test_prewarm_accepts_near_setup_before_full_entry_threshold(self):
+        self.assertTrue(tape.preflow_candidate(self.coin('near', score=50, liquidity=9000, age=40)))
+        self.assertFalse(tape.preflow_candidate(self.coin('stale', score=90, liquidity=50000, age=200)))
+
+    def test_feed_snapshot_prioritizes_buy_pressure(self):
+        weak = self.coin('weak', score=70, liquidity=20000, buys=20, sells=18, volume=3000)
+        strong = self.coin('strong', score=70, liquidity=20000, buys=45, sells=10, volume=6000)
+        medium = self.coin('medium', score=70, liquidity=20000, buys=30, sells=15, volume=4500)
+        with patch.object(tape.SESSION, 'get', return_value=_StateResponse({'feed': [weak, strong, medium], 'positions': []})), \
+             patch.object(tape, 'MAX_TRACKED', 2):
+            rows = tape.feed_snapshot()
+        self.assertEqual([row['symbol'] for row in rows], ['strong', 'medium'])
+        self.assertGreater(rows[0]['market_ratio_m5'], rows[1]['market_ratio_m5'])
+
+
 if __name__ == '__main__':
     unittest.main()

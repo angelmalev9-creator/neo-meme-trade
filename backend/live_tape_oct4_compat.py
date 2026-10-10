@@ -34,10 +34,14 @@ POLL_SECONDS = max(0.5, float(os.getenv('NEO_TAPE_POLL_SECONDS', '2.0')))
 FLOW_WINDOW_MS = max(30_000, int(os.getenv('NEO_TAPE_FLOW_WINDOW_MS', '60000')))
 STICKY_MS = max(FLOW_WINDOW_MS, int(float(os.getenv('NEO_TAPE_STICKY_SECONDS', '210')) * 1000))
 RPC_BATCH = max(1, min(60, int(os.getenv('NEO_TAPE_RPC_BATCH_SIZE', '60'))))
-MIN_SCORE = float(os.getenv('NEO_TAPE_OCT4_MIN_SCORE', '85'))
-MIN_LIQUIDITY = float(os.getenv('NEO_TAPE_OCT4_MIN_LIQUIDITY', '15000'))
-MIN_M5 = float(os.getenv('NEO_TAPE_OCT4_MIN_M5', '-5'))
-MAX_M5 = float(os.getenv('NEO_TAPE_OCT4_MAX_M5', '25'))
+# The tape is a pre-warm layer, not an entry gate. Track a wider set of young
+# near-setup pools so verified order-flow already exists if/when the stricter
+# EARLY_BUY_PRESSURE entry rules later become true.
+MIN_SCORE = float(os.getenv('NEO_TAPE_OCT4_MIN_SCORE', '45'))
+MIN_LIQUIDITY = float(os.getenv('NEO_TAPE_OCT4_MIN_LIQUIDITY', '5000'))
+MIN_M5 = float(os.getenv('NEO_TAPE_OCT4_MIN_M5', '-8'))
+MAX_M5 = float(os.getenv('NEO_TAPE_OCT4_MAX_M5', '22'))
+MAX_AGE_MINUTES = float(os.getenv('NEO_TAPE_OCT4_MAX_AGE_MINUTES', '185'))
 
 SESSION = requests.Session()
 SESSION.headers.update({'content-type': 'application/json', 'user-agent': 'NEO-LiveTape-Oct4/1.0'})
@@ -77,18 +81,31 @@ def activity_of(coin: dict[str, Any]) -> float:
     return number(tx.get('buys')) + number(tx.get('sells'))
 
 
+def market_flow_of(coin: dict[str, Any]) -> tuple[float, float, float, float]:
+    tx = (coin.get('txns') or {}).get('m5') or {}
+    buys = number(tx.get('buys'))
+    sells = number(tx.get('sells'))
+    ratio = buys / max(sells, 1.0)
+    volume = number((coin.get('volume') or {}).get('m5'))
+    return buys, sells, ratio, volume
+
+
 def preflow_candidate(coin: dict[str, Any]) -> bool:
+    """Broader pre-warm set; the market engine still owns every entry veto."""
     changes = coin.get('priceChange') or {}
+    age = number(coin.get('ageMinutes'), 999999.0)
     return (
         bool(coin.get('pairAddress')) and bool(coin.get('address'))
         and number(coin.get('priceUsd')) > 0
         and number(coin.get('score')) >= MIN_SCORE
         and number(coin.get('liquidityUsd')) >= MIN_LIQUIDITY
+        and age <= MAX_AGE_MINUTES
         and MIN_M5 <= number(changes.get('m5'), -999.0) <= MAX_M5
     )
 
 
 def coin_meta(coin: dict[str, Any], stamp: int, *, pinned: bool = False) -> dict[str, Any]:
+    buys, sells, ratio, volume = market_flow_of(coin)
     return {
         'pair': str(coin.get('pairAddress') or ''),
         'address': str(coin.get('address') or ''),
@@ -97,6 +114,11 @@ def coin_meta(coin: dict[str, Any], stamp: int, *, pinned: bool = False) -> dict
         'score': number(coin.get('score')),
         'liquidity': number(coin.get('liquidityUsd')),
         'activity': activity_of(coin),
+        'buys_m5': buys,
+        'sells_m5': sells,
+        'market_ratio_m5': ratio,
+        'volume_m5': volume,
+        'age_minutes': number(coin.get('ageMinutes'), 999999.0),
         'last_eligible': stamp,
         'pinned_position': bool(pinned),
     }
@@ -154,9 +176,16 @@ def feed_snapshot() -> list[dict[str, Any]]:
         TRACKED.values(),
         key=lambda row: (
             1 if row.get('pinned_position') else 0,
+            # Pre-warm the pools closest to the desired qOMPUTE-style setup:
+            # buy pressure first, then real short-volume/activity and youth.
+            1 if number(row.get('market_ratio_m5')) >= 1.5 else 0,
+            number(row.get('market_ratio_m5')),
+            number(row.get('volume_m5')),
+            number(row.get('buys_m5')),
             number(row.get('score')),
             number(row.get('liquidity')),
-            -number(row.get('activity')),
+            -number(row.get('age_minutes'), 999999.0),
+            number(row.get('activity')),
             number(row.get('last_eligible')),
         ),
         reverse=True,
