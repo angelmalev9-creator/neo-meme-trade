@@ -290,8 +290,9 @@ export default function App() {
   const selectedPair = useMemo(() => {
     const live = state?.feed.find(c => c.address === selectedAddress);
     if (live?.pairAddress) return live.pairAddress;
-    return detail?.coin?.address === selectedAddress ? detail.coin.pairAddress : '';
-  }, [state, selectedAddress, detail]);
+    if (detail?.coin?.address === selectedAddress && detail.coin.pairAddress) return detail.coin.pairAddress;
+    return (state?.history || []).find(trade => trade.address === selectedAddress)?.pairAddress || '';
+  }, [state?.feed, state?.history, selectedAddress, detail]);
 
   useEffect(() => {
     if (!selectedAddress || tab !== 'coins') return;
@@ -346,7 +347,22 @@ export default function App() {
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [openBook]);
 
-  const selectedCoin = useMemo(() => state?.feed.find(c => c.address === selectedAddress) || (detail?.coin?.address === selectedAddress ? detail.coin : null) || state?.feed[0] || null, [state, selectedAddress, detail]);
+  const selectedHistoryTrades = useMemo(() => [...(state?.history || [])].filter(trade => trade.address === selectedAddress).sort((a, b) => (b.opened_at || 0) - (a.opened_at || 0)), [state?.history, selectedAddress]);
+  const selectedCoin = useMemo(() => {
+    const live = state?.feed.find(c => c.address === selectedAddress);
+    if (live) return live;
+    if (detail?.coin?.address === selectedAddress) return detail.coin;
+    const trade = selectedHistoryTrades[0];
+    if (trade) return {
+      address: trade.address, pairAddress: trade.pairAddress, dexId: '', dexUrl: trade.dex_url || `https://dexscreener.com/solana/${trade.pairAddress}`,
+      name: trade.name, symbol: trade.symbol, imageUrl: trade.imageUrl || '', description: '',
+      priceUsd: trade.current_price || trade.exit_price || trade.entry_price || 0, marketCap: 0, fdv: 0, liquidityUsd: 0,
+      volume: { m5: 0, h1: 0, h6: 0, h24: 0 }, priceChange: { m5: 0, h1: 0, h6: 0, h24: 0 },
+      txns: { m5: { buys: 0, sells: 0 }, h1: { buys: 0, sells: 0 }, h6: { buys: 0, sells: 0 }, h24: { buys: 0, sells: 0 } },
+      ageMinutes: null, sources: ['trade-history'], boostAmount: 0, score: trade.current_score ?? trade.score ?? 0, riskScore: 0, posture: 'WAIT' as const, signals: [], updatedAt: trade.updated_at || trade.closed_at || trade.opened_at,
+    };
+    return state?.feed[0] || null;
+  }, [state?.feed, selectedAddress, detail, selectedHistoryTrades]);
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return (state?.feed || []).filter(coin => {
@@ -357,10 +373,10 @@ export default function App() {
   }, [state, filter, search]);
   const chartData = useMemo(() => (detail?.history || []).map(p => ({ ...p, label: timeLabel(p.ts) })), [detail]);
   const coinTrades = useMemo(() => {
-    const rows = [...(detail?.trades || [])];
+    const rows = [...((detail?.trades?.length ? detail.trades : selectedHistoryTrades) || [])];
     if (detail?.position && !rows.some(row => row.id === detail.position?.id)) rows.unshift(detail.position);
     return rows.sort((a, b) => (b.opened_at || 0) - (a.opened_at || 0));
-  }, [detail]);
+  }, [detail, selectedHistoryTrades]);
   const tradeMarkers = useMemo(() => coinTrades.flatMap(trade => {
     const markers: TradeMarker[] = [{
       id: `${trade.id}-entry`, kind: 'entry' as const, ts: trade.opened_at,
