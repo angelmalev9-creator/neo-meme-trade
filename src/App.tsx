@@ -72,6 +72,7 @@ type MonitorState = {
   events: { ts: number; text: string }[];
   live_tape: LiveTrade[]; live_tape_status: TapeStatus;
   runtime_health?: RuntimeHealth;
+  self_heal?: { status?: string; component?: string | null; action?: string | null; detail?: string | null; last_action_at?: number; recoveries?: number; watchdog?: string };
   strategy_lab: StrategyLab;
   paper_training?: PaperTrainingSnapshot;
   entry_diagnostics?: EntryDiagnostics;
@@ -449,6 +450,12 @@ export default function App() {
       });
     }
     for (const issue of health?.active_issues || []) rows.push({ ts: issue.at || health?.checked_at || Date.now(), text: `Активен проблем: ${issue.text}`, tone: issue.status === 'error' ? 'error' : 'warn' });
+    const heal = state?.self_heal;
+    if (heal?.last_action_at && Date.now() - heal.last_action_at <= 10 * 60 * 1000) rows.push({
+      ts: heal.last_action_at,
+      text: `NEO self-heal: ${(heal.status || 'unknown').toUpperCase()}${heal.action ? ` · ${heal.action}` : ''}${heal.detail ? ` · ${heal.detail}` : ''}`,
+      tone: heal.status === 'error' ? 'error' : heal.status === 'recovering' ? 'warn' : 'ok',
+    });
     const cutoff = Date.now() - 10 * 60 * 1000;
     for (const event of state?.events || []) {
       if (event.ts < cutoff) continue;
@@ -461,7 +468,7 @@ export default function App() {
       tone: 'ok',
     });
     return rows.sort((a, b) => b.ts - a.ts).slice(0, 8);
-  }, [diagnostics, state?.discovery_stats?.scan_sequence, state?.events, state?.last_scan_at, state?.runtime_health, state?.scan_count]);
+  }, [diagnostics, state?.discovery_stats?.scan_sequence, state?.events, state?.last_scan_at, state?.runtime_health, state?.scan_count, state?.self_heal]);
   const labBooks = useMemo(() => Object.values(state?.strategy_lab?.books || {}).filter(book => book.id !== 'ASTRA_6_BRAIN').sort((a, b) => (state?.strategy_lab?.stats?.[b.id]?.equity ?? b.balance) - (state?.strategy_lab?.stats?.[a.id]?.equity ?? a.balance)), [state]);
   const activeBooks = labBooks.filter(book => (state?.strategy_lab?.stats?.[book.id]?.trades ?? 0) > 0 || book.position);
   const quietBooks = labBooks.filter(book => !activeBooks.includes(book));

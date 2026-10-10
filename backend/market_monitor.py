@@ -52,6 +52,24 @@ _DISCOVERY_HEALTH: dict[str, Any] = {
     'status': 'starting', 'checked_at': 0, 'sources_ok': 0,
     'sources_failed': 0, 'last_error': None,
 }
+# Provider/self-heal state is operational only: it never changes strategy
+# thresholds, sizing, exits or quote/safety gates.
+SELF_HEAL_STATUS_PATH = Path(os.getenv('NEO_SELF_HEAL_STATUS_PATH', str(STATE_PATH.with_name('self_heal.json'))))
+_RECOVERY_LOCK = threading.Lock()
+_RECOVERY_STATE: dict[str, Any] = {
+    'status': 'healthy', 'component': None, 'action': None, 'detail': None,
+    'last_action_at': 0, 'recoveries': 0,
+}
+_DEX_RATE_STATE = {
+    'discovery': {'lock': threading.Lock(), 'next_at': 0.0, 'backoff_until': 0.0, 'failures': 0,
+                  'min_interval': max(0.8, float(os.getenv('NEO_DEX_DISCOVERY_MIN_INTERVAL_SECONDS', '1.05')))},
+    'market': {'lock': threading.Lock(), 'next_at': 0.0, 'backoff_until': 0.0, 'failures': 0,
+               'min_interval': max(0.12, float(os.getenv('NEO_DEX_MARKET_MIN_INTERVAL_SECONDS', '0.24')))},
+}
+DEX_PROVIDER_BACKOFF_MAX_SECONDS = max(5.0, float(os.getenv('NEO_DEX_PROVIDER_BACKOFF_MAX_SECONDS', '60')))
+DISCOVERY_CACHE_MAX_AGE_MS = max(30_000, int(float(os.getenv('NEO_DISCOVERY_CACHE_MAX_AGE_MS', '180000'))))
+_DISCOVERY_SOURCE_CACHE_LOCK = threading.Lock()
+_DISCOVERY_SOURCE_CACHE: dict[str, dict[str, Any]] = {}
 MAX_FEED = DISCOVERY_SCAN_BATCH
 ENTRY_SCORE = 60.0
 MAX_POSITIONS = max(1, int(os.getenv('NEO_MAX_POSITIONS', '16')))
@@ -911,20 +929,105 @@ def compact_public_trade(trade: dict[str, Any]) -> dict[str, Any]:
     return {field: trade.get(field) for field in fields if field in trade}
 
 
+def _recovery_note(component: str, action: str, detail: str = '', status: str = 'recovering') -> None:
+    stamp = now_ms()
+    with _RECOVERY_LOCK:
+        previous_status = str(_RECOVERY_STATE.get('status') or '')
+        if status == 'healthy' and previous_status not in {'', 'healthy'}:
+            _RECOVERY_STATE['recoveries'] = int(_RECOVERY_STATE.get('recoveries') or 0) + 1
+        _RECOVERY_STATE.update(
+            status=status, component=component or None, action=action or None,
+            detail=detail or None, last_action_at=stamp,
+        )
+
+
+def _reserve_provider_slot(kind: str) -> None:
+    state = _DEX_RATE_STATE[kind]
+    with state['lock']:
+        now = time.monotonic()
+        target = max(now, float(state.get('next_at') or 0), float(state.get('backoff_until') or 0))
+        state['next_at'] = target + float(state['min_interval'])
+        wait = max(0.0, target - now)
+    if wait:
+        time.sleep(wait)
+
+
+def _retry_after_seconds(response: requests.Response | None) -> float:
+    if response is None:
+        return 0.0
+    try:
+        raw = response.headers.get('Retry-After')
+        if raw is None:
+            return 0.0
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _provider_failure(kind: str, *, status_code: int | None = None, response: requests.Response | None = None) -> float:
+    state = _DEX_RATE_STATE[kind]
+    with state['lock']:
+        failures = int(state.get('failures') or 0) + 1
+        state['failures'] = failures
+        if status_code == 429:
+            delay = max(_retry_after_seconds(response), min(DEX_PROVIDER_BACKOFF_MAX_SECONDS, 1.5 * (2 ** min(failures - 1, 5))))
+        else:
+            delay = min(12.0, 0.5 * (2 ** min(failures - 1, 4)))
+        state['backoff_until'] = max(float(state.get('backoff_until') or 0), time.monotonic() + delay)
+        state['next_at'] = max(float(state.get('next_at') or 0), float(state['backoff_until']))
+    reason = '429 rate limit' if status_code == 429 else 'transport/provider error'
+    _recovery_note(kind, 'adaptive_backoff_retry', f'{reason}; retry in {delay:.1f}s')
+    return delay
+
+
+def _provider_success(kind: str) -> None:
+    state = _DEX_RATE_STATE[kind]
+    with state['lock']:
+        had_failures = int(state.get('failures') or 0) > 0
+        state['failures'] = 0
+        if float(state.get('backoff_until') or 0) <= time.monotonic():
+            state['backoff_until'] = 0.0
+    if had_failures:
+        _recovery_note(kind, 'provider_recovered', 'provider requests are healthy again', status='healthy')
+
+
+def _provider_recovery_snapshot() -> dict[str, Any]:
+    with _RECOVERY_LOCK:
+        local = dict(_RECOVERY_STATE)
+    # The external watchdog records process/tape restarts in a sibling state file.
+    try:
+        external = json.loads(SELF_HEAL_STATUS_PATH.read_text(encoding='utf-8'))
+        if isinstance(external, dict) and int(external.get('last_action_at') or 0) > int(local.get('last_action_at') or 0):
+            local = external
+    except Exception:
+        pass
+    return local
+
+
 def api(path: str) -> Any:
-    # DexScreener occasionally closes or stalls a single request. Retry once
-    # before declaring discovery degraded so a transient 5s blip does not drop
-    # a source from the rotating universe.
+    # Discovery endpoints have a lower public rate limit than token-market reads.
+    # Reserve request slots and use exponential backoff on 429s so the engine
+    # heals itself instead of hammering the provider until every source fails.
     last_error: Exception | None = None
     for attempt in range(2):
+        response: requests.Response | None = None
         try:
+            _reserve_provider_slot('discovery')
             response = SESSION.get(f'{DEX_API}{path}', timeout=(1.5, 5.0))
+            if getattr(response, 'status_code', 200) == 429:
+                last_error = requests.HTTPError(f'429 Too Many Requests for {path}', response=response)
+                _provider_failure('discovery', status_code=429, response=response)
+                continue
             response.raise_for_status()
-            return response.json()
+            payload = response.json()
+            _provider_success('discovery')
+            return payload
         except (requests.RequestException, ValueError, TypeError) as exc:
             last_error = exc
+            if not (response is not None and getattr(response, 'status_code', 200) == 429):
+                _provider_failure('discovery', status_code=(getattr(response, 'status_code', None) if response is not None else None), response=response)
             if attempt == 0:
-                time.sleep(0.15)
+                continue
     if last_error is not None:
         raise last_error
     raise RuntimeError('DexScreener request failed')
@@ -1244,11 +1347,11 @@ class State:
                 'source': tape.get('source'), 'error': tape.get('error'),
             }
             active_issues: list[dict[str, Any]] = []
-            if market_health.get('status') in {'degraded', 'error'}:
+            if market_health.get('status') in {'degraded', 'error', 'recovering'}:
                 active_issues.append({'component': 'market_data', 'status': market_health.get('status'),
                     'text': f"DexScreener: {market_health.get('unavailable_tokens', 0)}/{market_health.get('requested_tokens', 0)} token-а недостъпни след retry",
                     'at': market_health.get('checked_at') or 0})
-            if discovery_health.get('status') in {'degraded', 'error'}:
+            if discovery_health.get('status') in {'degraded', 'error', 'recovering'}:
                 active_issues.append({'component': 'discovery', 'status': discovery_health.get('status'),
                     'text': f"Discovery: {discovery_health.get('sources_failed', 0)} source-а с проблем",
                     'at': discovery_health.get('checked_at') or 0})
@@ -1280,6 +1383,7 @@ class State:
                 'events': self.events[:30],
                 'source_status': self.source_status,
                 'runtime_health': runtime_health,
+                'self_heal': _provider_recovery_snapshot(),
                 'entry_diagnostics': self.entry_diagnostics,
                 'discovery_stats': self.discovery_stats,
                 'learning': learner.summary(learning_table(self.history, now_ms())) if is_learner() else None,
@@ -1685,26 +1789,54 @@ def discover() -> tuple[list[str], dict[str, dict[str, Any]]]:
     metadata: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     source_failures: list[str] = []
-    sources_ok = 0
+    sources_usable = 0
+    sources_cached = 0
+    sources_attempted = 0
+    current = now_ms()
     sources = [
-        ('latest', '/token-profiles/latest/v1'),
-        ('recent-updates', '/token-profiles/recent-updates/v1'),
-        ('boosted', '/token-boosts/top/v1'),
-        ('boosted-latest', '/token-boosts/latest/v1'),
-        ('community-takeover', '/community-takeovers/latest/v1'),
-        ('ads-latest', '/ads/latest/v1'),
+        ('latest', '/token-profiles/latest/v1', 10_000),
+        ('recent-updates', '/token-profiles/recent-updates/v1', 10_000),
+        ('boosted', '/token-boosts/top/v1', 45_000),
+        ('boosted-latest', '/token-boosts/latest/v1', 20_000),
+        ('community-takeover', '/community-takeovers/latest/v1', 30_000),
+        ('ads-latest', '/ads/latest/v1', 30_000),
     ]
-    for source_name, path in sources:
-        try:
-            rows = api(path)
-        except Exception as exc:
-            source_failures.append(f'{source_name}: {type(exc).__name__}')
-            STATE.event(f'{source_name} discovery warning: {exc}')
-            continue
+    for source_name, path, refresh_ms in sources:
+        with _DISCOVERY_SOURCE_CACHE_LOCK:
+            cached = dict(_DISCOVERY_SOURCE_CACHE.get(source_name) or {})
+        cached_rows = cached.get('rows') if isinstance(cached.get('rows'), list) else []
+        cached_at = int(cached.get('last_success_at') or 0)
+        rows: list[Any] | None = None
+        # Stagger low-rate discovery surfaces. Fresh/recent feeds stay at 10s;
+        # slower surfaces are reused briefly instead of being hammered every scan.
+        if cached_rows and 0 <= current - cached_at < refresh_ms:
+            rows = list(cached_rows)
+            sources_cached += 1
+        else:
+            sources_attempted += 1
+            try:
+                payload = api(path)
+                if not isinstance(payload, list):
+                    raise TypeError('invalid response')
+                rows = payload
+                with _DISCOVERY_SOURCE_CACHE_LOCK:
+                    _DISCOVERY_SOURCE_CACHE[source_name] = {
+                        'rows': list(payload), 'last_success_at': now_ms(), 'path': path,
+                    }
+            except Exception as exc:
+                source_failures.append(f'{source_name}: {type(exc).__name__}')
+                STATE.event(f'{source_name} discovery warning: {exc}')
+                # A short-lived last-known-good snapshot is safe for discovery only.
+                # Prices/risk/quotes are still refreshed independently before entry.
+                if cached_rows and 0 <= current - cached_at <= DISCOVERY_CACHE_MAX_AGE_MS:
+                    rows = list(cached_rows)
+                    sources_cached += 1
+                    _recovery_note('discovery', 'cached_discovery_fallback', f'{source_name} using last-known-good candidates')
+                else:
+                    continue
         if not isinstance(rows, list):
-            source_failures.append(f'{source_name}: invalid response')
             continue
-        sources_ok += 1
+        sources_usable += 1
         for row in rows:
             # Some DexScreener discovery surfaces can contain non-object rows;
             # they are not token candidates and must not abort the whole scan.
@@ -1732,11 +1864,23 @@ def discover() -> tuple[list[str], dict[str, dict[str, Any]]]:
             info['links'] = info['links'] or row.get('links') or []
             info['boost_amount'] = max(num(info['boost_amount']), num(row.get('amount')), num(row.get('totalAmount')))
     checked_at = now_ms()
+    provider_failures = len(source_failures)
+    missing_sources = max(0, len(sources) - sources_usable)
+    if sources_usable == 0:
+        status = 'error'
+    elif provider_failures:
+        status = 'degraded'
+    else:
+        status = 'online'
+        if _provider_recovery_snapshot().get('component') == 'discovery':
+            _recovery_note('discovery', 'discovery_recovered', 'fresh discovery sources are healthy again', status='healthy')
     with _BACKEND_HEALTH_LOCK:
         _DISCOVERY_HEALTH.update(
-            status='online' if not source_failures else ('degraded' if sources_ok else 'error'),
-            checked_at=checked_at, sources_ok=sources_ok, sources_failed=len(source_failures),
+            status=status, checked_at=checked_at, sources_ok=sources_usable,
+            sources_failed=missing_sources, provider_failures=provider_failures,
+            sources_cached=sources_cached, sources_attempted=sources_attempted,
             last_error=source_failures[-1] if source_failures else None,
+            recovery_action='cached fallback + adaptive backoff' if provider_failures else None,
         )
     return order, metadata
 
@@ -1759,34 +1903,56 @@ def fetch_pairs(addresses: list[str], progress=None) -> list[dict[str, Any]]:
     if not batches:
         return []
 
-    def request_batch(batch: list[str]) -> list[dict[str, Any]] | None:
-        try:
-            response = requests.get(
-                f"{DEX_API}/tokens/v1/solana/{','.join(batch)}",
-                headers={'User-Agent': 'NEO-Meme-Market-Monitor/2.0', 'Accept': 'application/json'},
-                timeout=(1.5, MARKET_BATCH_TIMEOUT_SECONDS),
-            )
-            response.raise_for_status()
-            rows = response.json()
-            if not isinstance(rows, list):
-                return None
-            return [row for row in rows if isinstance(row, dict)]
-        except (requests.RequestException, ValueError, TypeError):
-            return None
+    def request_batch(batch: list[str]) -> tuple[list[dict[str, Any]] | None, str | None]:
+        last_reason: str | None = None
+        for attempt in range(2):
+            response: requests.Response | None = None
+            try:
+                _reserve_provider_slot('market')
+                response = requests.get(
+                    f"{DEX_API}/tokens/v1/solana/{','.join(batch)}",
+                    headers={'User-Agent': 'NEO-Meme-Market-Monitor/2.0', 'Accept': 'application/json'},
+                    timeout=(1.5, MARKET_BATCH_TIMEOUT_SECONDS),
+                )
+                if getattr(response, 'status_code', 200) == 429:
+                    last_reason = 'rate_limit'
+                    _provider_failure('market', status_code=429, response=response)
+                    continue
+                response.raise_for_status()
+                rows = response.json()
+                if not isinstance(rows, list):
+                    raise TypeError('invalid market response')
+                _provider_success('market')
+                return [row for row in rows if isinstance(row, dict)], None
+            except (requests.RequestException, ValueError, TypeError):
+                if response is not None and getattr(response, 'status_code', 200) == 429:
+                    last_reason = 'rate_limit'
+                    if attempt == 0:
+                        continue
+                else:
+                    last_reason = 'transport'
+                    _provider_failure('market', status_code=(getattr(response, 'status_code', None) if response is not None else None), response=response)
+                    # Preserve the existing transport recovery path: one failed
+                    # 30-token URL is immediately retried as two 15-token URLs.
+                    break
+        return None, last_reason
 
     def one(batch: list[str]) -> tuple[list[dict[str, Any]], int]:
-        rows = request_batch(batch)
+        rows, failure_reason = request_batch(batch)
         if rows is not None:
             return rows, 0
-        # A failed 30-token call is retried as two smaller calls. This keeps the
-        # normal request rate unchanged and only spends extra requests when the
-        # provider actually timed out/closed the connection.
+        # Do not amplify a provider 429 by splitting it into even more requests.
+        # The shared adaptive backoff will retry the full market snapshot next scan.
+        if failure_reason == 'rate_limit':
+            return [], len(batch)
+        # Transport failures may still be isolated to one large URL, so recover
+        # those as two smaller requests exactly as before.
         recovered: list[dict[str, Any]] = []
         unavailable = 0
         time.sleep(0.12)
         for start in range(0, len(batch), 15):
             part = batch[start:start + 15]
-            retry_rows = request_batch(part)
+            retry_rows, _ = request_batch(part)
             if retry_rows is None:
                 unavailable += len(part)
             else:
@@ -1811,14 +1977,18 @@ def fetch_pairs(addresses: list[str], progress=None) -> list[dict[str, Any]]:
                 except Exception:
                     pass
     checked_at = now_ms()
+    status = 'online' if unavailable_addresses == 0 else 'degraded'
+    if unavailable_addresses == 0 and _provider_recovery_snapshot().get('component') == 'market':
+        _recovery_note('market', 'market_data_recovered', 'token market reads are healthy again', status='healthy')
     with _BACKEND_HEALTH_LOCK:
         _MARKET_DATA_HEALTH.update(
-            status='online' if unavailable_addresses == 0 else 'degraded',
-            checked_at=checked_at, requested_tokens=total_addresses,
+            status=status, checked_at=checked_at, requested_tokens=total_addresses,
             unavailable_tokens=unavailable_addresses, returned_pairs=len(pairs),
+            recovery_action='adaptive backoff + bounded retry' if unavailable_addresses else None,
         )
     if unavailable_addresses:
-        STATE.event(f'Market data warning: {unavailable_addresses}/{total_addresses} token-а unavailable след retry')
+        _recovery_note('market', 'adaptive_backoff_retry', f'{unavailable_addresses}/{total_addresses} token reads unavailable; automatic retry active')
+        STATE.event(f'Market data warning: {unavailable_addresses}/{total_addresses} token-а unavailable след retry; NEO auto-retry е активен')
     return pairs
 
 
