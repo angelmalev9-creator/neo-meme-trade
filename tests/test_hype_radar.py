@@ -91,13 +91,26 @@ class Poll(unittest.TestCase):
         self.assertEqual(state['status'], 'budget_paused')
         self.assertEqual(state['themes'][0]['theme'], 'old')
 
-    def test_empty_answer_keeps_previous_fresh_themes(self):
+    def test_empty_answer_uses_current_source_fallback(self):
         def empty(messages):
             return {'choices': [{'message': {'content': 'sorry'}}], 'usage': {}}
         previous = {'themes': [{'theme': 'old', 'keywords': ['old'], 'hype': 90, 'generated_at': NOW - 1000}]}
         with patch.object(hr, 'LLM_KEY', 'k'), patch.object(hr, 'x_signal_lines', return_value=[]):
             state = hr.poll_once(previous, fetch=fetch, llm=empty, now=NOW)
-        self.assertEqual((state['status'], state['themes'][0]['theme']), ('empty_answer', 'old'))
+        self.assertEqual((state['status'], state['theme_generation']), ('online', 'source_fallback'))
+        self.assertTrue(state['themes'])
+        self.assertTrue(all(theme['generated_at'] == NOW for theme in state['themes']))
+
+    def test_provider_403_does_not_take_hype_offline(self):
+        def forbidden(messages):
+            raise RuntimeError('403 Forbidden')
+        with patch.object(hr, 'LLM_KEY', 'k'), patch.object(hr, 'x_signal_lines', return_value=[]):
+            state = hr.poll_once({}, fetch=fetch, llm=forbidden, now=NOW)
+        self.assertEqual(state['status'], 'online')
+        self.assertEqual(state['theme_generation'], 'source_fallback')
+        self.assertIn('403 Forbidden', state['llm_error'])
+        self.assertNotIn('error', state)
+        self.assertGreater(len(state['themes']), 0)
 
 
 if __name__ == '__main__':

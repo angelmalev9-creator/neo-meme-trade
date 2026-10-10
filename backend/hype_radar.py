@@ -224,6 +224,81 @@ def normalize_keywords(values) -> list[str]:
     return out[:8]
 
 
+FALLBACK_STOP_WORDS = STOP_WORDS | {
+    'says', 'said', 'amid', 'could', 'would', 'should', 'today', 'live', 'latest', 'update', 'updates',
+    'market', 'markets', 'price', 'prices', 'world', 'news', 'report', 'reports', 'top', 'day', 'week',
+    'trending', 'boosted', 'address', 'official', 'launch', 'launches', 'based', 'first', 'more', 'most',
+}
+
+
+def fallback_themes(lines: list[dict[str, Any]], *, generated_at: int) -> list[dict[str, Any]]:
+    """Build fresh, source-grounded themes when the optional LLM is unavailable.
+
+    The fallback never invents events: every theme and keyword comes directly from
+    a current source line. It deliberately favors explicit CoinGecko trends and
+    concrete proper nouns in news/X text over generic headline words.
+    """
+    weighted: dict[str, dict[str, Any]] = {}
+    source_weight = {
+        'coingecko-trending': 92.0, 'x-signal': 88.0, 'google-news-top': 76.0,
+        'google-news-crypto': 72.0, 'reddit-memes': 78.0, 'reddit-crypto': 68.0,
+        'reddit-solana-memes': 74.0, 'dexscreener-boosts': 58.0,
+    }
+
+    def add(theme: str, keywords: list[str], index: int, source: str, base: float) -> None:
+        clean = normalize_keywords(keywords)
+        if not clean:
+            return
+        key = clean[0]
+        row = weighted.setdefault(key, {
+            'theme': theme.strip()[:80] or clean[0], 'keywords': [], 'hype': base,
+            'category': 'crypto' if source in {'coingecko-trending', 'dexscreener-boosts', 'reddit-crypto', 'reddit-solana-memes'} else
+                        'meme' if source == 'reddit-memes' else 'news',
+            'why': f'Current source: {source}', 'sources': [], 'generated_at': generated_at, '_hits': 0,
+        })
+        row['_hits'] += 1
+        row['hype'] = max(float(row['hype']), base)
+        if index not in row['sources']:
+            row['sources'].append(index)
+        for word in clean:
+            if word not in row['keywords'] and len(row['keywords']) < 8:
+                row['keywords'].append(word)
+
+    for index, row in enumerate(lines):
+        source = str((row or {}).get('source') or '')
+        text = str((row or {}).get('text') or '').strip()
+        if not text:
+            continue
+        base = source_weight.get(source, 60.0)
+        trending = re.match(r'^trending:\s*(.+?)(?:\s*\(([^)]+)\))?$', text, flags=re.I)
+        if trending:
+            name = trending.group(1).strip()
+            symbol = (trending.group(2) or '').strip()
+            words = re.findall(r'[A-Za-z0-9]{3,24}', name)
+            add(name, ([symbol] if symbol else []) + words, index, source, base)
+            continue
+
+        # Google News commonly appends " - Publisher"; the publisher itself is
+        # not a hype theme, so only inspect the headline side.
+        headline = text.rsplit(' - ', 1)[0].strip()
+        proper = re.findall(r'(?<![A-Za-z0-9])(?:[A-Z][A-Za-z0-9]{2,})(?:\s+[A-Z][A-Za-z0-9]{2,}){0,2}', headline)
+        tokens = [w for w in re.findall(r'[A-Za-z0-9]{3,24}', headline) if w.lower() not in FALLBACK_STOP_WORDS]
+        if proper:
+            phrase = max(proper, key=lambda value: (len(value.split()), len(value)))
+            add(phrase, phrase.split() + tokens[:4], index, source, base)
+        elif tokens:
+            add(' '.join(tokens[:3]), tokens[:6], index, source, base - 8.0)
+
+    themes = []
+    for row in weighted.values():
+        hits = int(row.pop('_hits', 0))
+        row['hype'] = round(min(96.0, float(row['hype']) + min(12.0, max(0, hits - 1) * 4.0)), 1)
+        row['sources'] = row['sources'][:8]
+        themes.append(row)
+    themes.sort(key=lambda row: (-float(row['hype']), -len(row['sources']), row['theme'].lower()))
+    return themes[:MAX_THEMES]
+
+
 def usage_cost(usage: dict[str, Any] | None) -> tuple[float, int, int]:
     usage = usage or {}
     input_tokens = int(usage.get('prompt_tokens') or usage.get('input_tokens') or 0)
@@ -305,21 +380,37 @@ def poll_once(state: dict[str, Any], *, fetch=default_fetch, llm=default_llm, no
     if not lines:
         state.update(base, status='no_sources', source_status=source_status)
         return state
-    body = llm(build_prompt(lines))
-    cost, input_tokens, output_tokens = usage_cost(body.get('usage'))
-    budget.update(spent_usd=round(float(budget.get('spent_usd') or 0) + cost, 6),
-                  input_tokens=int(budget.get('input_tokens') or 0) + input_tokens,
-                  output_tokens=int(budget.get('output_tokens') or 0) + output_tokens,
-                  calls=int(budget.get('calls') or 0) + 1)
+    llm_error = None
     text = ''
-    for choice in body.get('choices') or []:
-        message = (choice or {}).get('message') or {}
-        if message.get('content'):
-            text = str(message['content']); break
-    themes = parse_themes_text(text, generated_at=now, line_count=len(lines))
-    state.update(base, status='online' if themes else 'empty_answer', last_success_at=now if themes else state.get('last_success_at'),
+    cost = 0.0
+    try:
+        body = llm(build_prompt(lines))
+        cost, input_tokens, output_tokens = usage_cost(body.get('usage'))
+        budget.update(spent_usd=round(float(budget.get('spent_usd') or 0) + cost, 6),
+                      input_tokens=int(budget.get('input_tokens') or 0) + input_tokens,
+                      output_tokens=int(budget.get('output_tokens') or 0) + output_tokens,
+                      calls=int(budget.get('calls') or 0) + 1)
+        for choice in body.get('choices') or []:
+            message = (choice or {}).get('message') or {}
+            if message.get('content'):
+                text = str(message['content']); break
+        themes = parse_themes_text(text, generated_at=now, line_count=len(lines))
+    except Exception as exc:
+        llm_error = f'{type(exc).__name__}: {exc}'[:300]
+        themes = []
+
+    generation = 'llm'
+    if not themes:
+        themes = fallback_themes(lines, generated_at=now)
+        generation = 'source_fallback'
+
+    state.update(base, status='online' if themes else 'empty_answer',
+                 last_success_at=now if themes else state.get('last_success_at'),
                  themes=themes if themes else active_themes(state, now=now), source_lines=lines, source_status=source_status,
+                 theme_generation=generation, llm_error=llm_error,
                  last_call_cost_usd=round(cost, 6), last_raw_excerpt=text[:300])
+    # A provider failure is diagnostic when the source-grounded fallback succeeds,
+    # not a collector outage. Keep it in llm_error without painting Hype red.
     state.pop('error', None)
     return state
 
