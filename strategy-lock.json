@@ -93,7 +93,7 @@
     "backend/lab_activity.py": "deb81c318f6c0419ed6237a40288cbb175bd8f7c1fca42adc431029ec06a1c14",
     "backend/x_signal_monitor.py": "eb7c3f952a8f4048ebfd956c2d6a479fb04c31c83b9925b2a3ebb691a138298a",
     "backend/discovery_universe.py": "3230e27acec26b08e867298cfcda34e9b128d79b39b88a02a9e61bbeaac06d93",
-    "backend/hype_radar.py": "5b98237a7a7915c39dbd6b1471840d979e423cf13c853093e071818c33803543",
+    "backend/hype_radar.py": "772a4f960e1d4b94b237729e7f9e93acb8c8a50ea075c27736ae3ebad6083a90",
     "backend/live_tape_oct4_compat.py": "49e19d869503a11b2792e18c86329f0a512d88fad3b71e29137c3b2cd43f56a2"
   },
   "runtime_version": "RUNTIME_DURABLE_PAPER_V2",
@@ -170,7 +170,7 @@
     "backend/adaptive_learning.py": "2026-10-09: owner-requested primary PAPER exit profile changed to fixed executable-net SL -4% / TP +10%; entry tiers, sizing and learning are unchanged.",
     "backend/lab_activity.py": "2026-10-08: adds X_SIGNAL PAPER entry/risk configuration only; shared safety and execution-cost logic remain unchanged. 2026-10-08: EntryRule.failures() names the failing conditions for diagnostics; matches() is unchanged. 2026-10-08: HYPE_RADAR rule/overrides and two diagnostic labels.",
     "backend/x_signal_monitor.py": "2026-10-08: budget-capped xAI X Search collector for PAPER signals; allowed handles only, literal addresses only, no order execution, atomic state output.",
-    "backend/hype_radar.py": "2026-10-08: Hype Radar PAPER collector and pure token/theme matcher used by HYPE_RADAR entry gating; locked because match_token() and active_themes() influence lab entry eligibility.",
+    "backend/hype_radar.py": "2026-10-08: Hype Radar PAPER collector and pure token/theme matcher used by HYPE_RADAR entry gating; locked because match_token() and active_themes() influence lab entry eligibility. 2026-10-10: Hype Radar keeps current source-grounded themes available when the optional xAI call is forbidden; no main-engine behavior is changed.",
     "backend/discovery_universe.py": "2026-10-09: adds pure fresh-priority helper so repeated provider snapshots cannot starve rolling universe rotation; no scoring, entry, exit, sizing or execution logic.",
     "backend/live_tape_oct4_compat.py": "2026-10-09: dedicated ORDER_FLOW_ADAPTIVE_OCT4 PAPER tape keeps the Oct-4 signer token-balance-delta semantics, adds exact-pool 60s coverage, sticky pre-flow candidates and transport-only failover across free Solana RPC endpoints. Per-pair incomplete coverage still fails closed; entry thresholds and execution logic are unchanged."
   },

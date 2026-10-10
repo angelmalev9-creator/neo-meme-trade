@@ -5,7 +5,7 @@ import {
   Activity, Bot, CircleDollarSign, ExternalLink, Flame, FlaskConical, Gauge, RefreshCw, Search,
   ShieldCheck, Sparkles, TrendingDown, TrendingUp, WalletCards, Zap,
 } from 'lucide-react';
-import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Area, AreaChart, ReferenceDot, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { supabase } from './lib/supabase';
 
 const API = 'https://neo-meme-api.169-58-211-177.sslip.io';
@@ -35,6 +35,7 @@ type Position = {
   stop_loss_pct?: number; take_profit_net_pct?: number; exit_policy?: string; engine_settings_version?: string;
 };
 type PricePoint = { ts: number; price: number; liquidity: number; volumeH1: number; score: number };
+type TradeMarker = { id: string; kind: 'entry' | 'exit'; ts: number; price: number; tradeNo?: number; pnlPct?: number };
 type LabPosition = { symbol: string; address: string; strategy_id: string; opened_at: number; pnl_pct: number; notional_usd: number };
 type WhyQuiet = { since: number | null; scans: number; candidates: number; last_rule_match_at: number | null; reasons: { reason: string; count: number; share: number | null }[] } | null;
 type LabBook = { id: string; name: string; starting_balance: number; balance: number; position: LabPosition | null; history: Position[]; why_quiet?: WhyQuiet };
@@ -355,6 +356,32 @@ export default function App() {
     });
   }, [state, filter, search]);
   const chartData = useMemo(() => (detail?.history || []).map(p => ({ ...p, label: timeLabel(p.ts) })), [detail]);
+  const coinTrades = useMemo(() => {
+    const rows = [...(detail?.trades || [])];
+    if (detail?.position && !rows.some(row => row.id === detail.position?.id)) rows.unshift(detail.position);
+    return rows.sort((a, b) => (b.opened_at || 0) - (a.opened_at || 0));
+  }, [detail]);
+  const tradeMarkers = useMemo(() => coinTrades.flatMap(trade => {
+    const markers: TradeMarker[] = [{
+      id: `${trade.id}-entry`, kind: 'entry' as const, ts: trade.opened_at,
+      price: trade.execution_entry_price ?? trade.entry_price, tradeNo: trade.trade_no,
+      pnlPct: trade.pnl_pct,
+    }];
+    const exitTs = trade.closed_at || 0;
+    const exitPrice = trade.execution_exit_price ?? trade.exit_price;
+    if (exitTs && exitPrice) markers.push({
+      id: `${trade.id}-exit`, kind: 'exit' as const, ts: exitTs,
+      price: exitPrice, tradeNo: trade.trade_no, pnlPct: trade.pnl_pct,
+    });
+    return markers;
+  }).filter(marker => marker.ts > 0 && marker.price > 0).slice(0, 12), [coinTrades]);
+  const chartTimeDomain = useMemo(() => {
+    const stamps = [...chartData.map(point => point.ts), ...tradeMarkers.map(marker => marker.ts)].filter(Boolean);
+    if (!stamps.length) return undefined;
+    const min = Math.min(...stamps), max = Math.max(...stamps);
+    const pad = Math.max(1_000, (max - min) * 0.03);
+    return [min - pad, max + pad] as [number, number];
+  }, [chartData, tradeMarkers]);
   const diagnostics = state?.entry_diagnostics;
   const rejectionRows = useMemo(() => Object.entries(diagnostics?.rejections || {}).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([key, count]) => ({ key, count, label: diagnostics?.reason_labels?.[key] || key })), [diagnostics]);
   const postGoldRejectionRows = useMemo(() => Object.entries(diagnostics?.post_signal_rejections || {}).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([key, count]) => ({ key, count, label: diagnostics?.reason_labels?.[key] || key })), [diagnostics]);
@@ -719,12 +746,20 @@ export default function App() {
             </Card>
 
             <Card kicker="Графика" title={`$${selectedCoin.symbol} / SOL`} right={<Activity className="h-4 w-4 text-emerald-300" />}>
+              {coinTrades.length > 0 && <div className="border-b border-white/[0.07] bg-white/[0.015] px-4 py-3">
+                <div className="mb-2 flex flex-wrap items-center gap-3 text-[9px] font-black uppercase tracking-[0.12em]"><span className="text-slate-500">NEO сделки върху този койн</span><span className="text-emerald-300">● Вход</span><span className="text-red-300">● Изход</span></div>
+                <div className="flex gap-2 overflow-x-auto pb-1">{coinTrades.slice(0, 6).map(trade => <div key={trade.id} className="min-w-[250px] rounded-xl border border-white/[0.07] bg-[#090c0f] px-3 py-2 text-[9px]">
+                  <div className="flex items-center justify-between gap-3"><span className="font-black text-white">#{trade.trade_no ?? '—'} · ${trade.symbol}</span><span className={`font-black ${(trade.pnl_pct ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{trade.closed_at ? `${signed(trade.pnl_pct ?? 0)}%` : 'ОТВОРЕНА'}</span></div>
+                  <div className="mt-1 text-slate-500"><span className="font-black text-emerald-300">ВХОД</span> {fullTimeLabel(trade.opened_at)} · {fmtPrice(trade.execution_entry_price ?? trade.entry_price)}</div>
+                  <div className="mt-0.5 text-slate-500"><span className="font-black text-red-300">ИЗХОД</span> {trade.closed_at ? `${fullTimeLabel(trade.closed_at)} · ${fmtPrice(trade.execution_exit_price ?? trade.exit_price ?? trade.current_price)}` : 'позицията още е отворена'}</div>
+                </div>)}</div>
+              </div>}
               {dexEmbed ? <iframe title={`${selectedCoin.symbol} live chart`} src={dexEmbed} className="h-[430px] w-full border-0 bg-[#07090b]" loading="lazy" /> : <div className="flex h-[430px] items-center justify-center text-xs text-slate-600">Няма pair chart.</div>}
             </Card>
             <div className="grid gap-4 lg:grid-cols-[1.1fr_.9fr]">
               <Card kicker="NEO" title="Цена по scan-ове" right={<Gauge className="h-4 w-4 text-emerald-300" />}>
                 <div className="p-4"><div className="h-[190px]">
-                  {chartData.length > 1 ? <ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData}><defs><linearGradient id="priceFill" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#34d399" stopOpacity={0.3} /><stop offset="95%" stopColor="#34d399" stopOpacity={0} /></linearGradient></defs><XAxis dataKey="label" hide /><YAxis domain={['dataMin', 'dataMax']} hide /><Tooltip contentStyle={{ background: '#0a0d10', border: '1px solid rgba(255,255,255,.1)', borderRadius: 12, fontSize: 11 }} formatter={(value: number | string) => [fmtPrice(Number(value)), 'Price']} labelFormatter={(label) => String(label)} /><Area type="monotone" dataKey="price" stroke="#34d399" fill="url(#priceFill)" strokeWidth={2} dot={false} /></AreaChart></ResponsiveContainer> : <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-white/[0.07] text-center text-[10px] leading-5 text-slate-600">Графиката се запълва след няколко scan-а.</div>}
+                  {chartData.length > 1 ? <ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData}><defs><linearGradient id="priceFill" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#34d399" stopOpacity={0.3} /><stop offset="95%" stopColor="#34d399" stopOpacity={0} /></linearGradient></defs><XAxis dataKey="ts" type="number" domain={chartTimeDomain ?? ['dataMin', 'dataMax']} hide /><YAxis domain={['dataMin', 'dataMax']} hide /><Tooltip contentStyle={{ background: '#0a0d10', border: '1px solid rgba(255,255,255,.1)', borderRadius: 12, fontSize: 11 }} formatter={(value: number | string) => [fmtPrice(Number(value)), 'Price']} labelFormatter={(label) => fullTimeLabel(Number(label))} /><Area type="monotone" dataKey="price" stroke="#34d399" fill="url(#priceFill)" strokeWidth={2} dot={false} />{tradeMarkers.map(marker => <ReferenceDot key={marker.id} x={marker.ts} y={marker.price} r={5} ifOverflow="extendDomain" fill={marker.kind === 'entry' ? '#34d399' : '#f87171'} stroke="#090c0f" strokeWidth={2} label={{ value: marker.kind === 'entry' ? `ВХОД #${marker.tradeNo ?? '—'}` : `ИЗХОД ${signed(marker.pnlPct ?? 0)}%`, position: marker.kind === 'entry' ? 'top' : 'bottom', fill: marker.kind === 'entry' ? '#6ee7b7' : '#fca5a5', fontSize: 8, fontWeight: 800 }} />)}</AreaChart></ResponsiveContainer> : <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-white/[0.07] text-center text-[10px] leading-5 text-slate-600">Графиката се запълва след няколко scan-а.</div>}
                 </div><div className="mt-3 grid grid-cols-4 gap-2 border-t border-white/[0.06] pt-3">{(['m5', 'h1', 'h6', 'h24'] as const).map(key => <div key={key}><div className="text-[8px] font-black text-slate-700">{key.toUpperCase()}</div><Change value={selectedCoin.priceChange[key]} compact /></div>)}</div></div>
               </Card>
               <Card kicker="NEO анализ" title={`Защо ${selectedCoin.posture}`} right={<ShieldCheck className="h-4 w-4 text-emerald-300" />}>
