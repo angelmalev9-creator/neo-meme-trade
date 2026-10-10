@@ -17,6 +17,7 @@ COMPACT_PATH=Path(os.getenv('NEO_STRATEGY_LAB_COMPACT_PATH',str(STATE_PATH.paren
 RESET_FLAG_PATH=Path(os.getenv('NEO_STRATEGY_LAB_RESET_FLAG','/var/lib/neo-market/strategy_lab.reset'))
 X_SIGNAL_PATH=Path(os.getenv('NEO_X_SIGNAL_STATE_PATH','/var/lib/neo-market/x_signal.json'))
 HYPE_PATH=Path(os.getenv('NEO_HYPE_STATE_PATH','/var/lib/neo-market/hype_radar.json'))
+LIVE_TAPE_PATH=Path(os.getenv('NEO_LIVE_TAPE_PATH','/var/lib/neo-market/live_tape.json'))
 START_BALANCE=float(os.getenv('NEO_LAB_START_BALANCE','500'))
 STRATEGY_START_BALANCES={'SCALPER':float(os.getenv('NEO_LAB_SCALPER_START_BALANCE','100'))}
 TRADE_NOTIONAL=float(os.getenv('NEO_LAB_TRADE_NOTIONAL','150'))
@@ -115,7 +116,7 @@ def atomic_write(data):
     atomic_write_path(STATE_PATH,data)
 
 def flow_map():
-    tape=load_json(Path('/var/lib/neo-market/live_tape.json'),{})
+    tape=load_json(LIVE_TAPE_PATH,{})
     cutoff=now_ms()-60_000
     out={}
     for e in tape.get('events',[]):
@@ -136,10 +137,11 @@ def enrich(c,flows):
     b=num(tx.get('buys')); s=num(tx.get('sells'))
     liq=num(c.get('liquidityUsd')); mc=num(c.get('marketCap') or c.get('fdv'))
     pc=c.get('priceChange') or {}
-    vol1h=num((c.get('volume') or {}).get('h1'))
+    volume=c.get('volume') or {}
+    vol1h=num(volume.get('h1')); vol5=num(volume.get('m5'))
     return {
       'score':num(c.get('score')),'liq':liq,'m5':num(pc.get('m5')),'h1':num(pc.get('h1')),
-      'bs':b/max(s,1),'lmc':liq/max(mc,1),'age':num(c.get('ageMinutes'),999999),
+      'bs':b/max(s,1),'tx5':b+s,'vol5':vol5,'lmc':liq/max(mc,1),'age':num(c.get('ageMinutes'),999999),
       'vol1h':vol1h,'vol_liq':vol1h/max(liq,1),'mc':mc,
       'flow':flows.get(c.get('address'),{'trades':0,'buys':0,'sells':0,'buy_usd':0,'sell_usd':0,'unique_wallets':0,'ratio':0,'max_sell':0})
     }
@@ -410,6 +412,10 @@ def maybe_open(feed,flows):
             if failed:
                 for reason in failed: reject(reason)
                 continue
+            quality=activity.profit_quality(features)
+            if not quality['allow']:
+                for reason in quality['failures']: reject(reason)
+                continue
             validation=price_integrity.check(coin)
             if validation.get('status')!='pass':
                 blocked_price+=1; reject('price_verification'); continue
@@ -433,11 +439,10 @@ def maybe_open(feed,flows):
             if strategy['id']=='X_SIGNAL':
                 signal=x_signals.get(coin.get('address')) or {}
                 priority=num(signal.get('post_created_at_ms') or signal.get('seen_at_ms'))
-                tiebreak=proposed['initial_pnl_pct']
+                tiebreak=activity.profit_quality_rank(features,proposed['initial_pnl_pct'])
             elif strategy['id']=='HYPE_RADAR':
-                # Hottest theme first; among equals the youngest pool (earliest entry).
                 priority=hype_matches[coin['address']]['score']
-                tiebreak=-num(features.get('age'),1e9)
+                tiebreak=(activity.profit_quality_rank(features,proposed['initial_pnl_pct']), -num(features.get('age'),1e9))
             elif strategy['id']=='MOMENTUM_HUNTER':
                 priority=activity.momentum_hunter_rank(features,proposed['initial_pnl_pct'])
                 if priority < activity.MOMENTUM_HUNTER_MIN_RANK:
@@ -445,8 +450,8 @@ def maybe_open(feed,flows):
                     continue
                 tiebreak=proposed['initial_pnl_pct']
             else:
-                priority=proposed['initial_pnl_pct']
-                tiebreak=num(features.get('score'))
+                priority=activity.profit_quality_rank(features,proposed['initial_pnl_pct'])
+                tiebreak=proposed['initial_pnl_pct']
             eligible.append((priority,tiebreak,coin,features,proposed))
         # Cumulative view, so the dashboard can say which condition keeps a quiet
         # book out of the market instead of showing one scan's snapshot.
@@ -466,7 +471,7 @@ def maybe_open(feed,flows):
             'price_verification_rejected':blocked_price,
             'rank_rejected':blocked_rank,'active_x_signals':len(x_signals) if strategy['id']=='X_SIGNAL' else None,
             'active_hype_themes':len(themes) if strategy['id']=='HYPE_RADAR' else None,
-            'selection_mode':('RECENT_X_SIGNAL_THEN_COST' if strategy['id']=='X_SIGNAL' else 'HYPE_SCORE_THEN_YOUNGEST' if strategy['id']=='HYPE_RADAR' else ('MOMENTUM_HUNTER_RANK_V1' if strategy['id']=='MOMENTUM_HUNTER' else 'LOWEST_COST_THEN_SCORE')),
+            'selection_mode':('RECENT_X_SIGNAL_THEN_QUALITY' if strategy['id']=='X_SIGNAL' else 'HYPE_SCORE_THEN_QUALITY' if strategy['id']=='HYPE_RADAR' else ('MOMENTUM_HUNTER_RANK_V1' if strategy['id']=='MOMENTUM_HUNTER' else 'PROFIT_QUALITY_RANK_V1')),
         }
         if not eligible:
             continue

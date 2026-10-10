@@ -8,7 +8,7 @@ import math
 import re
 from typing import Any, Callable
 
-POLICY_VERSION = 'LAB_ACTIVE_V3_MOMENTUM_HUNTER'
+POLICY_VERSION = 'LAB_PROFIT_QUALITY_V1'
 REENTRY_SECONDS = 60
 LOSS_REENTRY_SECONDS = 180
 MAX_FEED_AGE_MS = 20_000
@@ -163,6 +163,10 @@ REJECTION_LABELS = {
     'no_hype_match': 'името не съвпада с актуална hype тема', 'rug_check': 'rug проверката не е минала (блокирана или непотвърдена)',
     'price_verification': 'цената не мина проверката от втори източник', 'cooldown': 'cooldown след сделка',
     'cost': 'разходите за вход са над лимита', 'rank': 'рангът е под минимума',
+    'quality_score':'quality: слаб score','quality_liquidity':'quality: ниска ликвидност',
+    'quality_age':'quality: твърде късен pool','quality_momentum':'quality: неподходящ 5м ход',
+    'quality_buy_pressure':'quality: buy/sell извън силния диапазон','quality_volume_5m':'quality: слаб 5м volume',
+    'quality_activity_5m':'quality: малко 5м сделки','quality_flow_or_early':'quality: няма потвърден flow/силен early setup',
 }
 
 
@@ -210,6 +214,41 @@ def momentum_hunter_rank(f: dict[str, Any], entry_cost_pct: float = 0.0) -> floa
         + .04 * lmc + .06 * cost - .08 * sell_pressure
     )
     return round(max(0.0, min(1.0, rank)) * 100.0, 4)
+
+
+PROFIT_QUALITY_VERSION = 'QOMPUTE_STYLE_QUALITY_V1'
+
+def profit_quality(f: dict[str, Any]) -> dict[str, Any]:
+    flow = f.get('flow') or {}
+    score, liq = number(f.get('score')), number(f.get('liq'))
+    age, m5, bs = number(f.get('age'), math.inf), number(f.get('m5'), -math.inf), number(f.get('bs'))
+    vol5, tx5 = number(f.get('vol5')), number(f.get('tx5'))
+    flow_trades, flow_ratio = number(flow.get('trades')), number(flow.get('ratio'))
+    flow_buy, max_sell = number(flow.get('buy_usd')), number(flow.get('max_sell'))
+    verified_flow = flow_trades >= 2 and flow_ratio >= 1.15 and max_sell < max(750.0, flow_buy * 0.95)
+    exceptional_early = age <= 60 and bs >= 1.8 and vol5 >= 5000 and tx5 >= 30
+    checks = {
+        'quality_score': score >= 82, 'quality_liquidity': liq >= 15000, 'quality_age': age <= 240,
+        'quality_momentum': -4 <= m5 <= 22, 'quality_buy_pressure': 1.25 <= bs <= 4.5,
+        'quality_volume_5m': vol5 >= 2000, 'quality_activity_5m': tx5 >= 15,
+        'quality_flow_or_early': verified_flow or exceptional_early,
+    }
+    failures=[name for name,ok in checks.items() if not ok]
+    return {'version':PROFIT_QUALITY_VERSION,'allow':not failures,'failures':failures,
+            'verified_flow':verified_flow,'exceptional_early':exceptional_early}
+
+def profit_quality_rank(f: dict[str, Any], entry_cost_pct: float = 0.0) -> float:
+    flow=f.get('flow') or {}; clamp=lambda x:max(0.0,min(1.0,number(x)))
+    score=clamp((number(f.get('score'))-80)/20)
+    liq=clamp((math.log10(max(number(f.get('liq')),1.0))-4.0)/1.2)
+    bs=number(f.get('bs')); buy=clamp((bs-1.2)/1.8) if bs<=3 else clamp(1-(bs-3)/2)
+    vol5=clamp(number(f.get('vol5'))/20000); tx5=clamp(number(f.get('tx5'))/120)
+    age=number(f.get('age'),999999); fresh=1.0 if age<=45 else clamp(1-(age-45)/195)
+    m5=number(f.get('m5')); mom=clamp((m5+2)/12) if m5<=10 else clamp(1-(m5-10)/20)
+    fr=clamp((number(flow.get('ratio'))-1)/2); ft=clamp(number(flow.get('trades'))/10)
+    cost=clamp(max(0.0,-number(entry_cost_pct))/max(MAX_ENTRY_COST_PCT,.01))
+    rank=.16*score+.12*liq+.16*buy+.14*vol5+.10*tx5+.12*fresh+.08*mom+.07*fr+.03*ft+.02*(1-cost)
+    return round(rank*100,4)
 
 
 def cooldown_remaining_ms(book: dict, address: str, now: int) -> int:
@@ -271,4 +310,5 @@ def policy_config() -> dict:
             'feed_max_age_seconds': MAX_FEED_AGE_MS / 1000,
             'exit_overrides': EXIT_OVERRIDES, 'entry_cost_caps': ENTRY_COST_CAPS,
             'rejection_labels': REJECTION_LABELS, 'sniper_ids': sorted(SNIPER_IDS), 'limit_take_profit_ids': sorted(LIMIT_TAKE_PROFIT_IDS), 'sniper_poll_seconds': SNIPER_POLL_SECONDS,
+            'profit_quality_version': PROFIT_QUALITY_VERSION,
             'execution_basis': 'ESTIMATED_PAPER_COSTS_NOT_LIVE_FILLS'}

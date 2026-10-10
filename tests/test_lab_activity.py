@@ -20,7 +20,7 @@ def coin():
     return {'address':ADDRESS,'pairAddress':PAIR,'symbol':'TEST','name':'Test',
             'priceUsd':.01,'priceNative':.00008,'marketCap':1e6,'liquidityUsd':1e6,
             'dexId':'raydium','updatedAt':NOW,'score':100,'ageMinutes':50,
-            'priceChange':{'m5':12,'h1':50},'volume':{'h1':1e6},
+            'priceChange':{'m5':12,'h1':50},'volume':{'m5':15000,'h1':1e6},
             'txns':{'m5':{'buys':60,'sells':20}}}
 
 def flows():
@@ -62,6 +62,17 @@ class ActivityTests(unittest.TestCase):
                'age':max(10,rule.age[0]),'h1':max(20,rule.hour[0]),
                'vol_liq':max(1,rule.volume_liquidity[0]),'mc':1e6,'flow':flows()[ADDRESS]}
             self.assertTrue(rule.matches(f),key)
+
+    def test_profit_quality_requires_real_short_term_demand(self):
+        f=lab.enrich(coin(),flows())
+        quality=a.profit_quality(f)
+        self.assertTrue(quality['allow'])
+        self.assertGreater(a.profit_quality_rank(f,-1.0),40)
+        weak={**f,'bs':1.0,'vol5':500,'tx5':4,'age':400,'flow':{'trades':0,'ratio':0,'buy_usd':0,'max_sell':0}}
+        result=a.profit_quality(weak)
+        self.assertFalse(result['allow'])
+        self.assertIn('quality_buy_pressure',result['failures'])
+        self.assertIn('quality_flow_or_early',result['failures'])
 
     def test_no_low_liquidity_or_missing_prices(self):
         c=coin();self.assertTrue(a.usable_feed_coin(c,NOW))
@@ -244,7 +255,7 @@ class TikTokStrategyTests(unittest.TestCase):
 
     def test_real_pool_fee_is_charged_and_low_cap_entry_fits_only_tiktok(self):
         # PumpSwap near a $30k market cap: 125 bps per side in the lab cost model.
-        c={**coin(),'dexId':'pumpswap','marketCap':30000,'liquidityUsd':200000,'score':70,
+        c={**coin(),'dexId':'pumpswap','marketCap':30000,'liquidityUsd':200000,'score':85,
            'priceChange':{'m5':5,'h1':5}}
         self.assertEqual(lab.pumpswap_fee_bps(c),125.0)
         self.assertIsNone(a.affordable_entry(c,500,150,lab.entry_execution,lab.exit_execution))
@@ -262,7 +273,7 @@ class TikTokStrategyTests(unittest.TestCase):
         self.assertEqual(a.entry_cost_cap('SCALPER'),a.MAX_ENTRY_COST_PCT)
 
     def test_cost_cap_still_rejects_expensive_entries(self):
-        c={**coin(),'dexId':'pumpswap','marketCap':30000,'liquidityUsd':10000,'score':70}
+        c={**coin(),'dexId':'pumpswap','marketCap':30000,'liquidityUsd':15000,'score':85}
         with patch.object(lab,'now_ms',return_value=NOW):lab.maybe_open([c],{})
         book=lab.STATE['books']['TIKTOK']
         if book['position']:   # size was cut until the round trip fits the cap
@@ -384,7 +395,7 @@ class HypeRadarBookTests(unittest.TestCase):
         lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
 
     def feed(self,**coin_over):
-        return [{**coin(),'symbol':'RDOG','name':'Robot Dog','score':65,'liquidityUsd':12000,'marketCap':45000,'updatedAt':NOW,**coin_over}]
+        return [{**coin(),'symbol':'RDOG','name':'Robot Dog','score':85,'liquidityUsd':20000,'marketCap':45000,'updatedAt':NOW,**coin_over}]
 
     def test_configured_like_tiktok_with_theme_and_rug_gates(self):
         self.assertEqual(lab.book_exit_rules('HYPE_RADAR'),{'stop_loss':12,'take_profit':17,'max_hold_minutes':60})
