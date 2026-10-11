@@ -73,10 +73,10 @@ def follow(root, config):
                         if row.get('id') in engine.state['seen_ids']:
                             cursor_needs_save = True
                             continue
-                        engine.ingest(row)
+                        engine.ingest(row, persist=False)
                         changed = True
                         cursor_needs_save = False
-                if cursor_needs_save:
+                if changed or cursor_needs_save:
                     engine.state['recording_start_offset'] = offset
                     engine.save()
             if changed or not source.exists() or minimum_time:
