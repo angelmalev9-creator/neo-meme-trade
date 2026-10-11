@@ -111,7 +111,8 @@ class TrainingBridgeProcessTests(unittest.TestCase):
         self.assertEqual(saved["config"]["latency_ms"], 777)
         self.assertIsNone(json.loads((self.root / "worker_config.json").read_text(encoding="utf-8")))
 
-    def test_oversized_journal_pauses_recording_without_deleting_it(self):
+    def test_oversized_journal_is_archived_and_recording_recovers(self):
+        PaperTrainingEngine(self.root / "training.json")
         journal = self.root / "observations.jsonl"
         journal.write_bytes(b"x" * 1024)
         with patch.dict("os.environ", {"NEO_TRAINING_MAX_JOURNAL_BYTES": str(64 * 1024 * 1024)}):
@@ -119,15 +120,29 @@ class TrainingBridgeProcessTests(unittest.TestCase):
             with journal.open("r+b") as handle:
                 handle.truncate(65 * 1024 * 1024)
             self.start()
-            end = time.monotonic() + 2
-            while time.monotonic() < end and not self.bridge.paused_reason:
-                time.sleep(.01)
-            self.assertIsNotNone(self.bridge.paused_reason)
-            self.assertIsNone(self.bridge.process)
-            self.assertFalse(self.bridge.accepting())
-            coin, flow, *_ = inputs(int(time.time() * 1000))
-            self.assertFalse(self.bridge.observe(coin, flow))
-            self.assertEqual(journal.stat().st_size, 65 * 1024 * 1024)
+            self.wait_for(lambda snap:snap["unique_observations"] == 0)
+            self.assertIsNone(self.bridge.paused_reason)
+            self.assertIsNotNone(self.bridge.process)
+            self.assertTrue(self.bridge.accepting())
+            self.assertEqual(journal.stat().st_size, 0)
+            archived = list((self.root / "archive").glob("journal-*/observations.jsonl"))
+            self.assertEqual(len(archived), 1)
+            self.assertEqual(archived[0].stat().st_size, 65 * 1024 * 1024)
+            saved = json.loads((self.root / "training.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["recording_start_offset"], 0)
+
+    def test_passive_and_rejection_observations_are_sampled_but_proof_is_immediate(self):
+        with patch.dict("os.environ", {"NEO_TRAINING_OBSERVE_MIN_INTERVAL_MS": "30000"}):
+            self.start()
+        at = int(time.time() * 1000)
+        coin, flow, safety, validation, quotes = inputs(at)
+        with patch.object(self.bridge, "submit", return_value=True) as submit:
+            self.assertTrue(self.bridge.observe(coin, flow, now=at))
+            self.assertFalse(self.bridge.observe(coin, flow, now=at+1000))
+            self.assertTrue(self.bridge.observe(coin, flow, reasons=["score"], now=at+1000))
+            self.assertFalse(self.bridge.observe(coin, flow, reasons=["score"], now=at+2000))
+            self.assertTrue(self.bridge.observe(coin, flow, safety=safety, validation=validation, quotes=quotes, now=at+2000))
+            self.assertEqual(submit.call_count, 3)
 
     def test_process_restart_recovers_pending_and_durable_completed_results(self):
         self.start()
@@ -135,6 +150,8 @@ class TrainingBridgeProcessTests(unittest.TestCase):
         self.observe(at)
         first = self.wait_for(lambda s:s["unique_observations"] == 1)
         self.assertEqual(self.control(first)["pending_orders"], 1)
+        saved = json.loads((self.root / "training.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved.get("recording_start_offset"), (self.root / "observations.jsonl").stat().st_size)
         first_pid = self.bridge.process.pid
         self.stop(); self.start()
         restored = self.wait_for(lambda s:s["unique_observations"] == 1)

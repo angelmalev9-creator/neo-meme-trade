@@ -20,6 +20,7 @@ from paper_training import USDC, digest, number, raw_int
 _BRIDGE = None
 ROUTE_EVIDENCE_TTL_MS = 30_000
 DEFAULT_MAX_JOURNAL_BYTES = 2 * 1024 * 1024 * 1024
+DEFAULT_OBSERVATION_INTERVAL_MS = 30_000
 SOL = 'So11111111111111111111111111111111111111112'
 
 
@@ -45,18 +46,50 @@ class TrainingBridge:
         self.process = None
         self.closed = False
         self.max_journal_bytes = max(64 * 1024 * 1024, int(os.getenv('NEO_TRAINING_MAX_JOURNAL_BYTES', str(DEFAULT_MAX_JOURNAL_BYTES))))
+        self.min_observation_interval_ms = max(0, int(os.getenv('NEO_TRAINING_OBSERVE_MIN_INTERVAL_MS', str(DEFAULT_OBSERVATION_INTERVAL_MS))))
+        self.last_observed = {}
+        self.recovery_note = None
         journal = self.root / 'observations.jsonl'
         try:
             self.journal_bytes = journal.stat().st_size
         except OSError:
             self.journal_bytes = 0
-        self.paused_reason = (
-            f'Training journal safety cap exceeded ({self.journal_bytes} > {self.max_journal_bytes}); recording paused'
-            if self.journal_bytes > self.max_journal_bytes else None
-        )
+        self.paused_reason = None
+        if self.journal_bytes > self.max_journal_bytes:
+            try:
+                archive = self._rotate_journal(journal, 'startup_safety_cap', reset_cursor=True)
+                self.recovery_note = f'Oversized training journal archived to {archive.name}; recording resumed'
+                self.journal_bytes = 0
+            except Exception as exc:
+                self.paused_reason = f'Training journal recovery failed: {type(exc).__name__}: {exc}'
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name='paper-training', daemon=True)
         self.thread.start()
+
+    def _rotate_journal(self, journal, reason, *, reset_cursor=False):
+        """Atomically retire a full recorder journal without resetting learned PAPER state."""
+        stamp = int(time.time() * 1000)
+        archive_dir = self.root / 'archive' / f'journal-{stamp}'
+        archive_dir.mkdir(parents=True, exist_ok=False)
+        archive = archive_dir / 'observations.jsonl'
+        size = journal.stat().st_size if journal.exists() else 0
+        if journal.exists():
+            os.replace(journal, archive)
+        journal.touch(mode=0o600, exist_ok=True)
+        if reset_cursor:
+            state_path = self.root / 'training.json'
+            if state_path.exists():
+                state = json.loads(state_path.read_text(encoding='utf-8'))
+                state['recording_start_offset'] = 0
+                state['journal_rotation_at'] = stamp
+                state['journal_rotation_reason'] = reason
+                atomic_json(state_path, state)
+        atomic_json(archive_dir / 'manifest.json', {
+            'at': stamp, 'reason': reason, 'bytes': size,
+            'active_journal': str(journal), 'archive': str(archive),
+            'learned_state_preserved': True,
+        })
+        return archive
 
     def accepting(self):
         if getattr(self, 'closed', False) or getattr(self, 'paused_reason', None):
@@ -127,10 +160,22 @@ class TrainingBridge:
                     else:
                         # Persist provenance before evaluating. Accepted observations are
                         # a replayable shared stream, not a count of independent trades.
-                        with (self.root / 'observations.jsonl').open('a', encoding='utf-8') as handle:
-                            handle.write(json.dumps(item, ensure_ascii=False, allow_nan=False)+'\n')
+                        journal = self.root / 'observations.jsonl'
+                        encoded = json.dumps(item, ensure_ascii=False, allow_nan=False)+'\n'
+                        encoded_bytes = len(encoded.encode('utf-8'))
+                        try:
+                            current_bytes = journal.stat().st_size
+                        except OSError:
+                            current_bytes = 0
+                        if current_bytes and current_bytes + encoded_bytes > self.max_journal_bytes:
+                            archive = self._rotate_journal(journal, 'runtime_safety_cap', reset_cursor=False)
+                            self.recovery_note = f'Training journal rotated to {archive.name}; recording continued'
+                            current_bytes = 0
+                        with journal.open('a', encoding='utf-8') as handle:
+                            handle.write(encoded)
                             handle.flush()
                             os.fsync(handle.fileno())
+                        self.journal_bytes = current_bytes + encoded_bytes
                         self.processed += 1
                     self.read_snapshot()
                 except Exception as exc:
@@ -317,6 +362,22 @@ class TrainingBridge:
         if not mint or not pair:
             return False
         key = (mint, pair)
+        # Full-feed scans can revisit the same pool every few seconds. Keep one
+        # passive/rejection sample per interval, while quote/safety evidence is
+        # always recorded immediately. This bounds disk/I/O without weakening
+        # the trading engine or fabricating training observations.
+        critical = bool(safety is not None or validation is not None or quotes)
+        sample_kind = ('rejection', tuple(sorted(set(reasons or [])))) if reasons else ('passive',)
+        sample_key = (mint, pair, sample_kind)
+        interval_ms = int(getattr(self, 'min_observation_interval_ms', 0) or 0)
+        observed_cache = getattr(self, 'last_observed', None)
+        if observed_cache is None:
+            observed_cache = self.last_observed = {}
+        if not critical and interval_ms:
+            with self.lock:
+                previous = int(observed_cache.get(sample_key) or 0)
+            if previous and stamp >= previous and stamp - previous < interval_ms:
+                return False
         with self.lock:
             cached = self.cache.setdefault(key, {})
             if safety is not None:
@@ -392,7 +453,11 @@ class TrainingBridge:
         }
         # Two distinct safety/quote updates in one millisecond must not collide.
         observation['id'] = digest(observation)
-        return self.submit(observation)
+        submitted = self.submit(observation)
+        if submitted and not critical and interval_ms:
+            with self.lock:
+                observed_cache[sample_key] = stamp
+        return submitted
 
 
 def start(root=None, config=None):
@@ -427,6 +492,7 @@ def snapshot():
                               'dropped': _BRIDGE.dropped, 'error': _BRIDGE.error,
                               'accepting': _BRIDGE.accepting(),
                               'paused_reason': getattr(_BRIDGE, 'paused_reason', None),
+                              'recovery_note': getattr(_BRIDGE, 'recovery_note', None),
                               'journal_bytes': journal_bytes}
         if _BRIDGE.error or not result['recorder']['accepting']:
             result['status'] = 'degraded'

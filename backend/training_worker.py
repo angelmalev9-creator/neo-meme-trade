@@ -49,6 +49,7 @@ def follow(root, config):
                 engine.save()
                 request.unlink()
             changed = False
+            cursor_needs_save = False
             if source.exists():
                 # Replay the durable journal after a crash; existing IDs are skipped.
                 # Partial final lines are retained for the next pass, never discarded.
@@ -62,12 +63,22 @@ def follow(root, config):
                             break
                         offset += len(line)
                         row = json.loads(line)
+                        # Persist the durable cursor in the same state write as the
+                        # observation. Restarts therefore resume near the tail instead
+                        # of replaying gigabytes of already-consumed rows.
+                        engine.state['recording_start_offset'] = offset
                         if int(row.get('available_at', 0)) < minimum_time:
+                            cursor_needs_save = True
                             continue
                         if row.get('id') in engine.state['seen_ids']:
+                            cursor_needs_save = True
                             continue
                         engine.ingest(row)
                         changed = True
+                        cursor_needs_save = False
+                if cursor_needs_save:
+                    engine.state['recording_start_offset'] = offset
+                    engine.save()
             if changed or not source.exists() or minimum_time:
                 atomic_json(root / 'training_snapshot.json', engine.snapshot())
             time.sleep(.05)
