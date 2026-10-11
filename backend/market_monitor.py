@@ -2906,7 +2906,10 @@ class Monitor:
             # slice of the historical rolling universe. Other profiles keep the
             # broader newborn-pool discovery path unchanged.
             direct_dex_latest = BUY_PRESSURE_FIXED
-            early_pairs = [] if direct_dex_latest else gecko_new_pumpswap_pairs()
+            # Brand-new Pump.fun/PumpSwap pools are always urgent. The fixed
+            # strategy still uses the exact current discovery snapshot, but it no
+            # longer waits for DexScreener profile/boost indexing before seeing a launch.
+            early_pairs = gecko_new_pumpswap_pairs()
             for early_pair in early_pairs:
                 address = str((early_pair.get('baseToken') or {}).get('address') or '')
                 if not address:
@@ -2936,7 +2939,7 @@ class Monitor:
                 # latest-candidate scan with stale names.
                 latest_sources = {
                     'latest', 'recent-updates', 'boosted-latest',
-                    'community-takeover', 'ads-latest',
+                    'community-takeover', 'ads-latest', 'gecko-new-pools',
                 }
                 discovered_snapshot = [
                     address for address in discovered_snapshot
