@@ -36,12 +36,13 @@ STICKY_MS = max(FLOW_WINDOW_MS, int(float(os.getenv('NEO_TAPE_STICKY_SECONDS', '
 RPC_BATCH = max(1, min(60, int(os.getenv('NEO_TAPE_RPC_BATCH_SIZE', '60'))))
 # The tape is a pre-warm layer, not an entry gate. Track a wider set of young
 # near-setup pools so verified order-flow already exists if/when the stricter
-# EARLY_BUY_PRESSURE entry rules later become true.
-MIN_SCORE = float(os.getenv('NEO_TAPE_OCT4_MIN_SCORE', '45'))
-MIN_LIQUIDITY = float(os.getenv('NEO_TAPE_OCT4_MIN_LIQUIDITY', '5000'))
-MIN_M5 = float(os.getenv('NEO_TAPE_OCT4_MIN_M5', '-8'))
-MAX_M5 = float(os.getenv('NEO_TAPE_OCT4_MAX_M5', '22'))
-MAX_AGE_MINUTES = float(os.getenv('NEO_TAPE_OCT4_MAX_AGE_MINUTES', '185'))
+# EARLY_BUY_PRESSURE entry rules later become true. These thresholds are tape-only:
+# they deliberately do not weaken the market engine's entry vetoes.
+MIN_SCORE = float(os.getenv('NEO_TAPE_OCT4_MIN_SCORE', '20'))
+MIN_LIQUIDITY = float(os.getenv('NEO_TAPE_OCT4_MIN_LIQUIDITY', '1500'))
+MIN_M5 = float(os.getenv('NEO_TAPE_OCT4_MIN_M5', '-25'))
+MAX_M5 = float(os.getenv('NEO_TAPE_OCT4_MAX_M5', '35'))
+MAX_AGE_MINUTES = float(os.getenv('NEO_TAPE_OCT4_MAX_AGE_MINUTES', '240'))
 
 SESSION = requests.Session()
 SESSION.headers.update({'content-type': 'application/json', 'user-agent': 'NEO-LiveTape-Oct4/1.0'})

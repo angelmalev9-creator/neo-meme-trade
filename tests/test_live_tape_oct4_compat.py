@@ -61,8 +61,13 @@ class Oct4CompatPrewarmTests(unittest.TestCase):
         }
 
     def test_prewarm_accepts_near_setup_before_full_entry_threshold(self):
-        self.assertTrue(tape.preflow_candidate(self.coin('near', score=50, liquidity=9000, age=40)))
-        self.assertFalse(tape.preflow_candidate(self.coin('stale', score=90, liquidity=50000, age=200)))
+        self.assertTrue(tape.preflow_candidate(self.coin('near', score=35, liquidity=3000, age=70, m5=25)))
+        self.assertFalse(tape.preflow_candidate(self.coin('stale', score=90, liquidity=50000, age=260)))
+
+    def test_prewarm_is_broader_than_engine_but_still_bounded(self):
+        self.assertTrue(tape.preflow_candidate(self.coin('young-low-score', score=24, liquidity=3300, age=28, m5=-6)))
+        self.assertFalse(tape.preflow_candidate(self.coin('too-thin', score=80, liquidity=1200, age=20)))
+        self.assertFalse(tape.preflow_candidate(self.coin('already-vertical', score=95, liquidity=40000, age=10, m5=45)))
 
     def test_feed_snapshot_prioritizes_buy_pressure(self):
         weak = self.coin('weak', score=70, liquidity=20000, buys=20, sells=18, volume=3000)
