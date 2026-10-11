@@ -58,6 +58,24 @@ class BuyPressureGateTests(unittest.TestCase):
         )
         self.assertIn("short_m1_volume", reasons)
 
+    def test_coin_younger_than_five_seconds_waits(self):
+        coin = self.coin(age=4/60)
+        reasons = monitor.buy_pressure_rejections(
+            coin,
+            {"trades": 3, "buys": 3, "sells": 0, "buy_usd": 400, "sell_usd": 0, "buy_sell_usd_ratio": 400, "max_sell_usd": 0},
+            {"conviction": 60},
+        )
+        self.assertIn("too_fresh", reasons)
+
+    def test_coin_five_seconds_old_can_continue(self):
+        coin = self.coin(age=5/60)
+        reasons = monitor.buy_pressure_rejections(
+            coin,
+            {"trades": 3, "buys": 3, "sells": 0, "buy_usd": 400, "sell_usd": 0, "buy_sell_usd_ratio": 400, "max_sell_usd": 0},
+            {"conviction": 60},
+        )
+        self.assertNotIn("too_fresh", reasons)
+
 
 if __name__ == "__main__":
     unittest.main()
