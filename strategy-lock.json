@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-09",
   "source_commit": "MAIN_FIXED_NET_4_10_20261009",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "e62eb1b8cf4ec1bfbd6326e0c24b1fd200f02f95b3787a11baf78285e27499fa",
+  "sha256": "290044f3e6874ef37b6350ad78c87fecad2f85863fc82530fe6b478e0f49274f",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE_LEARNING",
   "rules": {
     "max_positions": 8,
