@@ -22,9 +22,11 @@ def compact_strategy_lab(data):
     if not isinstance(data, dict):
         return {'status': 'offline', 'books': {}, 'stats': {}}
 
+    activity_config = data.get('activity_config') if isinstance(data.get('activity_config'), dict) else {}
+    disabled = {str(book_id) for book_id in (activity_config.get('disabled_strategy_ids') or [])}
     books = {}
     for key, raw in (data.get('books') or {}).items():
-        if not isinstance(raw, dict):
+        if key in disabled or not isinstance(raw, dict):
             continue
         position = raw.get('position')
         if isinstance(position, dict):
@@ -44,14 +46,16 @@ def compact_strategy_lab(data):
             'why_quiet': why_quiet(raw),
         }
 
+    raw_stats = data.get('stats') if isinstance(data.get('stats'), dict) else {}
+    stats = {key: value for key, value in raw_stats.items() if key not in disabled}
     result = {
         'started_at': data.get('started_at'),
         'updated_at': data.get('updated_at'),
         'status': data.get('status', 'offline'),
         'books': books,
-        'stats': data.get('stats') or {},
+        'stats': stats,
         'data_integrity_note': data.get('data_integrity_note'),
-        'activity_config': data.get('activity_config') or {},
+        'activity_config': activity_config,
     }
 
     paired = data.get('paired')

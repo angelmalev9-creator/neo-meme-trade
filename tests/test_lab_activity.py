@@ -417,6 +417,14 @@ class HypeRadarBookTests(unittest.TestCase):
         self.assertIn('HYPE_RADAR', a.DISABLED_STRATEGY_IDS)
         self.assertIn('HYPE_RADAR', a.policy_config()['disabled_strategy_ids'])
 
+    def test_persistently_weak_flow_books_are_retired(self):
+        retired = {
+            'BREAKOUT_CONFIRM', 'LIQ_FLOW_CONFLUENCE', 'EARLY_FLOW',
+            'HIGH_SCORE_FLOW', 'FLOW_SNIPER', 'VOLUME_QUALITY',
+        }
+        self.assertTrue(retired.issubset(a.DISABLED_STRATEGY_IDS))
+        self.assertTrue(retired.issubset(set(a.policy_config()['disabled_strategy_ids'])))
+
     def test_retired_hype_book_cannot_open_new_positions(self):
         candidate={**coin(),'symbol':'RDOG','name':'Robot Dog','score':100,'liquidityUsd':50000,'marketCap':100000,'updatedAt':NOW}
         with patch.object(lab,'hype_themes',side_effect=AssertionError('retired Hype collector must not be queried')), patch.object(lab,'now_ms',return_value=NOW):
