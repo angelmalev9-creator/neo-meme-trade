@@ -212,14 +212,21 @@ class TikTokStrategyTests(unittest.TestCase):
                     self.assertEqual(book['history'][0]['exit_reason'],reason)
                     self.assertAlmostEqual(book['balance'],500+net-100)
 
-    def test_gap_through_the_stop_is_booked_in_full(self):
+    def test_tiktok_hard_stop_caps_future_paper_loss_at_minus_12(self):
         self.position('TIKTOK');self.mark(95);self.mark(60)
         trade=lab.STATE['books']['TIKTOK']['history'][0]
-        self.assertEqual((trade['exit_reason'],trade['pnl_pct']),('STOP_LOSS_12_NET',-40))
-        self.assertEqual((trade['exit_fill_model'],trade['observed_exit_pnl_pct']),('MARKET_AT_OBSERVED_MARK',-40))
-        # The previous mark is kept so the jump is visible afterwards.
+        self.assertEqual((trade['exit_reason'],trade['pnl_pct'],trade['pnl_usd']),('STOP_LOSS_12_NET',-12,-12))
+        self.assertEqual((trade['exit_fill_model'],trade['observed_exit_pnl_pct']),('HARD_STOP_AT_TARGET',-40))
+        # Keep the observed gap for audit, while the PAPER rule books the hard stop at -12%.
         self.assertEqual((trade['pre_exit_pnl_pct'],trade['pre_exit_gap_seconds']),(-5,0))
-        self.assertAlmostEqual(lab.STATE['books']['TIKTOK']['balance'],460)
+        self.assertAlmostEqual(lab.STATE['books']['TIKTOK']['balance'],488)
+
+    def test_hard_stop_is_tiktok_only(self):
+        self.assertEqual(a.HARD_STOP_LOSS_IDS,frozenset({'TIKTOK'}))
+        self.position('X_SIGNAL');self.mark(60)
+        trade=lab.STATE['books']['X_SIGNAL']['history'][0]
+        self.assertEqual((trade['exit_reason'],trade['pnl_pct'],trade['exit_fill_model']),
+                         ('STOP_LOSS_12_NET',-40,'MARKET_AT_OBSERVED_MARK'))
 
     def test_take_profit_is_a_limit_booked_at_exactly_17(self):
         self.position('TIKTOK');self.mark(131)

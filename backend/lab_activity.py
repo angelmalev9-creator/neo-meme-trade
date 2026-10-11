@@ -146,9 +146,11 @@ ENTRY_COST_CAPS = {
 # Books whose open position is re-checked on the fast interval.
 SNIPER_IDS = frozenset({'TIKTOK', 'X_SIGNAL', 'HYPE_RADAR'})
 # Books whose take profit is a resting limit order: once the net mark reaches
-# the target the sale is booked at the target, never above it. The stop is a
-# market sale and is always booked at the observed mark, including any gap.
+# the target the sale is booked at the target, never above it.
 LIMIT_TAKE_PROFIT_IDS = frozenset({'TIKTOK', 'X_SIGNAL', 'HYPE_RADAR'})
+# PAPER-only hard stop: TikTok books future stop exits at exactly -12% net.
+# This is a simulation rule, not a claim that a real market stop can always fill without slippage/gaps.
+HARD_STOP_LOSS_IDS = frozenset({'TIKTOK'})
 SNIPER_POLL_SECONDS = 1.0
 
 
@@ -309,6 +311,6 @@ def policy_config() -> dict:
             'max_entry_roundtrip_cost_pct': MAX_ENTRY_COST_PCT,
             'feed_max_age_seconds': MAX_FEED_AGE_MS / 1000,
             'exit_overrides': EXIT_OVERRIDES, 'entry_cost_caps': ENTRY_COST_CAPS,
-            'rejection_labels': REJECTION_LABELS, 'sniper_ids': sorted(SNIPER_IDS), 'limit_take_profit_ids': sorted(LIMIT_TAKE_PROFIT_IDS), 'sniper_poll_seconds': SNIPER_POLL_SECONDS,
+            'rejection_labels': REJECTION_LABELS, 'sniper_ids': sorted(SNIPER_IDS), 'limit_take_profit_ids': sorted(LIMIT_TAKE_PROFIT_IDS), 'hard_stop_loss_ids': sorted(HARD_STOP_LOSS_IDS), 'sniper_poll_seconds': SNIPER_POLL_SECONDS,
             'profit_quality_version': PROFIT_QUALITY_VERSION,
             'execution_basis': 'ESTIMATED_PAPER_COSTS_NOT_LIVE_FILLS'}

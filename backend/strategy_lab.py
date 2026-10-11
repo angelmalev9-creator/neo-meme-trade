@@ -260,14 +260,15 @@ def close_position(book,pos,coin,reason,limit_net_pct=None):
     original_notional=num(pos.get('notional_usd'))
     pct=total_pnl/max(original_notional,1e-18)*100
     observed_pct=pct; fill_price=quote['fill_price']; fill_model='MARKET_AT_OBSERVED_MARK'
-    if limit_net_pct is not None and pct>limit_net_pct:
-        # Resting limit order: it fills at its own level, so the result can be
-        # lowered to the target but never raised. Losses are never adjusted.
-        limited_final=original_notional*limit_net_pct/100-partial_pnl
-        proceeds=max(quote['net_proceeds_usd'],1e-18)
-        fill_price*=max(0.0,limited_final+cost_basis)/proceeds
-        final_pnl=limited_final; total_pnl=partial_pnl+final_pnl; pct=limit_net_pct
-        fill_model='LIMIT_AT_TARGET'
+    if limit_net_pct is not None:
+        is_hard_stop=reason.startswith('STOP_LOSS_')
+        should_cap=(pct<limit_net_pct) if is_hard_stop else (pct>limit_net_pct)
+        if should_cap:
+            limited_final=original_notional*limit_net_pct/100-partial_pnl
+            proceeds=max(quote['net_proceeds_usd'],1e-18)
+            fill_price*=max(0.0,limited_final+cost_basis)/proceeds
+            final_pnl=limited_final; total_pnl=partial_pnl+final_pnl; pct=limit_net_pct
+            fill_model='HARD_STOP_AT_TARGET' if is_hard_stop else 'LIMIT_AT_TARGET'
     book['balance']=round(num(book['balance'])+final_pnl,8)
     trade={**pos,'exit_price':market_price,'execution_exit_price':round(fill_price,12),
            'closed_at':now_ms(),'exit_reason':reason,'exit_fill_model':fill_model,
@@ -339,7 +340,11 @@ def update_positions(flows):
         if reason:
             # pos still holds the previous mark, so the trade records how far
             # and how fast the price moved between the last two observations.
-            limit=ex['take_profit'] if reason.startswith('TAKE_PROFIT_') and book['id'] in activity.LIMIT_TAKE_PROFIT_IDS else None
+            limit=None
+            if reason.startswith('TAKE_PROFIT_') and book['id'] in activity.LIMIT_TAKE_PROFIT_IDS:
+                limit=ex['take_profit']
+            elif reason.startswith('STOP_LOSS_') and book['id'] in activity.HARD_STOP_LOSS_IDS:
+                limit=-ex['stop_loss']
             close_position(book,pos,coin,reason,limit)
             continue
         pos.update({'current_price':price,'peak_price':peak,'execution_exit_price':round(live_quote['fill_price'],12),
