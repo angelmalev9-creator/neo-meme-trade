@@ -3,7 +3,7 @@
   "locked_at_utc": "2026-10-09",
   "source_commit": "MAIN_FIXED_NET_4_10_20261009",
   "strategy_file": "backend/market_monitor.py",
-  "sha256": "290044f3e6874ef37b6350ad78c87fecad2f85863fc82530fe6b478e0f49274f",
+  "sha256": "310f727a9a4f6eaf98f489ca92bee7e06eb33151ddff7dfdafec91043f6cf79e",
   "production_strategy_id": "ORDER_FLOW_ADAPTIVE_LEARNING",
   "rules": {
     "max_positions": 8,
@@ -70,7 +70,7 @@
     "backend/adaptive_learning.py": "c8203a85076c810621dcf132ddafe58e0fa1878375f22ca4f0418b0f8a350d81",
     "backend/astra6_brain.py": "2b5ec59be59a93122ce6c08bedd1205c6330d12af75211c60336f616f17390de",
     "backend/compat_file_lock.py": "8ba79d6e53250fba0a3f0dc2f997ed89094210d170d84c4b66c200f5ab9d64df",
-    "backend/engine_entry_policy.py": "e1553cd9fe0fa6d42be17145cb3b45cfb8ff8c1744d05adefc57efc1ea613308",
+    "backend/engine_entry_policy.py": "293dd13209a0ff472c18a271d0628134aec17f4faecef8d78a3f213c4e98b272",
     "backend/engine_execution.py": "2a4f68ef51327a1fbc5cb1a80c2de2ddbae2a52a39ac7dcdc495fa686dabb20a",
     "backend/engine_exit_policy.py": "1246662f1f31d8bdcec33dfab86857952d0fa6a238e09e44334d310e0e876667",
     "backend/engine_rug_guard.py": "5c732df903fdfcb692a8b2d64afd1276f1350658471d17c4c8363cefd58ae7e3",

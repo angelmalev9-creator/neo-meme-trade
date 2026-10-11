@@ -34,6 +34,30 @@ class BuyPressureGateTests(unittest.TestCase):
         )
         self.assertIn("flow_count", reasons)
 
+    def test_one_minute_flow_can_advance_without_waiting_for_five_minute_volume(self):
+        reasons = monitor.buy_pressure_rejections(
+            self.coin(buys=1, sells=1, volume=50, age=5, m5=1),
+            {
+                "trades": 3, "buys": 3, "sells": 0,
+                "buy_usd": 400, "sell_usd": 0, "buy_sell_usd_ratio": 400,
+                "max_sell_usd": 0,
+            },
+            {"conviction": 60},
+        )
+        self.assertEqual(reasons, [])
+
+    def test_one_minute_flow_requires_real_recent_volume(self):
+        reasons = monitor.buy_pressure_rejections(
+            self.coin(buys=1, sells=1, volume=50, age=5, m5=1),
+            {
+                "trades": 3, "buys": 3, "sells": 0,
+                "buy_usd": 40, "sell_usd": 0, "buy_sell_usd_ratio": 40,
+                "max_sell_usd": 0,
+            },
+            {"conviction": 60},
+        )
+        self.assertIn("short_m1_volume", reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

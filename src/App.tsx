@@ -429,11 +429,12 @@ export default function App() {
     ];
   }, [diagnostics, directDexLatest, state?.discovery_stats?.selected_last_scan]);
   const liveCandidateRows = useMemo(() => {
+    const m1Primary = state?.config.entry_policy_version === 'EARLY_BUY_PRESSURE_M1_V2';
     const minScore = entryThresholds.min_score ?? 60;
     const minLiquidity = entryThresholds.min_liquidity_usd ?? 15000;
-    const minVolume = entryThresholds.min_m5_volume_usd ?? 2500;
-    const minBuys = entryThresholds.min_m5_buys ?? 8;
-    const minRatio = entryThresholds.min_market_buy_sell_ratio ?? 2;
+    const minVolume = entryThresholds.fallback_min_m5_volume_usd ?? 2500;
+    const minBuys = entryThresholds.fallback_min_m5_buys ?? 8;
+    const minRatio = entryThresholds.fallback_min_market_buy_sell_ratio ?? 2;
     const minMove = entryThresholds.min_m5_pct ?? -3;
     const maxMove = entryThresholds.max_m5_pct ?? 18;
     const maxAge = entryThresholds.max_age_minutes ?? 180;
@@ -448,15 +449,15 @@ export default function App() {
       if (coin.score < minScore) reasons.push(`score < ${minScore}`);
       if (coin.liquidityUsd < minLiquidity) reasons.push(`ликвидност < $${Math.round(minLiquidity).toLocaleString()}`);
       if (age > maxAge) reasons.push(`възраст > ${maxAge}м`);
-      if (volume < minVolume) reasons.push(`5м обем < $${Math.round(minVolume).toLocaleString()}`);
-      if (buys < minBuys) reasons.push(`5м buys < ${minBuys}`);
-      if (ratio < minRatio) reasons.push(`buy/sell < ${minRatio.toFixed(1)}x`);
+      if (!m1Primary && volume < minVolume) reasons.push(`5м обем < $${Math.round(minVolume).toLocaleString()}`);
+      if (!m1Primary && buys < minBuys) reasons.push(`5м покупки < ${minBuys}`);
+      if (!m1Primary && ratio < minRatio) reasons.push(`5м покупки/продажби < ${minRatio.toFixed(1)}x`);
       if (move < minMove || move > maxMove) reasons.push(`5м ход извън ${minMove}%…${maxMove}%`);
       const freshness = age <= 5 ? 20 : age <= 15 ? 16 : age <= 30 ? 12 : age <= 60 ? 8 : 0;
       const priority = Math.max(0, Math.min(100, coin.score * 0.55 + Math.min(20, ratio * 5) + Math.min(15, volume / 500) + freshness));
       return { coin, buys, sells, ratio, volume, age, move, reasons, priority };
     }).sort((a, b) => b.priority - a.priority).slice(0, 12);
-  }, [state?.feed, entryThresholds.min_score, entryThresholds.min_liquidity_usd, entryThresholds.min_m5_volume_usd, entryThresholds.min_m5_buys, entryThresholds.min_market_buy_sell_ratio, entryThresholds.min_m5_pct, entryThresholds.max_m5_pct, entryThresholds.max_age_minutes]);
+  }, [state?.feed, state?.config.entry_policy_version, entryThresholds.min_score, entryThresholds.min_liquidity_usd, entryThresholds.fallback_min_m5_volume_usd, entryThresholds.fallback_min_m5_buys, entryThresholds.fallback_min_market_buy_sell_ratio, entryThresholds.min_m5_pct, entryThresholds.max_m5_pct, entryThresholds.max_age_minutes]);
   const engineSelfAnalysis = useMemo(() => {
     if (!diagnostics) return { headline: 'Чакам първия scan', detail: 'NEO ще определи автоматично къде се губят кандидатите.', tone: 'neutral' as const };
     const evaluated = Math.max(1, diagnostics.evaluated ?? diagnostics.candidates ?? 0);
@@ -680,7 +681,7 @@ export default function App() {
             <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3"><div className="text-[8px] font-black uppercase tracking-wider text-slate-600">Проблеми в системата</div><div className={`mt-1 text-lg font-black ${(state?.runtime_health?.active_issues?.length ?? 0) ? 'text-amber-300' : 'text-emerald-300'}`}>{state?.runtime_health?.active_issues?.length ?? 0}</div><div className="text-[8px] text-slate-600">активни предупреждения</div></div>
           </div>
           <div className="overflow-x-auto"><table className="w-full min-w-[1150px] text-left"><thead><tr className="border-b border-white/[0.06] text-[8px] font-black uppercase tracking-[0.13em] text-slate-700"><th className="px-4 py-3">Монета</th><th className="px-3 py-3">Възраст</th><th className="px-3 py-3">NEO оценка</th><th className="px-3 py-3">Ликвидност</th><th className="px-3 py-3">5м обем</th><th className="px-3 py-3">Покупки / Продажби</th><th className="px-3 py-3">Покупки/Продажби</th><th className="px-3 py-3">5м ход</th><th className="px-3 py-3">Ранен индекс</th><th className="px-4 py-3">Пазарен слой</th></tr></thead><tbody>{liveCandidateRows.map(row => <tr key={row.coin.address} onClick={() => openCoin(row.coin.address)} className="cursor-pointer border-b border-white/[0.04] text-[10px] hover:bg-white/[0.025]"><td className="px-4 py-3"><div className="font-black text-white">${row.coin.symbol}</div><div className="mt-0.5 font-mono text-[8px] text-slate-700">{shortAddress(row.coin.address)}</div></td><td className="px-3 py-3 text-slate-400">{ageLabel(row.coin.ageMinutes)}</td><td className="px-3 py-3 font-black text-white">{row.coin.score.toFixed(0)}</td><td className="px-3 py-3 text-slate-300">{fmtMoney(row.coin.liquidityUsd)}</td><td className="px-3 py-3 text-slate-300">{fmtMoney(row.volume)}</td><td className="px-3 py-3"><span className="font-black text-emerald-300">{row.buys}</span><span className="text-slate-700"> / </span><span className="font-black text-red-300">{row.sells}</span></td><td className={`px-3 py-3 font-black ${row.ratio >= (entryThresholds.min_market_buy_sell_ratio ?? 2) ? 'text-emerald-300' : 'text-slate-400'}`}>{row.ratio.toFixed(2)}x</td><td className={`px-3 py-3 font-black ${row.move >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{signed(row.move, 1)}%</td><td className="px-3 py-3"><div className="font-black text-sky-200">{row.priority.toFixed(0)}/100</div><div className="mt-0.5 text-[8px] text-slate-700">ранен приоритет</div></td><td className="px-4 py-3">{row.reasons.length === 0 ? <span className="rounded-lg border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 font-black text-emerald-200">МИНАВА ПАЗАРНИЯ СЛОЙ</span> : <div><div className="font-black text-amber-200">ИЗЧАКВА · {row.reasons.length} условия</div><div className="mt-1 max-w-[340px] text-[8px] leading-3 text-slate-600">{row.reasons.slice(0, 3).join(' · ')}{row.reasons.length > 3 ? ` · +${row.reasons.length - 3}` : ''}</div></div>}</td></tr>)}</tbody></table></div>
-          <div className="border-t border-white/[0.06] px-4 py-3 text-[9px] leading-4 text-slate-600">Ранният индекс е прозрачен приоритет от текущата NEO оценка, свежестта, 5м натиска покупки/продажби и 5м обема. Той не заменя основния backend сигнал. След пазарния слой NEO продължава с on-chain поток, проверка за цена/rug/риск и изпълнима покупка + продажба.<span className="ml-2 text-slate-500">Видими текущи лимити: до <b className="text-white">{state?.config.max_positions ?? '—'}</b> едновременни позиции · до <b className="text-white">{state?.config.max_quoted_candidates_per_scan ?? '—'}</b> кандидата към котировка на scan · scan на <b className="text-white">{state?.config.scan_seconds ?? '—'}с</b>.</span></div>
+          <div className="border-t border-white/[0.06] px-4 py-3 text-[9px] leading-4 text-slate-600">За EARLY BUY PRESSURE основният входен сигнал вече е rolling 60с on-chain поток: покупки, продажби, реален USD обем и buy/sell съотношение. 5м DexScreener колоните са контекст и силен fallback, а не задължително изчакване. След пазарния слой NEO продължава с проверка за цена/rug/риск и изпълнима покупка + продажба.<span className="ml-2 text-slate-500">Видими текущи лимити: до <b className="text-white">{state?.config.max_positions ?? '—'}</b> едновременни позиции · до <b className="text-white">{state?.config.max_quoted_candidates_per_scan ?? '—'}</b> кандидата към котировка на scan · scan на <b className="text-white">{state?.config.scan_seconds ?? '—'}с</b>.</span></div>
         </Card>
 
         {state?.learning && <Card className="mt-4" kicker="Самоанализ" title="Какво научава NEO от собствените PAPER сделки" right={<div className="text-[9px] font-black text-sky-300">{state.learning.trades_used} анализирани сделки</div>}>
