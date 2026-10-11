@@ -75,6 +75,17 @@ class Projection(unittest.TestCase):
         # The 2-second /state poll still carries no per-book history.
         self.assertEqual(compact_strategy_lab(LAB)['books']['TIKTOK']['history'], [])
 
+    def test_disabled_books_are_hidden_but_history_is_preserved(self):
+        data = {**LAB,
+                'activity_config': {'disabled_strategy_ids': ['TIKTOK']},
+                'stats': {'TIKTOK': {'trades': 2}, 'SCALPER': {'trades': 0}}}
+        view = compact_strategy_lab(data)
+        self.assertNotIn('TIKTOK', view['books'])
+        self.assertNotIn('TIKTOK', view['stats'])
+        self.assertIn('SCALPER', view['books'])
+        self.assertTrue(book_trades(data, 'TIKTOK')['found'])
+        self.assertEqual(book_trades(data, 'TIKTOK')['total'], 2)
+
 
 class EngineAndGateway(unittest.TestCase):
     def test_engine_reads_the_lab_file(self):
