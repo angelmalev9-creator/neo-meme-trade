@@ -8,7 +8,7 @@ import math
 import re
 from typing import Any, Callable
 
-POLICY_VERSION = 'LAB_PROFIT_QUALITY_V1'
+POLICY_VERSION = 'LAB_REAL_EDGE_GUARD_V2'
 REENTRY_SECONDS = 60
 LOSS_REENTRY_SECONDS = 180
 MAX_FEED_AGE_MS = 20_000
@@ -143,11 +143,31 @@ ENTRY_COST_CAPS = {
     'X_SIGNAL': 4.0,
     'HYPE_RADAR': 4.0,
 }
-# Books whose open position is re-checked on the fast interval.
-SNIPER_IDS = frozenset({'TIKTOK', 'X_SIGNAL', 'HYPE_RADAR'})
-# Books whose take profit is a resting limit order: once the net mark reaches
-# the target the sale is booked at the target, never above it.
-LIMIT_TAKE_PROFIT_IDS = frozenset({'TIKTOK', 'X_SIGNAL', 'HYPE_RADAR'})
+# Forward-only high-quality guard for the currently weak flow strategies.
+# It does not rewrite any old trade/balance; it only decides whether a future
+# candidate is strong enough to enter. Each strategy keeps its own base rule.
+PROFIT_GUARD_VERSION = 'REAL_EDGE_GUARD_V1'
+PROFIT_GUARD_RULES = {
+    'FLOW_PULLBACK': dict(score=90, liq=30000, age=180, h1=80, m5=(-4, 4), bs=1.20, vol5=6000, tx5=100, trades=6, ratio=1.80, buy=900, wallets=5),
+    'MICRO_BREAKOUT_SAFE': dict(score=94, liq=40000, age=120, h1=50, m5=(4, 15), bs=1.25, vol5=8000, tx5=100, trades=6, ratio=1.60, buy=900, wallets=5),
+    'YOUNG_LIQ': dict(score=93, liq=40000, age=90, h1=20, m5=(0, 14), bs=1.20, vol5=7000, tx5=90, trades=5, ratio=1.50, buy=800, wallets=5),
+    'BREAKOUT_CONFIRM': dict(score=92, liq=40000, age=90, h1=50, m5=(6, 18), bs=1.30, vol5=12000, tx5=120, trades=6, ratio=1.50, buy=1200, wallets=7),
+    'LIQ_FLOW_CONFLUENCE': dict(score=90, liq=60000, age=120, h1=30, m5=(-1, 14), bs=1.20, vol5=9000, tx5=100, trades=6, ratio=1.70, buy=1000, wallets=6),
+    'EARLY_FLOW': dict(score=92, liq=30000, age=75, h1=20, m5=(0, 12), bs=1.20, vol5=7000, tx5=90, trades=5, ratio=1.70, buy=700, wallets=5),
+    'HIGH_LMC_FLOW': dict(score=90, liq=30000, age=120, h1=50, m5=(0, 12), bs=1.20, vol5=7000, tx5=90, trades=6, ratio=1.60, buy=900, wallets=5),
+    'HIGH_SCORE_FLOW': dict(score=97, liq=30000, age=120, h1=80, m5=(-1, 15), bs=1.20, vol5=8000, tx5=100, trades=6, ratio=1.60, buy=1000, wallets=6),
+    'FLOW_SNIPER': dict(score=95, liq=40000, age=90, h1=80, m5=(1, 12), bs=1.25, vol5=9000, tx5=100, trades=8, ratio=2.00, buy=1000, wallets=8),
+    'VOLUME_QUALITY': dict(score=92, liq=40000, age=120, h1=80, m5=(1, 15), bs=1.25, vol5=10000, tx5=110, trades=6, ratio=1.50, buy=900, wallets=6),
+    'LOW_VOL_FLOW': dict(score=90, liq=40000, age=120, h1=50, m5=(-1, 8), bs=1.20, vol5=7000, tx5=90, trades=6, ratio=1.80, buy=900, wallets=6),
+    'CLEAN_MOMENTUM': dict(score=92, liq=40000, age=120, h1=50, m5=(2, 14), bs=1.25, vol5=9000, tx5=100, trades=6, ratio=1.60, buy=1000, wallets=6),
+}
+PROFIT_GUARD_IDS = frozenset(PROFIT_GUARD_RULES)
+# Re-check these books every second while they hold a position. This reduces
+# stop overshoot in the PAPER model without pretending a real stop is guaranteed.
+SNIPER_IDS = frozenset({'TIKTOK', 'X_SIGNAL', 'HYPE_RADAR'}) | PROFIT_GUARD_IDS
+# Their configured +10% target is represented as a resting PAPER limit, so a
+# future win is booked at the target rather than benefiting from a late poll.
+LIMIT_TAKE_PROFIT_IDS = frozenset({'TIKTOK', 'X_SIGNAL', 'HYPE_RADAR'}) | PROFIT_GUARD_IDS
 # PAPER-only hard stop: TikTok books future stop exits at exactly -12% net.
 # This is a simulation rule, not a claim that a real market stop can always fill without slippage/gaps.
 HARD_STOP_LOSS_IDS = frozenset({'TIKTOK'})
@@ -169,6 +189,13 @@ REJECTION_LABELS = {
     'quality_age':'quality: твърде късен pool','quality_momentum':'quality: неподходящ 5м ход',
     'quality_buy_pressure':'quality: buy/sell извън силния диапазон','quality_volume_5m':'quality: слаб 5м volume',
     'quality_activity_5m':'quality: малко 5м сделки','quality_flow_or_early':'quality: няма потвърден flow/силен early setup',
+    'guard_score':'edge guard: слаб score','guard_liquidity':'edge guard: ниска ликвидност',
+    'guard_age':'edge guard: pool-ът е късен','guard_hour':'edge guard: слаб 1ч trend',
+    'guard_momentum':'edge guard: 5м ходът не е качествен','guard_buy_sell':'edge guard: слаб market buy pressure',
+    'guard_volume':'edge guard: слаб 5м volume','guard_activity':'edge guard: малко 5м сделки',
+    'guard_flow_trades':'edge guard: малко потвърдени on-chain сделки','guard_flow_ratio':'edge guard: слаб on-chain buy/sell',
+    'guard_flow_buy':'edge guard: малко on-chain buy USD','guard_wallets':'edge guard: малко уникални портфейли',
+    'guard_sell_wall':'edge guard: голям sell спрямо buy flow',
 }
 
 
@@ -238,6 +265,37 @@ def profit_quality(f: dict[str, Any]) -> dict[str, Any]:
     failures=[name for name,ok in checks.items() if not ok]
     return {'version':PROFIT_QUALITY_VERSION,'allow':not failures,'failures':failures,
             'verified_flow':verified_flow,'exceptional_early':exceptional_early}
+
+def profit_guard_failures(strategy_id: str, f: dict[str, Any]) -> list[str]:
+    """Forward-only quality veto for selected weak lab books.
+
+    The base strategy still has to match first. This extra veto uses only data
+    available at entry time and never edits historical trades or balances.
+    """
+    cfg = PROFIT_GUARD_RULES.get(strategy_id)
+    if not cfg:
+        return []
+    flow = f.get('flow') or {}
+    buy = number(flow.get('buy_usd'))
+    max_sell = number(flow.get('max_sell'))
+    m5lo, m5hi = cfg['m5']
+    checks = (
+        ('guard_score', number(f.get('score')) >= cfg['score']),
+        ('guard_liquidity', number(f.get('liq')) >= cfg['liq']),
+        ('guard_age', number(f.get('age'), math.inf) <= cfg['age']),
+        ('guard_hour', number(f.get('h1'), -math.inf) >= cfg['h1']),
+        ('guard_momentum', m5lo <= number(f.get('m5'), -math.inf) <= m5hi),
+        ('guard_buy_sell',  cfg['bs'] <= number(f.get('bs')) <= 4.5),
+        ('guard_volume', number(f.get('vol5')) >= cfg['vol5']),
+        ('guard_activity', number(f.get('tx5')) >= cfg['tx5']),
+        ('guard_flow_trades', number(flow.get('trades')) >= cfg['trades']),
+        ('guard_flow_ratio', number(flow.get('ratio')) >= cfg['ratio']),
+        ('guard_flow_buy', buy >= cfg['buy']),
+        ('guard_wallets', number(flow.get('unique_wallets')) >= cfg['wallets']),
+        ('guard_sell_wall', max_sell < max(500.0, buy * .65)),
+    )
+    return [name for name, ok in checks if not ok]
+
 
 def profit_quality_rank(f: dict[str, Any], entry_cost_pct: float = 0.0) -> float:
     flow=f.get('flow') or {}; clamp=lambda x:max(0.0,min(1.0,number(x)))
@@ -313,4 +371,6 @@ def policy_config() -> dict:
             'exit_overrides': EXIT_OVERRIDES, 'entry_cost_caps': ENTRY_COST_CAPS,
             'rejection_labels': REJECTION_LABELS, 'sniper_ids': sorted(SNIPER_IDS), 'limit_take_profit_ids': sorted(LIMIT_TAKE_PROFIT_IDS), 'hard_stop_loss_ids': sorted(HARD_STOP_LOSS_IDS), 'sniper_poll_seconds': SNIPER_POLL_SECONDS,
             'profit_quality_version': PROFIT_QUALITY_VERSION,
+            'profit_guard_version': PROFIT_GUARD_VERSION,
+            'profit_guard_ids': sorted(PROFIT_GUARD_IDS),
             'execution_basis': 'ESTIMATED_PAPER_COSTS_NOT_LIVE_FILLS'}

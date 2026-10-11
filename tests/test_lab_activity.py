@@ -38,6 +38,24 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(set(a.RULES),{s['id'] for s in lab.STRATEGIES})
         for rule in a.RULES.values():self.assertGreaterEqual(rule.liquidity,10000)
 
+    def test_profit_guard_is_forward_only_and_strategy_specific(self):
+        expected={'FLOW_PULLBACK','MICRO_BREAKOUT_SAFE','YOUNG_LIQ','BREAKOUT_CONFIRM',
+                  'LIQ_FLOW_CONFLUENCE','EARLY_FLOW','HIGH_LMC_FLOW','HIGH_SCORE_FLOW',
+                  'FLOW_SNIPER','VOLUME_QUALITY','LOW_VOL_FLOW','CLEAN_MOMENTUM'}
+        self.assertEqual(a.PROFIT_GUARD_IDS,expected)
+        self.assertTrue(expected.issubset(a.SNIPER_IDS))
+        self.assertTrue(expected.issubset(a.LIMIT_TAKE_PROFIT_IDS))
+        self.assertEqual(a.profit_guard_failures('ORDER_FLOW',{}),[])
+        for sid,cfg in a.PROFIT_GUARD_RULES.items():
+            f={'score':cfg['score']+1,'liq':cfg['liq']+10000,'age':max(2,cfg['age']/2),
+               'h1':cfg['h1']+20,'m5':sum(cfg['m5'])/2,'bs':max(cfg['bs'],1.3),
+               'vol5':cfg['vol5']+5000,'tx5':cfg['tx5']+50,
+               'flow':{'trades':cfg['trades']+2,'ratio':cfg['ratio']+.5,'buy_usd':cfg['buy']+500,
+                       'unique_wallets':cfg['wallets']+3,'max_sell':50}}
+            self.assertEqual(a.profit_guard_failures(sid,f),[],sid)
+            f['flow']['buy_usd']=0
+            self.assertIn('guard_flow_buy',a.profit_guard_failures(sid,f),sid)
+
     def test_momentum_hunter_broad_but_quality_ranked(self):
         broad={'score':80,'liq':12000,'m5':4,'h1':20,'bs':1.0,'lmc':.05,
                'age':600,'vol_liq':.12,

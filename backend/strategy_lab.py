@@ -421,6 +421,10 @@ def maybe_open(feed,flows):
             if not quality['allow']:
                 for reason in quality['failures']: reject(reason)
                 continue
+            guard_failures=activity.profit_guard_failures(strategy['id'],features)
+            if guard_failures:
+                for reason in guard_failures: reject(reason)
+                continue
             validation=price_integrity.check(coin)
             if validation.get('status')!='pass':
                 blocked_price+=1; reject('price_verification'); continue
