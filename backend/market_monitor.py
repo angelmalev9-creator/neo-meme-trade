@@ -314,6 +314,7 @@ BUY_PRESSURE_PUMPFUN_MIN_LIQUIDITY_USD = float(os.getenv('NEO_BUY_PRESSURE_PUMPF
 BUY_PRESSURE_PUMPFUN_MIN_SCORE = float(os.getenv('NEO_BUY_PRESSURE_PUMPFUN_MIN_SCORE', '45'))
 BUY_PRESSURE_PUMPFUN_MAX_AGE_MINUTES = float(os.getenv('NEO_BUY_PRESSURE_PUMPFUN_MAX_AGE_MINUTES', '45'))
 BUY_PRESSURE_MIN_CONVICTION = float(os.getenv('NEO_BUY_PRESSURE_MIN_CONVICTION', '50'))
+BUY_PRESSURE_MIN_AGE_SECONDS = max(0.0, float(os.getenv('NEO_BUY_PRESSURE_MIN_AGE_SECONDS', '5')))
 BUY_PRESSURE_MIN_M1_VOLUME_USD = float(os.getenv('NEO_BUY_PRESSURE_MIN_M1_VOLUME_USD', '250'))
 BUY_PRESSURE_MIN_M1_BUYS = float(os.getenv('NEO_BUY_PRESSURE_MIN_M1_BUYS', '2'))
 BUY_PRESSURE_MIN_M5_VOLUME_USD = float(os.getenv('NEO_BUY_PRESSURE_MIN_M5_VOLUME_USD', '2500'))
@@ -337,6 +338,7 @@ def buy_pressure_rejections(coin: dict[str, Any], flow: dict[str, Any], context:
     score = num(coin.get('score'))
     liquidity = num(coin.get('liquidityUsd'))
     age = num(coin.get('ageMinutes'), 999999)
+    age_seconds = age * 60.0
     dex_id = str(coin.get('dexId') or '').lower()
     pumpfun_early = dex_id == 'pumpfun'
     min_score = BUY_PRESSURE_PUMPFUN_MIN_SCORE if pumpfun_early else BUY_PRESSURE_MIN_SCORE
@@ -366,6 +368,7 @@ def buy_pressure_rejections(coin: dict[str, Any], flow: dict[str, Any], context:
     if observed_at <= 0 or not 0 <= now - observed_at <= entry_policy.MAX_FEED_AGE_MS: reasons.append('stale_feed')
     if score < min_score: reasons.append('score')
     if liquidity < min_liquidity: reasons.append('liquidity')
+    if age_seconds < BUY_PRESSURE_MIN_AGE_SECONDS: reasons.append('too_fresh')
     if age > max_age: reasons.append('early_age')
     if not BUY_PRESSURE_MIN_M5_PCT <= m5 <= BUY_PRESSURE_MAX_M5_PCT: reasons.append('momentum')
 
@@ -1605,6 +1608,7 @@ def effective_entry_thresholds() -> dict[str, Any]:
             'pumpfun_min_liquidity_usd': BUY_PRESSURE_PUMPFUN_MIN_LIQUIDITY_USD,
             'pumpfun_max_age_minutes': BUY_PRESSURE_PUMPFUN_MAX_AGE_MINUTES,
             'min_conviction': BUY_PRESSURE_MIN_CONVICTION,
+            'min_age_seconds': BUY_PRESSURE_MIN_AGE_SECONDS,
             'flow_window_seconds': BUY_PRESSURE_FLOW_SECONDS,
             'min_m1_volume_usd': BUY_PRESSURE_MIN_M1_VOLUME_USD,
             'min_m1_buys': BUY_PRESSURE_MIN_M1_BUYS,

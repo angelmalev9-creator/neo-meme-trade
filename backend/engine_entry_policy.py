@@ -67,6 +67,7 @@ LABELS = {
     'short_volume': 'недостатъчен 5m volume (само fallback)',
     'short_m1_volume': 'недостатъчен 1m on-chain обем',
     'm1_activity': 'малко покупки в последните 60 секунди',
+    'too_fresh': 'койнът е на по-малко от 5 секунди',
     'early_age': 'койнът вече не е в ранен етап',
     'liquidity_ratio': 'недостатъчна ликвидност спрямо капитализацията',
     'flow_count': 'малко on-chain сделки',
