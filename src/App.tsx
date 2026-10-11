@@ -216,7 +216,7 @@ function RejectionBars({ rows, total }: { rows: { key: string; label: string; co
 export default function App() {
   const [state, setState] = useState<MonitorState | null>(null);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<Tab>(() => { try { return (sessionStorage.getItem('neo-tab') as Tab) || 'engine'; } catch { return 'engine'; } });
+  const [tab, setTab] = useState<Tab>(() => { try { const saved = (sessionStorage.getItem('neo-tab') as Tab) || 'engine'; return saved === 'hype' ? 'lab' : saved; } catch { return 'engine'; } });
   const [selectedAddress, setSelectedAddress] = useState('');
   const [openBook, setOpenBook] = useState('');
   const [bookTrades, setBookTrades] = useState<LabBookTrades | null>(null);
@@ -469,7 +469,7 @@ export default function App() {
     });
     return rows.sort((a, b) => b.ts - a.ts).slice(0, 8);
   }, [diagnostics, state?.discovery_stats?.scan_sequence, state?.events, state?.last_scan_at, state?.runtime_health, state?.scan_count, state?.self_heal]);
-  const labBooks = useMemo(() => Object.values(state?.strategy_lab?.books || {}).filter(book => book.id !== 'ASTRA_6_BRAIN').sort((a, b) => (state?.strategy_lab?.stats?.[b.id]?.equity ?? b.balance) - (state?.strategy_lab?.stats?.[a.id]?.equity ?? a.balance)), [state]);
+  const labBooks = useMemo(() => Object.values(state?.strategy_lab?.books || {}).filter(book => book.id !== 'ASTRA_6_BRAIN' && book.id !== 'HYPE_RADAR').sort((a, b) => (state?.strategy_lab?.stats?.[b.id]?.equity ?? b.balance) - (state?.strategy_lab?.stats?.[a.id]?.equity ?? a.balance)), [state]);
   const activeBooks = labBooks.filter(book => (state?.strategy_lab?.stats?.[book.id]?.trades ?? 0) > 0 || book.position);
   const quietBooks = labBooks.filter(book => !activeBooks.includes(book));
   const labLabels = state?.strategy_lab?.activity_config?.rejection_labels || {};
@@ -531,7 +531,6 @@ export default function App() {
     { id: 'engine', label: 'Engine', icon: <Bot className="h-3.5 w-3.5" />, badge: state ? `${state.stats.open_positions}/${state.config.max_positions}` : undefined },
     { id: 'lab', label: 'Лаборатория', icon: <FlaskConical className="h-3.5 w-3.5" />, badge: state ? `${activeBooks.length} активни` : undefined },
     { id: 'coins', label: 'Койн фийд', icon: <Activity className="h-3.5 w-3.5" />, badge: state ? `${state.stats.feed_count}` : undefined },
-    { id: 'hype', label: 'Hype', icon: <Flame className="h-3.5 w-3.5" />, badge: hype ? `${hype.themes.length} теми` : undefined },
   ];
   const hypeBook = state?.strategy_lab?.books?.HYPE_RADAR;
   const hypeStats = state?.strategy_lab?.stats?.HYPE_RADAR;

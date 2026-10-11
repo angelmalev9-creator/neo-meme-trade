@@ -410,49 +410,15 @@ class WhyQuietTests(unittest.TestCase):
 
 
 class HypeRadarBookTests(unittest.TestCase):
-    THEMES=[{'theme':'Robot dog','keywords':['doge','robot'],'hype':90,'generated_at':NOW-60_000}]
-
     def setUp(self):
-        guard=patch.object(lab.price_integrity,'check',return_value={'status':'pass','version':'OFFLINE_FIXTURE'})
-        guard.start();self.addCleanup(guard.stop)
-        themes=patch.object(lab,'hype_themes',return_value=self.THEMES)
-        themes.start();self.addCleanup(themes.stop)
         lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
 
-    def feed(self,**coin_over):
-        return [{**coin(),'symbol':'RDOG','name':'Robot Dog','score':85,'liquidityUsd':20000,'marketCap':45000,'updatedAt':NOW,**coin_over}]
+    def test_hype_radar_is_retired_and_disabled(self):
+        self.assertIn('HYPE_RADAR', a.DISABLED_STRATEGY_IDS)
+        self.assertIn('HYPE_RADAR', a.policy_config()['disabled_strategy_ids'])
 
-    def test_configured_like_tiktok_with_theme_and_rug_gates(self):
-        self.assertEqual(lab.book_exit_rules('HYPE_RADAR'),{'stop_loss':12,'take_profit':17,'max_hold_minutes':60})
-        self.assertEqual(a.entry_cost_cap('HYPE_RADAR'),4.0)
-        self.assertIn('HYPE_RADAR',a.SNIPER_IDS); self.assertIn('HYPE_RADAR',a.LIMIT_TAKE_PROFIT_IDS)
-        self.assertIn('no_hype_match',a.REJECTION_LABELS); self.assertIn('rug_check',a.REJECTION_LABELS)
-
-    def test_enters_only_a_theme_match_that_passes_the_rug_check(self):
-        fast={'status':'pass','reasons':[]}; full={'status':'pending','reasons':['risk_check_pending']}
-        with patch.object(lab.rug_guard,'fast_chain_check',return_value=fast),patch.object(lab.rug_guard,'check',return_value=full),\
-             patch.object(lab,'now_ms',return_value=NOW):
-            lab.maybe_open(self.feed(),{})
-        pos=lab.STATE['books']['HYPE_RADAR']['position']
-        self.assertIsNotNone(pos)
-        self.assertEqual((pos['hype_match']['theme'],pos['hype_match']['keyword'],pos['stop_loss_net_pct'],pos['take_profit_net_pct']),('Robot dog','robot',12,17))
-        self.assertEqual(pos['hype_match']['rug_check']['full']['status'],'pending')
-        self.assertEqual(lab.STATE['books']['HYPE_RADAR']['entry_diagnostics']['active_hype_themes'],1)
-
-    def test_no_match_and_blocked_rug_are_counted(self):
-        with patch.object(lab,'now_ms',return_value=NOW):
-            lab.maybe_open(self.feed(symbol='BNN',name='Banana'),{})
-        book=lab.STATE['books']['HYPE_RADAR']
-        self.assertIsNone(book['position']); self.assertEqual(book['rejection_totals']['reasons'],{'no_hype_match':1})
-        with patch.object(lab.rug_guard,'fast_chain_check',return_value={'status':'pass','reasons':[]}),\
-             patch.object(lab.rug_guard,'check',return_value={'status':'blocked','reasons':['rug_report_invalid_or_rugged']}),\
-             patch.object(lab,'now_ms',return_value=NOW):
-            lab.maybe_open(self.feed(),{})
-        self.assertIsNone(book['position']); self.assertEqual(book['rejection_totals']['reasons']['rug_check'],1)
-        with patch.object(lab.rug_guard,'fast_chain_check',return_value={'status':'unavailable','reasons':['rpc']}),\
-             patch.object(lab.rug_guard,'check',return_value={'status':'pending','reasons':[]}),\
-             patch.object(lab,'now_ms',return_value=NOW):
-            lab.maybe_open(self.feed(),{})
-        self.assertIsNone(book['position']); self.assertEqual(book['rejection_totals']['reasons']['rug_check'],2)
-        # Other books are untouched by the hype gate.
-        self.assertNotIn('no_hype_match',lab.STATE['books']['TIKTOK']['rejection_totals']['reasons'])
+    def test_retired_hype_book_cannot_open_new_positions(self):
+        candidate={**coin(),'symbol':'RDOG','name':'Robot Dog','score':100,'liquidityUsd':50000,'marketCap':100000,'updatedAt':NOW}
+        with patch.object(lab,'hype_themes',side_effect=AssertionError('retired Hype collector must not be queried')), patch.object(lab,'now_ms',return_value=NOW):
+            lab.maybe_open([candidate],{})
+        self.assertIsNone(lab.STATE['books']['HYPE_RADAR']['position'])

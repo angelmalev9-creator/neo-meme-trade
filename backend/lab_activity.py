@@ -171,6 +171,8 @@ LIMIT_TAKE_PROFIT_IDS = frozenset({'TIKTOK', 'X_SIGNAL', 'HYPE_RADAR'}) | PROFIT
 # PAPER-only hard stop: TikTok books future stop exits at exactly -12% net.
 # This is a simulation rule, not a claim that a real market stop can always fill without slippage/gaps.
 HARD_STOP_LOSS_IDS = frozenset({'TIKTOK'})
+# Retired: Hype Radar was persistently loss-making in PAPER and is disabled to avoid collector/scan load.
+DISABLED_STRATEGY_IDS = frozenset({'HYPE_RADAR'})
 SNIPER_POLL_SECONDS = 1.0
 
 
@@ -373,4 +375,5 @@ def policy_config() -> dict:
             'profit_quality_version': PROFIT_QUALITY_VERSION,
             'profit_guard_version': PROFIT_GUARD_VERSION,
             'profit_guard_ids': sorted(PROFIT_GUARD_IDS),
+            'disabled_strategy_ids': sorted(DISABLED_STRATEGY_IDS),
             'execution_basis': 'ESTIMATED_PAPER_COSTS_NOT_LIVE_FILLS'}

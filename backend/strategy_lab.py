@@ -386,7 +386,7 @@ def rug_verdict(coin):
 def maybe_open(feed,flows):
     now=now_ms()
     x_signals=recent_x_signals(now)
-    themes=hype_themes(now)
+    themes=[] if 'HYPE_RADAR' in activity.DISABLED_STRATEGY_IDS else hype_themes(now)
     hype_matches={}
     candidates=[]
     for c in feed:
@@ -394,6 +394,8 @@ def maybe_open(feed,flows):
             candidates.append((c,enrich(c,flows)))
     for strategy in STRATEGIES:
         book=STATE['books'][strategy['id']]
+        if strategy['id'] in activity.DISABLED_STRATEGY_IDS:
+            continue
         if book.get('position') or num(book.get('balance'))<activity.MIN_NOTIONAL_USD:
             continue
         eligible=[]
