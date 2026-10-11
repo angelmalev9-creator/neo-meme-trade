@@ -5,6 +5,7 @@ win rate. Fees and fill assumptions remain in strategy_lab.py unchanged.
 """
 from dataclasses import dataclass
 import math
+import os
 import re
 from typing import Any, Callable
 
@@ -174,7 +175,7 @@ HARD_STOP_LOSS_IDS = frozenset({'TIKTOK'})
 # Retired PAPER books: preserve their historical state for audit, but stop future entries.
 # The flow books below have enough closed-trade evidence in the owner's lab to reject them
 # (negative realized result with profit factor below 0.80). Tiny-sample books are kept running.
-DISABLED_STRATEGY_IDS = frozenset({
+_BASE_DISABLED_STRATEGY_IDS = frozenset({
     'HYPE_RADAR',
     'BREAKOUT_CONFIRM',
     'LIQ_FLOW_CONFLUENCE',
@@ -183,6 +184,12 @@ DISABLED_STRATEGY_IDS = frozenset({
     'FLOW_SNIPER',
     'VOLUME_QUALITY',
 })
+_INSTANCE_DISABLED_STRATEGY_IDS = frozenset(
+    strategy_id.strip().upper()
+    for strategy_id in os.getenv('NEO_LAB_DISABLED_STRATEGIES', '').split(',')
+    if strategy_id.strip()
+)
+DISABLED_STRATEGY_IDS = _BASE_DISABLED_STRATEGY_IDS | _INSTANCE_DISABLED_STRATEGY_IDS
 SNIPER_POLL_SECONDS = 1.0
 
 
