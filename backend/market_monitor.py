@@ -2271,16 +2271,30 @@ class Monitor:
             notional = num(live.get('notional_usd'))
             entry_cost = num(live.get('entry_network_fee_usd')) + num(live.get('entry_account_reserve_usd'))
             allocated = (notional+entry_cost)*fraction
-            net = num(quote.get('net_proceeds_usd'), math.nan)
-            if not math.isfinite(net): raise ValueError('invalid exit net proceeds')
+            observed_net = num(quote.get('net_proceeds_usd'), math.nan)
+            if not math.isfinite(observed_net): raise ValueError('invalid exit net proceeds')
+            net = observed_net
+            paper_stop_capped = False
+            stop_execution_source = quote.get('execution_source', 'MODEL_V1')
+            # Owner-requested PAPER hard stop: user-fixed target positions may
+            # never BOOK a realized loss worse than their configured stop.
+            # Keep the raw executable observation for audit, but cap PAPER PnL.
+            if reason == 'STOP_LOSS_NET_TARGET' and str(live.get('exit_policy') or '') == 'fixed_targets':
+                stop_pct = max(0.0, num(live.get('stop_loss_pct'), STOP_LOSS_PCT))
+                stop_floor_net = allocated - (notional * fraction * stop_pct / 100.0)
+                if net < stop_floor_net:
+                    net = stop_floor_net
+                    paper_stop_capped = True
+                    stop_execution_source = 'PAPER_HARD_STOP_CAP'
             pnl = net-allocated
             total_pnl = num(live.get('realized_partial_pnl_usd'))+pnl
             original_notional = num(live.get('original_notional_usd'), notional)
             before = STATE.demo_balance_usd
             balance = round(before+pnl, 8)
             leg = {'sold_token_raw': sold_raw, 'fraction_remaining_sold': fraction, 'net_proceeds_usd': net,
-                   'allocated_entry_cost_usd': allocated, 'pnl_usd': pnl, 'quoted_at': quote.get('quoted_at'),
-                   'execution_source': quote.get('execution_source'), 'exit_network_fee_usd': num(quote.get('network_fee_usd'))}
+                   'observed_net_proceeds_usd': observed_net, 'allocated_entry_cost_usd': allocated, 'pnl_usd': pnl,
+                   'quoted_at': quote.get('quoted_at'), 'execution_source': stop_execution_source,
+                   'exit_network_fee_usd': num(quote.get('network_fee_usd'))}
             legs = list(live.get('partial_fills') or [])+[leg]
             event_id = f"{live['id']}:{raw}:{sold_raw}:{quote.get('quoted_at',now_ms())}"
             if fraction < 1:
@@ -2298,11 +2312,13 @@ class Monitor:
             closed = dict(position, id=live['id'], session_id=STATE.demo_session_id,
                 notional_usd=original_notional, pnl_usd=round(total_pnl, 8), pnl_pct=round(total_pnl/max(original_notional,1e-18)*100, 8),
                 closed_at=now_ms(), exit_price=coin.get('priceUsd'), execution_exit_price=quote.get('fill_price'),
-                exit_reason=reason, exit_net_proceeds_usd=net, exit_gross_proceeds_usd=quote.get('gross_proceeds_usd'),
+                exit_reason=reason, exit_net_proceeds_usd=net, observed_exit_net_proceeds_usd=observed_net,
+                exit_gross_proceeds_usd=quote.get('gross_proceeds_usd'),
                 exit_dex_fee_usd=num(quote.get('dex_fee_usd')), exit_network_fee_usd=num(quote.get('network_fee_usd')),
                 exit_price_impact_pct=num(quote.get('impact_pct')), exit_slippage_pct=num(quote.get('slippage_pct')),
                 exit_quote=quote.get('raw_quote'), exit_liquidity_usd=coin.get('liquidityUsd'), partial_fills=legs,
-                balance_before=before, balance_after=balance, paper_stop_capped=False, simulated_fill=True,
+                balance_before=before, balance_after=balance, paper_stop_capped=paper_stop_capped, simulated_fill=True,
+                stop_execution_source=stop_execution_source,
                 jupiter_exit_quote_at=quote.get('quoted_at'), exit_policy_version=position.get('exit_policy_version', exit_policy.VERSION),
                 exit_route_matches_entry_pool=quote.get('route_matches_entry_pool'), fees_included_in_quote=True,
                 execution_source=quote.get('execution_source', 'MODEL_V1'), exit_state='CLOSED')
