@@ -33,8 +33,8 @@ class ActivityTests(unittest.TestCase):
         guard.start();self.addCleanup(guard.stop)
         lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
 
-    def test_all_37_rules_exist(self):
-        self.assertEqual(len(a.RULES),37)
+    def test_all_44_rules_exist(self):
+        self.assertEqual(len(a.RULES),44)
         self.assertEqual(set(a.RULES),{s['id'] for s in lab.STRATEGIES})
         for rule in a.RULES.values():self.assertGreaterEqual(rule.liquidity,10000)
 
@@ -136,7 +136,9 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(lab.STATE,before)
 
     def test_entry_records_cost_not_zero_and_preserves_book_balance(self):
-        with patch.object(lab,'now_ms',return_value=NOW):lab.maybe_open([coin()],flows())
+        with patch.object(a,'DISABLED_STRATEGY_IDS',frozenset()), \
+             patch.object(lab,'now_ms',return_value=NOW):
+            lab.maybe_open([coin()],flows())
         opened=[b for b in lab.STATE['books'].values() if b['position']]
         self.assertGreater(len(opened),10)
         for b in opened:
@@ -161,7 +163,8 @@ class ActivityTests(unittest.TestCase):
             lab.update_positions({})
         for b in lab.STATE['books'].values():
             self.assertIsNone(b['position'])
-            self.assertEqual(b['history'][0]['exit_reason'],'STOP_LOSS_3_NET')
+            expected_stop=lab.book_exit_rules(b['id'])['stop_loss']
+            self.assertEqual(b['history'][0]['exit_reason'],f'STOP_LOSS_{expected_stop:g}_NET')
             self.assertEqual(b['history'][0]['pnl_pct'],-6)
             self.assertEqual(b['balance'],b['starting_balance']-6)
 
@@ -172,6 +175,73 @@ class ActivityTests(unittest.TestCase):
 
 
 
+class NovaGenerationTests(unittest.TestCase):
+    def setUp(self):
+        lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
+        price=patch.object(lab.price_integrity,'check',return_value={'status':'pass','version':'OFFLINE_FIXTURE'})
+        price.start();self.addCleanup(price.stop)
+        fast=patch.object(lab.rug_guard,'fast_chain_check',return_value={'status':'pass'})
+        full=patch.object(lab.rug_guard,'check',return_value={'status':'pass'})
+        fast.start();full.start();self.addCleanup(fast.stop);self.addCleanup(full.stop)
+
+    def strong_coin(self, **updates):
+        base={**coin(),'ageMinutes':8,'score':100,'liquidityUsd':120000,'marketCap':500000,
+              'priceChange':{'m5':4,'h1':30},'volume':{'m5':6000,'h1':50000},
+              'txns':{'m5':{'buys':50,'sells':20}}}
+        base.update(updates);return base
+
+    def strong_flows(self):
+        return {ADDRESS:{'trades':12,'buys':10,'sells':2,'buy_usd':1800,'sell_usd':250,
+                         'unique_wallets':10,'ratio':7.2,'max_sell':120}}
+
+    def test_only_nova_generation_is_active_by_default(self):
+        self.assertEqual(len(a.NOVA_IDS),7)
+        self.assertEqual(a.ACTIVE_STRATEGY_IDS,a.NOVA_IDS)
+        self.assertTrue(set(a.RULES)-set(a.NOVA_IDS) <= set(a.DISABLED_STRATEGY_IDS))
+        self.assertFalse(set(a.NOVA_IDS) & set(a.DISABLED_STRATEGY_IDS))
+
+    def test_nova_quality_is_60s_first_not_five_minute_volume_gated(self):
+        f=lab.enrich(self.strong_coin(volume={'m5':0,'h1':1000}),self.strong_flows())
+        result=a.nova_quality(f)
+        self.assertTrue(result['allow'])
+        self.assertTrue(result['verified_flow'])
+
+    def test_nova_books_use_200_target_and_positive_reward_to_risk(self):
+        for sid in a.NOVA_IDS:
+            ex=a.exit_rules(sid,lab.STOP_LOSS,lab.TAKE_PROFIT,lab.MAX_HOLD_MIN)
+            self.assertGreater(ex['take_profit'],ex['stop_loss'])
+            self.assertEqual(a.strategy_trade_limit(sid,lab.TRADE_NOTIONAL),200)
+            self.assertIn(sid,a.SNIPER_IDS)
+            self.assertIn(sid,a.LIMIT_TAKE_PROFIT_IDS)
+            self.assertNotIn(sid,a.HARD_STOP_LOSS_IDS)
+
+    def test_nova_candidate_opens_only_after_price_rug_and_execution_gates(self):
+        with patch.object(lab,'now_ms',return_value=NOW):
+            lab.maybe_open([self.strong_coin()],self.strong_flows())
+        opened={sid for sid in a.NOVA_IDS if lab.STATE['books'][sid]['position']}
+        self.assertTrue(opened)
+        for sid in opened:
+            pos=lab.STATE['books'][sid]['position']
+            self.assertGreaterEqual(pos['notional_usd'],a.strategy_min_notional(sid))
+            self.assertLessEqual(pos['entry_price_impact_pct'],a.strategy_max_impact(sid))
+            self.assertEqual(pos['entry_policy_version'],a.POLICY_VERSION)
+
+    def test_nova_rug_rejection_blocks_entry(self):
+        with patch.object(lab.rug_guard,'check',return_value={'status':'blocked'}), \
+             patch.object(lab,'now_ms',return_value=NOW):
+            lab.maybe_open([self.strong_coin()],self.strong_flows())
+        self.assertFalse(any(lab.STATE['books'][sid]['position'] for sid in a.NOVA_IDS))
+
+
+    def test_only_ultra_early_may_use_pending_full_rug_report(self):
+        c=self.strong_coin(ageMinutes=5)
+        f=lab.enrich(c,self.strong_flows())
+        with patch.object(lab.rug_guard,'fast_chain_check',return_value={'status':'pass'}), \
+             patch.object(lab.rug_guard,'check',return_value={'status':'pending'}):
+            self.assertTrue(lab.nova_rug_verdict('NOVA_ULTRA_EARLY',c,f)[0])
+            self.assertFalse(lab.nova_rug_verdict('NOVA_CONFLUENCE',c,f)[0])
+
+
 class TikTokStrategyTests(unittest.TestCase):
     LIGHT={'score':65,'liq':10000,'mc':30000,'m5':-5,'h1':-50,'bs':.8,'lmc':.02,'age':0,'vol_liq':0,
            'flow':{'trades':0,'ratio':0,'buy_usd':0,'sell_usd':0,'unique_wallets':0,'max_sell':0}}
@@ -179,6 +249,8 @@ class TikTokStrategyTests(unittest.TestCase):
     def setUp(self):
         guard=patch.object(lab.price_integrity,'check',return_value={'status':'pass','version':'OFFLINE_FIXTURE'})
         guard.start();self.addCleanup(guard.stop)
+        disabled=patch.object(a,'DISABLED_STRATEGY_IDS',a.DISABLED_STRATEGY_IDS-frozenset({'TIKTOK'}))
+        disabled.start();self.addCleanup(disabled.stop)
         lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
 
     def position(self,book_id,opened_at=NOW-1000):
@@ -317,7 +389,7 @@ class TikTokStrategyTests(unittest.TestCase):
     def test_published_config_and_stats_show_the_overrides(self):
         config=a.policy_config()
         self.assertEqual(config['exit_overrides']['TIKTOK'],{'stop_loss':12.0,'take_profit':17.0})
-        self.assertEqual(config['entry_cost_caps'],{'TIKTOK':4.0,'X_SIGNAL':4.0,'HYPE_RADAR':4.0})
+        self.assertEqual({k:config['entry_cost_caps'][k] for k in ('TIKTOK','X_SIGNAL','HYPE_RADAR')},{'TIKTOK':4.0,'X_SIGNAL':4.0,'HYPE_RADAR':4.0})
         stats=lab.stats(lab.STATE['books']['TIKTOK'])
         self.assertEqual((stats['stop_loss_net_pct'],stats['take_profit_net_pct']),(12,17))
         self.assertEqual(lab.stats(lab.STATE['books']['SCALPER'])['stop_loss_net_pct'],3)
@@ -328,6 +400,8 @@ class XSignalStrategyTests(unittest.TestCase):
     def setUp(self):
         guard=patch.object(lab.price_integrity,'check',return_value={'status':'pass','version':'OFFLINE_FIXTURE'})
         guard.start();self.addCleanup(guard.stop)
+        disabled=patch.object(a,'DISABLED_STRATEGY_IDS',a.DISABLED_STRATEGY_IDS-frozenset({'X_SIGNAL'}))
+        disabled.start();self.addCleanup(disabled.stop)
         lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
         self.old_path=lab.X_SIGNAL_PATH
         self.tmp=tempfile.NamedTemporaryFile('w+',delete=False)
@@ -374,6 +448,8 @@ class WhyQuietTests(unittest.TestCase):
     def setUp(self):
         guard=patch.object(lab.price_integrity,'check',return_value={'status':'pass','version':'OFFLINE_FIXTURE'})
         guard.start();self.addCleanup(guard.stop)
+        disabled=patch.object(a,'DISABLED_STRATEGY_IDS',frozenset({'HYPE_RADAR'}))
+        disabled.start();self.addCleanup(disabled.stop)
         lab.STATE={'started_at':42,'books':{s['id']:lab.empty_book(s) for s in lab.STRATEGIES}}
 
     def test_failures_name_every_condition_that_fails(self):
