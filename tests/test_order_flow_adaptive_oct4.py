@@ -664,7 +664,27 @@ class EngineExits(EngineHarness):
         self.assertFalse(m.STATE.history)
         self.assertEqual(m.STATE.positions[0]['exit_state'], 'OPEN')
 
-    def test_user_fixed_stop_books_no_worse_than_configured_five_percent(self):
+    def test_user_fixed_stop_arms_before_five_and_books_market_accurate_fill(self):
+        self.position(exit_policy='fixed_targets', exit_policy_version=exit_policy.USER_FIXED_VERSION,
+                      stop_loss_pct=5.0, take_profit_net_pct=10.0)
+        self.coin = {**self.coin, 'updatedAt': self.clock[0]}
+        # -4.615% executable net: early arm should exit before the configured -5% target.
+        quote = {'net_proceeds_usd': 191.0, 'gross_proceeds_usd': 191.03, 'network_fee_usd': .03,
+                 'dex_fee_usd': 0, 'fill_price': 1.91, 'impact_pct': .2, 'slippage_pct': .1,
+                 'latency_pct': 0, 'quoted_at': self.clock[0], 'from_cache': False,
+                 'execution_source': 'OFFLINE_FIXTURE'}
+        with patch.object(m.paper_quotes, 'position_mark', return_value=quote):
+            self.monitor.update_positions({A: self.coin})
+        trade = self.closed()
+        self.assertEqual(trade['exit_reason'], 'STOP_LOSS_NET_TARGET')
+        self.assertAlmostEqual(trade['pnl_pct'], -4.615)
+        self.assertAlmostEqual(trade['pnl_usd'], -9.23)
+        self.assertAlmostEqual(m.STATE.demo_balance_usd, 990.77)
+        self.assertFalse(trade['paper_stop_capped'])
+        self.assertEqual(trade['stop_execution_source'], 'OFFLINE_FIXTURE')
+        self.assertEqual(trade['observed_exit_net_proceeds_usd'], 191.0)
+
+    def test_user_fixed_gap_is_not_faked_or_clamped(self):
         self.position(exit_policy='fixed_targets', exit_policy_version=exit_policy.USER_FIXED_VERSION,
                       stop_loss_pct=5.0, take_profit_net_pct=10.0)
         self.coin = {**self.coin, 'updatedAt': self.clock[0]}
@@ -675,13 +695,9 @@ class EngineExits(EngineHarness):
         with patch.object(m.paper_quotes, 'position_mark', return_value=quote):
             self.monitor.update_positions({A: self.coin})
         trade = self.closed()
-        self.assertEqual(trade['exit_reason'], 'STOP_LOSS_NET_TARGET')
-        self.assertAlmostEqual(trade['pnl_pct'], -5.0)
-        self.assertAlmostEqual(trade['pnl_usd'], -10.0)
-        self.assertAlmostEqual(m.STATE.demo_balance_usd, 990.0)
-        self.assertTrue(trade['paper_stop_capped'])
-        self.assertEqual(trade['stop_execution_source'], 'PAPER_HARD_STOP_CAP')
-        self.assertEqual(trade['observed_exit_net_proceeds_usd'], 170.0)
+        self.assertLess(trade['pnl_pct'], -5.0)
+        self.assertFalse(trade['paper_stop_capped'])
+        self.assertEqual(trade['exit_net_proceeds_usd'], 170.0)
 
     def test_user_fixed_cached_stop_must_still_hold_on_forced_fresh_quote(self):
         self.position(exit_policy='fixed_targets', exit_policy_version=exit_policy.USER_FIXED_VERSION,

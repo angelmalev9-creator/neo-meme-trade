@@ -77,6 +77,7 @@ WIN_REENTRY_SECONDS = max(0, int(float(os.getenv('NEO_WIN_REENTRY_SECONDS', '120
 LOSS_REENTRY_SECONDS = max(WIN_REENTRY_SECONDS, int(float(os.getenv('NEO_LOSS_REENTRY_SECONDS', '300'))))
 STOP_LOSS_PCT = 5.0
 STOP_EXECUTION_BUFFER_PCT = 0.5  # Planned risk allowance, never a fill clamp.
+FIXED_STOP_TRIGGER_BUFFER_PCT = 1.0  # Arm user PAPER stop early; realized PnL stays market-accurate.
 STOP_EXECUTION_ARM_NET_PCT = 5.0
 EXIT_IMPACT_EMERGENCY_PCT = 0.75
 TAKE_PROFIT_PCT = 10.0
@@ -196,6 +197,7 @@ def _oct4_fixed_settings() -> dict[str, Any]:
     """
     settings = _oct4_settings()
     settings.update(
+        POSITION_SCAN_SECONDS=0.5,
         STOP_LOSS_PCT=USER_ENGINE_SETTINGS_DEFAULTS['stop_loss_pct'],
         TAKE_PROFIT_PCT=USER_ENGINE_SETTINGS_DEFAULTS['take_profit_pct'],
         MAX_HOLD_MINUTES=0,
@@ -1376,6 +1378,7 @@ class State:
             }
             effective_notional = num(controls.get('trade_notional_usd'), TRADE_NOTIONAL_USD)
             effective_stop = num(controls.get('stop_loss_pct'), STOP_LOSS_PCT)
+            effective_stop_trigger = max(0.1, effective_stop - FIXED_STOP_TRIGGER_BUFFER_PCT) if user_controls_enabled else effective_stop
             effective_tp = num(controls.get('take_profit_pct'), TAKE_PROFIT_PCT)
             return {
                 'running': self.running,
@@ -1441,7 +1444,7 @@ class State:
                     'max_positions': MAX_POSITIONS,
                     'stop_loss_pct': effective_stop,
                     'stop_loss_basis': 'EXECUTABLE_NET_PNL',
-                    'stop_trigger_net_pct': -effective_stop,
+                    'stop_trigger_net_pct': -effective_stop_trigger,
                     'take_profit_basis': 'EXECUTABLE_NET_PNL',
                     'reentry_seconds': WIN_REENTRY_SECONDS, 'loss_reentry_seconds': LOSS_REENTRY_SECONDS,
                     'signal_strategy': SIGNAL_STRATEGY,
@@ -2273,19 +2276,12 @@ class Monitor:
             allocated = (notional+entry_cost)*fraction
             observed_net = num(quote.get('net_proceeds_usd'), math.nan)
             if not math.isfinite(observed_net): raise ValueError('invalid exit net proceeds')
+            # PAPER exits remain market-accurate: never clamp an adverse fill after
+            # the fact. User-fixed stops are armed early in update_positions so the
+            # engine attempts to exit before the configured maximum loss.
             net = observed_net
             paper_stop_capped = False
             stop_execution_source = quote.get('execution_source', 'MODEL_V1')
-            # Owner-requested PAPER hard stop: user-fixed target positions may
-            # never BOOK a realized loss worse than their configured stop.
-            # Keep the raw executable observation for audit, but cap PAPER PnL.
-            if reason == 'STOP_LOSS_NET_TARGET' and str(live.get('exit_policy') or '') == 'fixed_targets':
-                stop_pct = max(0.0, num(live.get('stop_loss_pct'), STOP_LOSS_PCT))
-                stop_floor_net = allocated - (notional * fraction * stop_pct / 100.0)
-                if net < stop_floor_net:
-                    net = stop_floor_net
-                    paper_stop_capped = True
-                    stop_execution_source = 'PAPER_HARD_STOP_CAP'
             pnl = net-allocated
             total_pnl = num(live.get('realized_partial_pnl_usd'))+pnl
             original_notional = num(live.get('original_notional_usd'), notional)
@@ -2395,12 +2391,16 @@ class Monitor:
             peak_signal_pct = (peak_price-entry)/entry*100 if signal_ok else None
             # The stop recorded at entry stays with the position when the profile changes.
             own_stop = num(position.get('stop_loss_pct'), 0.0) or oct4.CONFIG['stop_loss_pct']
+            # For user-fixed PAPER stops, arm one percentage point early. The fill
+            # itself is always the current executable market quote (never capped),
+            # so the ledger remains realistic while the bot aims to exit by -5%.
+            decision_stop = max(0.1, own_stop - FIXED_STOP_TRIGGER_BUFFER_PCT) if target_only else own_stop
             def decide(net_now, peak_now):
                 if policy == oct4.EXIT_POLICY:
                     return oct4.exit_reason(context, net_pct=net_now, peak_net_pct=peak_now, hold_minutes=hold,
                         signal_pct=signal_pct, peak_signal_pct=peak_signal_pct, stop_pct=own_stop)
                 return exit_policy.exit_reason(position, context, net_pct=net_now, peak_net_pct=peak_now,
-                    hold_minutes=hold, stop_pct=own_stop,
+                    hold_minutes=hold, stop_pct=decision_stop,
                     take_profit_pct=num(position.get('take_profit_net_pct'), TAKE_PROFIT_PCT) if policy in ('fixed', 'fixed_targets') else TAKE_PROFIT_PCT,
                     policy=policy)
             reason = reason or decide(pct, peak_pct)
@@ -2438,8 +2438,8 @@ class Monitor:
                 mfe_net_pct=max(peak_pct,num(position.get('mfe_net_pct'),pct)),
                 mae_net_pct=min(pct,num(position.get('mae_net_pct'),pct)),
                 signal_pnl_pct=(market-entry)/entry*100 if entry else None,
-                active_stop_signal_trigger_pct=None, legacy_chart_stop_ignored=position.get('stop_signal_trigger_pct'),
-                planned_stop_net_pct=-own_stop,hard_stop_net_pct=None,paper_stop_capped=False,
+                active_stop_signal_trigger_pct=-decision_stop if target_only else None, legacy_chart_stop_ignored=position.get('stop_signal_trigger_pct'),
+                planned_stop_net_pct=-own_stop,stop_trigger_net_pct=-decision_stop,hard_stop_net_pct=None,paper_stop_capped=False,
                 current_execution_price=quote.get('fill_price'), quote_status='fresh', valuation_status='available',
                 valuation_age_ms=max(0,now_ms()-num(quote.get('quoted_at'),now_ms())), last_known_pnl_usd=pnl,
                 conservative_risk_usd=notional+entry_cost, execution_quote_at=quote.get('quoted_at',now_ms()),
