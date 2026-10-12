@@ -183,6 +183,15 @@ STRATEGIES=[
  {'id':'FLOW_PULLBACK','name':'Flow Pullback','rule':lambda f: f['score']>=90 and f['liq']>=30000 and -4<=f['m5']<=4 and f['h1']>=0 and f['flow']['trades']>=5 and f['flow']['ratio']>=2.0 and f['flow']['buy_usd']>=250},
  {'id':'SECOND_WAVE','name':'Second Wave','rule':lambda f: f['score']>=90 and f['liq']>=30000 and 2<=f['m5']<=12 and 10<=f['h1']<=120 and f['flow']['ratio']>=1.7 and f['flow']['trades']>=4 and .15<=f['vol_liq']<=5},
  {'id':'CLEAN_MOMENTUM','name':'Clean Momentum','rule':lambda f: f['score']>=92 and f['liq']>=30000 and 3<=f['m5']<=18 and f['bs']>=1.2 and .20<=f['vol_liq']<=3.5 and f['flow']['ratio']>=1.5 and f['flow']['max_sell']<max(250,f['flow']['buy_usd']*.6)},
+ # NOVA V1: clean independent books. Entry decisions are enforced by
+ # lab_activity.RULES + nova_quality + price/rug/execution gates below.
+ {'id':'NOVA_ULTRA_EARLY','name':'Ultra Early Prime','rule':lambda f: True},
+ {'id':'NOVA_FLOW_RECLAIM','name':'Flow Reclaim','rule':lambda f: True},
+ {'id':'NOVA_BREAKOUT','name':'Breakout Prime','rule':lambda f: True},
+ {'id':'NOVA_LIQUID_FLOW','name':'Liquid Flow','rule':lambda f: True},
+ {'id':'NOVA_CONFLUENCE','name':'Confluence Prime','rule':lambda f: True},
+ {'id':'NOVA_WALLET_SWARM','name':'Wallet Swarm','rule':lambda f: True},
+ {'id':'NOVA_DEEP_FLOW','name':'Deep Flow','rule':lambda f: True},
  # TikTok Strategy: light-filter PAPER sniper, net stop -12% / net target +17%.
  {'id':'TIKTOK','name':'TikTok Strategy','rule':lambda f: f['score']>=65 and f['liq']>=10000 and f['mc']>=30000 and -5<=f['m5']<=60 and f['bs']>=.80 and f['lmc']>=.02 and f['age']<=1440 and f['h1']>=-50},
  # PAPER entry is additionally gated by a recent literal Solana address from X.
@@ -383,6 +392,19 @@ def rug_verdict(coin):
     return ok,{'fast':{'status':fast.get('status'),'reasons':fast.get('reasons')},
                'full':{'status':full.get('status'),'reasons':full.get('reasons')}}
 
+def nova_rug_verdict(strategy_id,coin,features):
+    """Fast chain safety is mandatory. Only Ultra Early may use a still-pending
+    full report during the first 10 minutes; every other NOVA book requires pass."""
+    fast=rug_guard.fast_chain_check(coin)
+    full=rug_guard.check(coin)
+    if fast.get('status')!='pass' or full.get('status') in {'blocked','unavailable'}:
+        return False,{'fast':fast,'full':full}
+    pending_early=(strategy_id=='NOVA_ULTRA_EARLY' and num(features.get('age'),999999)<=10
+                   and full.get('status')=='pending')
+    if full.get('status')!='pass' and not pending_early:
+        return False,{'fast':fast,'full':full}
+    return True,{'fast':fast,'full':full}
+
 def maybe_open(feed,flows):
     now=now_ms()
     x_signals=recent_x_signals(now)
@@ -404,6 +426,8 @@ def maybe_open(feed,flows):
         blocked_price=0
         blocked_cooldown=0
         blocked_rank=0
+        blocked_rug=0
+        blocked_execution=0
         scan_rejections={}
         def reject(reason):
             scan_rejections[reason]=scan_rejections.get(reason,0)+1
@@ -419,7 +443,8 @@ def maybe_open(feed,flows):
             if failed:
                 for reason in failed: reject(reason)
                 continue
-            quality=activity.profit_quality(features)
+            quality=(activity.nova_quality(features) if strategy['id'] in activity.NOVA_IDS
+                     else activity.profit_quality(features))
             if not quality['allow']:
                 for reason in quality['failures']: reject(reason)
                 continue
@@ -440,13 +465,23 @@ def maybe_open(feed,flows):
                 blocked_cooldown+=1; reject('cooldown')
                 continue
             checked+=1
+            trade_limit=activity.strategy_trade_limit(strategy['id'],TRADE_NOTIONAL)
             proposed=activity.affordable_entry(
-                coin,num(book['balance']),TRADE_NOTIONAL,entry_execution,exit_execution,
+                coin,num(book['balance']),trade_limit,entry_execution,exit_execution,
                 activity.entry_cost_cap(strategy['id'])
             )
             if proposed is None:
-                blocked_cost+=1; reject('cost')
+                blocked_cost+=1; reject('cost'); reject('nova_execution') if strategy['id'] in activity.NOVA_IDS else None
                 continue
+            if strategy['id'] in activity.NOVA_IDS:
+                if num(proposed.get('notional'))+1e-9 < activity.strategy_min_notional(strategy['id']):
+                    blocked_execution+=1; reject('nova_notional'); continue
+                if num((proposed.get('entry') or {}).get('impact_pct'),math.inf) > activity.strategy_max_impact(strategy['id']):
+                    blocked_execution+=1; reject('nova_impact'); continue
+                safe,verdict=nova_rug_verdict(strategy['id'],coin,features)
+                if not safe:
+                    blocked_rug+=1; reject('rug_check'); continue
+                features={**features,'nova_rug':verdict}
             if strategy['id']=='X_SIGNAL':
                 signal=x_signals.get(coin.get('address')) or {}
                 priority=num(signal.get('post_created_at_ms') or signal.get('seen_at_ms'))
@@ -454,6 +489,9 @@ def maybe_open(feed,flows):
             elif strategy['id']=='HYPE_RADAR':
                 priority=hype_matches[coin['address']]['score']
                 tiebreak=(activity.profit_quality_rank(features,proposed['initial_pnl_pct']), -num(features.get('age'),1e9))
+            elif strategy['id'] in activity.NOVA_IDS:
+                priority=activity.nova_rank(features,proposed['initial_pnl_pct'])
+                tiebreak=(num(features.get('flow',{}).get('buy_usd')), -num(features.get('age'),1e9))
             elif strategy['id']=='MOMENTUM_HUNTER':
                 priority=activity.momentum_hunter_rank(features,proposed['initial_pnl_pct'])
                 if priority < activity.MOMENTUM_HUNTER_MIN_RANK:
@@ -480,9 +518,10 @@ def maybe_open(feed,flows):
             'at':now,'candidates':len(candidates),'scan_rejections':scan_rejections,'matched_candidates':checked,'cost_rejected':blocked_cost,
             'cooldown_rejected':blocked_cooldown,'affordable_candidates':len(eligible),
             'price_verification_rejected':blocked_price,
-            'rank_rejected':blocked_rank,'active_x_signals':len(x_signals) if strategy['id']=='X_SIGNAL' else None,
+            'rank_rejected':blocked_rank,'rug_rejected':blocked_rug,'execution_rejected':blocked_execution,
+            'active_x_signals':len(x_signals) if strategy['id']=='X_SIGNAL' else None,
             'active_hype_themes':len(themes) if strategy['id']=='HYPE_RADAR' else None,
-            'selection_mode':('RECENT_X_SIGNAL_THEN_QUALITY' if strategy['id']=='X_SIGNAL' else 'HYPE_SCORE_THEN_QUALITY' if strategy['id']=='HYPE_RADAR' else ('MOMENTUM_HUNTER_RANK_V1' if strategy['id']=='MOMENTUM_HUNTER' else 'PROFIT_QUALITY_RANK_V1')),
+            'selection_mode':('NOVA_60S_FLOW_RANK_V1' if strategy['id'] in activity.NOVA_IDS else 'RECENT_X_SIGNAL_THEN_QUALITY' if strategy['id']=='X_SIGNAL' else 'HYPE_SCORE_THEN_QUALITY' if strategy['id']=='HYPE_RADAR' else ('MOMENTUM_HUNTER_RANK_V1' if strategy['id']=='MOMENTUM_HUNTER' else 'PROFIT_QUALITY_RANK_V1')),
         }
         if not eligible:
             continue
@@ -552,7 +591,7 @@ def persist(status='online',error=None):
     STATE['stats']={k:stats(v) for k,v in STATE['books'].items()}
     STATE['data_integrity_note']='Историята съдържа непотвърдени цени, включително XFUN. Не е доказателство за реална доходност. Новите входове минават независима проверка.'
     STATE['activity_config']={**activity.policy_config(),'stop_loss_net_pct':STOP_LOSS,
-                              'take_profit_net_pct':TAKE_PROFIT,'trade_limit_usd':TRADE_NOTIONAL}
+                              'take_profit_net_pct':TAKE_PROFIT,'trade_limit_usd':activity.NOVA_TRADE_NOTIONAL_USD}
     if error: STATE['error']=str(error)[:200]
     else: STATE.pop('error',None)
     published=merge_paired_snapshot(STATE)

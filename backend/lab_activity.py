@@ -9,7 +9,7 @@ import os
 import re
 from typing import Any, Callable
 
-POLICY_VERSION = 'LAB_REAL_EDGE_GUARD_V2'
+POLICY_VERSION = 'LAB_NOVA_REAL_EDGE_V1'
 REENTRY_SECONDS = 60
 LOSS_REENTRY_SECONDS = 180
 MAX_FEED_AGE_MS = 20_000
@@ -120,6 +120,16 @@ RULES = {
     'SECOND_WAVE': EntryRule(85, 30000, (1, 18), 1.0, .06, (2, 1e7), (5, 180), (.1, 7), flow_trades=3, flow_ratio=1.4),
     'CLEAN_MOMENTUM': EntryRule(87, 30000, (1, 25), 1.05, .06, (2, 1e7), volume_liquidity=(.12, 5), flow_ratio=1.25),
     'CONFLUENCE_MAX': EntryRule(90, 40000, (0, 18), 1.1, .12, (2, 1e7), (-15, 1000), (.12, 6), flow_trades=4, flow_ratio=1.6, wallets=3),
+    # NOVA generation: seven clean PAPER books built around 60s on-chain flow,
+    # executable-cost discipline and independent price/rug checks. 5m data is
+    # context, not a mandatory wait before a very early setup can qualify.
+    'NOVA_ULTRA_EARLY': EntryRule(84, 15000, (-2, 12), 1.35, .06, (5/60, 20), (-20, 200), flow_trades=3, flow_ratio=1.80, flow_buy=200, wallets=3, market_cap=15000),
+    'NOVA_FLOW_RECLAIM': EntryRule(88, 25000, (-3, 4), 1.20, .08, (5/60, 180), (-10, 120), flow_trades=5, flow_ratio=1.80, flow_buy=500, wallets=4),
+    'NOVA_BREAKOUT': EntryRule(90, 30000, (2, 12), 1.30, .08, (1, 180), (0, 150), (.05, 8), flow_trades=5, flow_ratio=1.60, flow_buy=500, wallets=4),
+    'NOVA_LIQUID_FLOW': EntryRule(88, 50000, (-1, 10), 1.20, .10, (1, 240), (-10, 150), flow_trades=4, flow_ratio=1.50, flow_buy=400, wallets=4),
+    'NOVA_CONFLUENCE': EntryRule(94, 40000, (0, 10), 1.30, .12, (1, 180), (0, 120), (.08, 5), flow_trades=6, flow_ratio=1.90, flow_buy=800, wallets=6),
+    'NOVA_WALLET_SWARM': EntryRule(88, 25000, (-2, 10), 1.20, .08, (5/60, 120), (-15, 150), flow_trades=6, flow_ratio=1.70, flow_buy=600, wallets=8),
+    'NOVA_DEEP_FLOW': EntryRule(90, 80000, (-2, 8), 1.15, .10, (2, 360), (-10, 100), flow_trades=5, flow_ratio=1.50, flow_buy=600, wallets=5),
     # TikTok Strategy: PAPER sniper with the lightest entry filter in the lab.
     # Any pool from the first minute, market cap of at least $30k, no order-flow
     # requirement. Feed, price-integrity and liquidity-floor safety are unchanged.
@@ -132,6 +142,13 @@ RULES = {
 
 # Per-strategy overrides. Everything not listed uses the lab-wide defaults.
 EXIT_OVERRIDES = {
+    'NOVA_ULTRA_EARLY': {'stop_loss': 4.0, 'take_profit': 12.0, 'max_hold_minutes': 15.0},
+    'NOVA_FLOW_RECLAIM': {'stop_loss': 3.0, 'take_profit': 9.0, 'max_hold_minutes': 25.0},
+    'NOVA_BREAKOUT': {'stop_loss': 3.5, 'take_profit': 11.0, 'max_hold_minutes': 20.0},
+    'NOVA_LIQUID_FLOW': {'stop_loss': 2.5, 'take_profit': 7.0, 'max_hold_minutes': 30.0},
+    'NOVA_CONFLUENCE': {'stop_loss': 3.0, 'take_profit': 10.0, 'max_hold_minutes': 30.0},
+    'NOVA_WALLET_SWARM': {'stop_loss': 3.5, 'take_profit': 10.0, 'max_hold_minutes': 20.0},
+    'NOVA_DEEP_FLOW': {'stop_loss': 2.5, 'take_profit': 7.0, 'max_hold_minutes': 30.0},
     'TIKTOK': {'stop_loss': 12.0, 'take_profit': 17.0},
     'X_SIGNAL': {'stop_loss': 12.0, 'take_profit': 17.0},
     'HYPE_RADAR': {'stop_loss': 12.0, 'take_profit': 17.0},
@@ -140,6 +157,13 @@ EXIT_OVERRIDES = {
 # charges (PumpSwap is about 1.25% per side near a $30k market cap), so a
 # strategy allowed to enter that low needs room above the 2.75% default.
 ENTRY_COST_CAPS = {
+    'NOVA_ULTRA_EARLY': 3.25,
+    'NOVA_FLOW_RECLAIM': 2.20,
+    'NOVA_BREAKOUT': 2.25,
+    'NOVA_LIQUID_FLOW': 1.80,
+    'NOVA_CONFLUENCE': 2.00,
+    'NOVA_WALLET_SWARM': 2.25,
+    'NOVA_DEEP_FLOW': 1.60,
     'TIKTOK': 4.0,
     'X_SIGNAL': 4.0,
     'HYPE_RADAR': 4.0,
@@ -147,6 +171,31 @@ ENTRY_COST_CAPS = {
 # Forward-only high-quality guard for the currently weak flow strategies.
 # It does not rewrite any old trade/balance; it only decides whether a future
 # candidate is strong enough to enter. Each strategy keeps its own base rule.
+NOVA_IDS = frozenset({
+    'NOVA_ULTRA_EARLY','NOVA_FLOW_RECLAIM','NOVA_BREAKOUT','NOVA_LIQUID_FLOW',
+    'NOVA_CONFLUENCE','NOVA_WALLET_SWARM','NOVA_DEEP_FLOW',
+})
+ACTIVE_STRATEGY_IDS = NOVA_IDS
+NOVA_TRADE_NOTIONAL_USD = 200.0
+NOVA_MIN_NOTIONAL_USD = {
+    'NOVA_ULTRA_EARLY': 100.0,
+    'NOVA_FLOW_RECLAIM': 150.0,
+    'NOVA_BREAKOUT': 150.0,
+    'NOVA_LIQUID_FLOW': 175.0,
+    'NOVA_CONFLUENCE': 175.0,
+    'NOVA_WALLET_SWARM': 150.0,
+    'NOVA_DEEP_FLOW': 175.0,
+}
+NOVA_MAX_ENTRY_IMPACT_PCT = {
+    'NOVA_ULTRA_EARLY': 1.25,
+    'NOVA_FLOW_RECLAIM': .90,
+    'NOVA_BREAKOUT': .90,
+    'NOVA_LIQUID_FLOW': .70,
+    'NOVA_CONFLUENCE': .75,
+    'NOVA_WALLET_SWARM': .90,
+    'NOVA_DEEP_FLOW': .55,
+}
+
 PROFIT_GUARD_VERSION = 'REAL_EDGE_GUARD_V1'
 PROFIT_GUARD_RULES = {
     'FLOW_PULLBACK': dict(score=90, liq=30000, age=180, h1=80, m5=(-4, 4), bs=1.20, vol5=6000, tx5=100, trades=6, ratio=1.80, buy=900, wallets=5),
@@ -165,25 +214,17 @@ PROFIT_GUARD_RULES = {
 PROFIT_GUARD_IDS = frozenset(PROFIT_GUARD_RULES)
 # Re-check these books every second while they hold a position. This reduces
 # stop overshoot in the PAPER model without pretending a real stop is guaranteed.
-SNIPER_IDS = frozenset({'TIKTOK', 'X_SIGNAL', 'HYPE_RADAR'}) | PROFIT_GUARD_IDS
+SNIPER_IDS = frozenset({'TIKTOK', 'X_SIGNAL', 'HYPE_RADAR'}) | PROFIT_GUARD_IDS | NOVA_IDS
 # Their configured +10% target is represented as a resting PAPER limit, so a
 # future win is booked at the target rather than benefiting from a late poll.
-LIMIT_TAKE_PROFIT_IDS = frozenset({'TIKTOK', 'X_SIGNAL', 'HYPE_RADAR'}) | PROFIT_GUARD_IDS
+LIMIT_TAKE_PROFIT_IDS = frozenset({'TIKTOK', 'X_SIGNAL', 'HYPE_RADAR'}) | PROFIT_GUARD_IDS | NOVA_IDS
 # PAPER-only hard stop: TikTok books future stop exits at exactly -12% net.
 # This is a simulation rule, not a claim that a real market stop can always fill without slippage/gaps.
 HARD_STOP_LOSS_IDS = frozenset({'TIKTOK'})
 # Retired PAPER books: preserve their historical state for audit, but stop future entries.
 # The flow books below have enough closed-trade evidence in the owner's lab to reject them
 # (negative realized result with profit factor below 0.80). Tiny-sample books are kept running.
-_BASE_DISABLED_STRATEGY_IDS = frozenset({
-    'HYPE_RADAR',
-    'BREAKOUT_CONFIRM',
-    'LIQ_FLOW_CONFLUENCE',
-    'EARLY_FLOW',
-    'HIGH_SCORE_FLOW',
-    'FLOW_SNIPER',
-    'VOLUME_QUALITY',
-})
+_BASE_DISABLED_STRATEGY_IDS = frozenset(set(RULES) - set(ACTIVE_STRATEGY_IDS))
 _INSTANCE_DISABLED_STRATEGY_IDS = frozenset(
     strategy_id.strip().upper()
     for strategy_id in os.getenv('NEO_LAB_DISABLED_STRATEGIES', '').split(',')
@@ -215,6 +256,9 @@ REJECTION_LABELS = {
     'guard_flow_trades':'edge guard: малко потвърдени on-chain сделки','guard_flow_ratio':'edge guard: слаб on-chain buy/sell',
     'guard_flow_buy':'edge guard: малко on-chain buy USD','guard_wallets':'edge guard: малко уникални портфейли',
     'guard_sell_wall':'edge guard: голям sell спрямо buy flow',
+    'nova_flow':'NOVA: слаб 60с on-chain flow','nova_sell_wall':'NOVA: силен sell wall',
+    'nova_age':'NOVA: възраст извън активния прозорец','nova_execution':'NOVA: изпълнението е твърде скъпо',
+    'nova_impact':'NOVA: price impact над лимита','nova_notional':'NOVA: $200 setup не се изпълнява с достатъчен размер',
 }
 
 
@@ -316,6 +360,61 @@ def profit_guard_failures(strategy_id: str, f: dict[str, Any]) -> list[str]:
     return [name for name, ok in checks if not ok]
 
 
+NOVA_QUALITY_VERSION = 'NOVA_60S_FLOW_QUALITY_V1'
+
+def nova_quality(f: dict[str, Any]) -> dict[str, Any]:
+    """Primary quality gate for the clean NOVA generation.
+
+    60s confirmed flow is the primary evidence. 5m volume is intentionally not
+    mandatory, so a genuine newborn setup does not have to wait five minutes.
+    """
+    flow=f.get('flow') or {}
+    score,liq=number(f.get('score')),number(f.get('liq'))
+    age,m5,bs=number(f.get('age'),math.inf),number(f.get('m5'),-math.inf),number(f.get('bs'))
+    trades,ratio=number(flow.get('trades')),number(flow.get('ratio'))
+    buy,wallets=number(flow.get('buy_usd')),number(flow.get('unique_wallets'))
+    max_sell=number(flow.get('max_sell'))
+    verified=(trades>=3 and ratio>=1.30 and buy>=150 and wallets>=2
+              and max_sell < max(750.0,buy*.80))
+    exceptional=(age<=10 and number(f.get('tx5'))>=10 and bs>=1.70
+                 and trades>=2 and ratio>=1.40 and buy>=100 and wallets>=2
+                 and max_sell < max(500.0,buy*.75))
+    checks={
+        'quality_score':score>=82,'quality_liquidity':liq>=15000,
+        'nova_age':5/60<=age<=360,'quality_momentum':-5<=m5<=20,
+        'quality_buy_pressure':1.10<=bs<=20.0,'nova_flow':verified or exceptional,
+    }
+    failures=[name for name,ok in checks.items() if not ok]
+    return {'version':NOVA_QUALITY_VERSION,'allow':not failures,'failures':failures,
+            'verified_flow':verified,'exceptional_early':exceptional}
+
+def nova_rank(f: dict[str, Any], entry_cost_pct: float = 0.0) -> float:
+    """Rank only information available at entry; 60s flow gets most weight."""
+    flow=f.get('flow') or {}; clamp=lambda x:max(0.0,min(1.0,number(x)))
+    score=clamp((number(f.get('score'))-80)/20)
+    liq=clamp((math.log10(max(number(f.get('liq')),1.0))-4.0)/1.4)
+    age=number(f.get('age'),999999); fresh=1.0 if age<=20 else clamp(1-(age-20)/220)
+    m5=number(f.get('m5')); momentum=clamp((m5+3)/10) if m5<=7 else clamp(1-(m5-7)/16)
+    bs=number(f.get('bs')); market_buy=clamp((bs-1.1)/2.0)
+    ratio=clamp((number(flow.get('ratio'))-1.2)/2.8)
+    tape=clamp(number(flow.get('trades'))/10)
+    wallets=clamp(number(flow.get('unique_wallets'))/8)
+    buy=clamp(number(flow.get('buy_usd'))/1500)
+    sell=clamp(number(flow.get('max_sell'))/max(number(flow.get('buy_usd')),1.0))
+    cost=clamp(max(0.0,-number(entry_cost_pct))/3.25)
+    rank=(.12*score+.07*liq+.10*fresh+.08*momentum+.10*market_buy+.17*ratio
+          +.09*tape+.11*wallets+.12*buy+.08*(1-cost)-.08*sell)
+    return round(max(0.0,min(1.0,rank))*100,4)
+
+def strategy_trade_limit(strategy_id: str, default: float) -> float:
+    return NOVA_TRADE_NOTIONAL_USD if strategy_id in NOVA_IDS else float(default)
+
+def strategy_min_notional(strategy_id: str) -> float:
+    return float(NOVA_MIN_NOTIONAL_USD.get(strategy_id,MIN_NOTIONAL_USD))
+
+def strategy_max_impact(strategy_id: str) -> float:
+    return float(NOVA_MAX_ENTRY_IMPACT_PCT.get(strategy_id,math.inf))
+
 def profit_quality_rank(f: dict[str, Any], entry_cost_pct: float = 0.0) -> float:
     flow=f.get('flow') or {}; clamp=lambda x:max(0.0,min(1.0,number(x)))
     score=clamp((number(f.get('score'))-80)/20)
@@ -392,5 +491,8 @@ def policy_config() -> dict:
             'profit_quality_version': PROFIT_QUALITY_VERSION,
             'profit_guard_version': PROFIT_GUARD_VERSION,
             'profit_guard_ids': sorted(PROFIT_GUARD_IDS),
+            'active_generation': 'NOVA_V1', 'active_strategy_ids': sorted(ACTIVE_STRATEGY_IDS),
+            'nova_quality_version': NOVA_QUALITY_VERSION, 'nova_trade_notional_usd': NOVA_TRADE_NOTIONAL_USD,
+            'nova_min_notional_usd': NOVA_MIN_NOTIONAL_USD, 'nova_max_entry_impact_pct': NOVA_MAX_ENTRY_IMPACT_PCT,
             'disabled_strategy_ids': sorted(DISABLED_STRATEGY_IDS),
             'execution_basis': 'ESTIMATED_PAPER_COSTS_NOT_LIVE_FILLS'}
