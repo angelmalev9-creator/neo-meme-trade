@@ -8,11 +8,17 @@ import math
 import re
 from typing import Any
 
-POLICY_VERSION = 'ORDER_FLOW_HIGH_FREQ_SCOUT_V10'
+POLICY_VERSION = 'ORDER_FLOW_HIGH_FREQ_SCOUT_V11_EXECUTION_GUARD'
 import gold_order_flow
 MAX_FEED_AGE_MS = 30_000
 MAX_ENTRY_QUOTE_AGE_MS = 10_000
 MAX_QUOTED_CANDIDATES = 12
+# Hard PAPER execution-quality envelope. These caps intentionally sit below the
+# configured -5% stop so a position does not begin life already too close to it.
+# They use the executable BUY -> immediate SELL preflight, not the chart price.
+PAPER_MAX_ENTRY_IMPACT_PCT = 1.00
+PAPER_MAX_ROUNDTRIP_COST_PCT = 1.50
+PAPER_MAX_WORST_CASE_COST_PCT = 2.75
 _ADDRESS = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 LABELS = {
     'risk_budget_unavailable': 'недостатъчен оставащ дневен бюджет за минималната позиция',
@@ -121,15 +127,21 @@ def quote_rejections(entry, expected_roundtrip_pct, conservative_roundtrip_pct,
     impact = number(entry.get('price_impact_pct'), math.inf)
     quoted_at = number(entry.get('quoted_at'))
     reasons = []
+    # Never let a looser profile override the execution envelope protecting the
+    # -5% PAPER stop. A clean signal can still be a bad trade when $200 cannot
+    # round-trip through the exact pool cheaply enough.
+    effective_max_impact = min(number(max_impact, math.inf), PAPER_MAX_ENTRY_IMPACT_PCT)
+    effective_max_cost = min(number(max_cost, math.inf), PAPER_MAX_ROUNDTRIP_COST_PCT)
+    effective_max_conservative_cost = min(number(max_conservative_cost, math.inf), PAPER_MAX_WORST_CASE_COST_PCT)
     if number(entry.get('token_raw_expected')) <= 0 or not all(math.isfinite(number(x, math.nan)) for x in (expected_roundtrip_pct, conservative_roundtrip_pct)):
         reasons.append('invalid_quote')
     if quoted_at <= 0 or not 0 <= now - quoted_at <= MAX_ENTRY_QUOTE_AGE_MS:
         reasons.append('quote_age')
-    if not math.isfinite(impact) or impact > max_impact:
+    if not math.isfinite(impact) or impact > effective_max_impact:
         reasons.append('impact')
-    if number(expected_roundtrip_pct, -math.inf) < -max_cost:
+    if number(expected_roundtrip_pct, -math.inf) < -effective_max_cost:
         reasons.append('roundtrip_cost')
-    if number(conservative_roundtrip_pct, -math.inf) < -max_conservative_cost:
+    if number(conservative_roundtrip_pct, -math.inf) < -effective_max_conservative_cost:
         reasons.append('worst_case_cost')
     return reasons
 
