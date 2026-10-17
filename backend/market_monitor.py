@@ -2550,7 +2550,7 @@ class Monitor:
         # Outcome-aware cooldown: keep sampling many different coins, but avoid
         # immediate revenge loops on the same mint.
         fixed_cooldown = is_adaptive() and not is_learner()
-        recent = oct4.cooldown_addresses(STATE.history, now, LOSS_REENTRY_SECONDS) if fixed_cooldown else set()
+        recent = oct4.cooldown_addresses(STATE.history, now, LOSS_REENTRY_SECONDS, loss_multiplier=3.0 if STRATEGY_PROFILE == OCT4_FIXED_PROFILE else 1.0) if fixed_cooldown else set()
         learned = learning_table(STATE.history, now) if is_learner() else None
         for trade in ([] if fixed_cooldown else STATE.history):
             recent_address = trade.get('address')
@@ -2758,6 +2758,7 @@ class Monitor:
                 max_impact=STRICT_MAX_ENTRY_IMPACT_PCT,
                 max_cost=STRICT_MAX_ROUNDTRIP_COST_PCT,
                 max_conservative_cost=STRICT_MAX_WORST_CASE_COST_PCT, now=now_ms(),
+                protect_stop=(STRATEGY_PROFILE == OCT4_FIXED_PROFILE),
             )
             if quote_rejected:
                 reject(report, quote_rejected, coin, {
