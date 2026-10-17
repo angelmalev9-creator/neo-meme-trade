@@ -13,47 +13,42 @@ class StopProtectionV2Tests(unittest.TestCase):
             'quoted_at': int(time.time() * 1000),
         }
 
-    def test_clean_execution_inside_stop_buffer_passes(self):
-        reasons = entry_policy.quote_rejections(
-            self.quote(0.8), -1.40, -2.60,
+    def check(self, impact, expected, conservative, *, protect=True):
+        return entry_policy.quote_rejections(
+            self.quote(impact), expected, conservative,
             max_impact=2.0, max_cost=2.75, max_conservative_cost=4.5,
-            now=int(time.time() * 1000),
+            now=int(time.time() * 1000), protect_stop=protect,
         )
-        self.assertEqual(reasons, [])
 
-    def test_roundtrip_near_stop_is_rejected_even_if_profile_is_looser(self):
-        reasons = entry_policy.quote_rejections(
-            self.quote(0.8), -1.51, -2.60,
-            max_impact=2.0, max_cost=2.75, max_conservative_cost=4.5,
-            now=int(time.time() * 1000),
-        )
-        self.assertIn('roundtrip_cost', reasons)
+    def test_clean_execution_inside_stop_buffer_passes(self):
+        self.assertEqual(self.check(0.8, -1.40, -2.60), [])
+
+    def test_roundtrip_near_stop_is_rejected_in_fixed_stop_profile(self):
+        self.assertIn('roundtrip_cost', self.check(0.8, -1.51, -2.60))
 
     def test_worst_case_near_stop_is_rejected(self):
-        reasons = entry_policy.quote_rejections(
-            self.quote(0.8), -1.30, -2.76,
-            max_impact=2.0, max_cost=2.75, max_conservative_cost=4.5,
-            now=int(time.time() * 1000),
-        )
-        self.assertIn('worst_case_cost', reasons)
+        self.assertIn('worst_case_cost', self.check(0.8, -1.30, -2.76))
 
     def test_entry_impact_above_one_percent_is_rejected(self):
-        reasons = entry_policy.quote_rejections(
-            self.quote(1.01), -1.0, -2.0,
-            max_impact=2.0, max_cost=2.75, max_conservative_cost=4.5,
-            now=int(time.time() * 1000),
-        )
-        self.assertIn('impact', reasons)
+        self.assertIn('impact', self.check(1.01, -1.0, -2.0))
 
-    def test_recent_loss_has_longer_same_token_cooldown_than_win(self):
+    def test_other_profiles_keep_their_validated_execution_limits(self):
+        self.assertEqual(self.check(1.20, -2.0, -4.0, protect=False), [])
+
+    def test_recent_loss_has_longer_same_token_cooldown_than_win_when_enabled(self):
         now = int(time.time() * 1000)
         history = [
             {'address': 'LOSS', 'closed_at': now - 50 * 60 * 1000, 'pnl_pct': -4.0},
             {'address': 'WIN', 'closed_at': now - 50 * 60 * 1000, 'pnl_pct': 10.0},
         ]
-        blocked = oct4.cooldown_addresses(history, now, seconds=20 * 60)
+        blocked = oct4.cooldown_addresses(history, now, seconds=20 * 60, loss_multiplier=3.0)
         self.assertIn('LOSS', blocked)
         self.assertNotIn('WIN', blocked)
+
+    def test_default_cooldown_behavior_stays_backward_compatible(self):
+        now = int(time.time() * 1000)
+        history = [{'address': 'LOSS', 'closed_at': now - 21 * 60 * 1000, 'pnl_pct': -4.0}]
+        self.assertNotIn('LOSS', oct4.cooldown_addresses(history, now, seconds=20 * 60))
 
 
 if __name__ == '__main__':
