@@ -1,0 +1,88 @@
+name: Temporary fixed-stop scope sync
+
+on:
+  push:
+    branches:
+      - fix/paper-stop-entry-quality-v2
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/paper-stop-entry-quality-v2
+          fetch-depth: 0
+
+      - name: Scope stop protection to fixed-target PAPER profile
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+
+          def replace_once(path, old, new):
+              p=Path(path)
+              text=p.read_text(encoding='utf-8')
+              if old in text:
+                  text=text.replace(old,new,1)
+                  p.write_text(text,encoding='utf-8')
+              elif new not in text:
+                  raise SystemExit(f'anchor missing in {path}: {old!r}')
+
+          replace_once(
+              'backend/order_flow_adaptive_oct4.py',
+              '''def cooldown_addresses(history, now, seconds=CONFIG['same_token_cooldown_seconds']):\n    \"\"\"Block recent re-entry; losses get a longer cooldown than winners.\"\"\"\n    blocked = set()\n    for trade in history:\n        address = trade.get('address')\n        closed_at = _n(trade.get('closed_at'))\n        if not address or closed_at <= 0:\n            continue\n        loss_multiplier = 3.0 if _n(trade.get('pnl_pct')) < 0 else 1.0\n        cutoff = now - seconds * loss_multiplier * 1000\n        if closed_at >= cutoff:\n            blocked.add(address)\n    return blocked\n''',
+              '''def cooldown_addresses(history, now, seconds=CONFIG['same_token_cooldown_seconds'], *, loss_multiplier=1.0):\n    \"\"\"Block recent re-entry; optionally hold losing mints out for longer.\"\"\"\n    blocked = set()\n    loss_multiplier = max(1.0, float(loss_multiplier or 1.0))\n    for trade in history:\n        address = trade.get('address')\n        closed_at = _n(trade.get('closed_at'))\n        if not address or closed_at <= 0:\n            continue\n        multiplier = loss_multiplier if _n(trade.get('pnl_pct')) < 0 else 1.0\n        cutoff = now - seconds * multiplier * 1000\n        if closed_at >= cutoff:\n            blocked.add(address)\n    return blocked\n'''
+          )
+
+          replace_once(
+              'backend/market_monitor.py',
+              "recent = oct4.cooldown_addresses(STATE.history, now, LOSS_REENTRY_SECONDS) if fixed_cooldown else set()",
+              "recent = oct4.cooldown_addresses(STATE.history, now, LOSS_REENTRY_SECONDS, loss_multiplier=3.0 if STRATEGY_PROFILE == OCT4_FIXED_PROFILE else 1.0) if fixed_cooldown else set()"
+          )
+          replace_once(
+              'backend/market_monitor.py',
+              "                max_conservative_cost=STRICT_MAX_WORST_CASE_COST_PCT, now=now_ms(),\n            )",
+              "                max_conservative_cost=STRICT_MAX_WORST_CASE_COST_PCT, now=now_ms(),\n                protect_stop=(STRATEGY_PROFILE == OCT4_FIXED_PROFILE),\n            )"
+          )
+
+          lock_path=Path('strategy-lock.json')
+          lock=json.loads(lock_path.read_text(encoding='utf-8'))
+          def digest(path):
+              text=Path(path).read_text(encoding='utf-8').replace('\\r\\n','\\n')
+              return hashlib.sha256(text.encode('utf-8')).hexdigest()
+          lock['sha256']=digest(lock['strategy_file'])
+          for path in ('backend/engine_entry_policy.py','backend/order_flow_adaptive_oct4.py'):
+              lock['support_files_sha256'][path]=digest(path)
+          reasons=lock.setdefault('hash_change_reasons',{})
+          note=(' 2026-10-18 follow-up: stricter 1.0/1.5/2.75 executable envelope and 3x loss-mint cooldown '
+                'are scoped to ORDER_FLOW_OCT4_USER_FIXED only; learner/adaptive profiles retain their validated limits and cooldown behavior.')
+          if note.strip() not in reasons.get('backend/market_monitor.py',''):
+              reasons['backend/market_monitor.py']=reasons.get('backend/market_monitor.py','')+note
+          lock_path.write_text(json.dumps(lock,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+
+      - name: Verify focused and full Python suites
+        shell: bash
+        run: |
+          PYTHONPATH=backend python3 -m unittest tests.test_stop_protection_v2 -v
+          python3 scripts/run_python_checks.py
+          node scripts/verify-strategy-lock.mjs
+          git diff --check
+
+      - name: Commit synchronized patch
+        shell: bash
+        run: |
+          git config user.name "neo-paper-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/market_monitor.py backend/order_flow_adaptive_oct4.py strategy-lock.json
+          if git diff --cached --quiet; then
+            echo "No sync commit needed."
+          else
+            git commit -m "Scope stop protection to user fixed PAPER profile [lock-sync]"
+            git push origin HEAD:fix/paper-stop-entry-quality-v2
+          fi
