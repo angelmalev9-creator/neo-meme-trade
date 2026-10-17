@@ -1,0 +1,101 @@
+name: Temporary stop protection lock sync
+
+on:
+  push:
+    branches:
+      - fix/paper-stop-entry-quality-v2
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/paper-stop-entry-quality-v2
+          fetch-depth: 0
+
+      - name: Apply focused PAPER stop protection patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if old in text:
+                  text = text.replace(old, new, 1)
+                  p.write_text(text, encoding='utf-8')
+              elif new not in text:
+                  raise SystemExit(f'expected patch anchor missing: {path}: {old!r}')
+
+          # The market-accurate PAPER stop remains uncapped, but it is armed
+          # earlier and checked faster so normal slippage has more room before -5%.
+          replace_once(
+              'backend/market_monitor.py',
+              "FIXED_STOP_TRIGGER_BUFFER_PCT = 1.0  # Arm user PAPER stop early; realized PnL stays market-accurate.",
+              "FIXED_STOP_TRIGGER_BUFFER_PCT = 1.5  # Arm user PAPER stop earlier; realized PnL stays market-accurate.",
+          )
+          replace_once(
+              'backend/market_monitor.py',
+              '        POSITION_SCAN_SECONDS=0.5,',
+              '        POSITION_SCAN_SECONDS=0.25,',
+          )
+
+          # After a losing trade, do not immediately recycle the same mint.
+          old = '''def cooldown_addresses(history, now, seconds=CONFIG['same_token_cooldown_seconds']):\n    \"\"\"Tokens closed within the cooldown, win or loss alike.\"\"\"\n    cutoff = now - seconds * 1000\n    blocked = set()\n    for trade in history:\n        address = trade.get('address')\n        closed_at = _n(trade.get('closed_at'))\n        if address and closed_at > 0 and closed_at >= cutoff:\n            blocked.add(address)\n    return blocked\n'''
+          new = '''def cooldown_addresses(history, now, seconds=CONFIG['same_token_cooldown_seconds']):\n    \"\"\"Block recent re-entry; losses get a longer cooldown than winners.\"\"\"\n    blocked = set()\n    for trade in history:\n        address = trade.get('address')\n        closed_at = _n(trade.get('closed_at'))\n        if not address or closed_at <= 0:\n            continue\n        loss_multiplier = 3.0 if _n(trade.get('pnl_pct')) < 0 else 1.0\n        cutoff = now - seconds * loss_multiplier * 1000\n        if closed_at >= cutoff:\n            blocked.add(address)\n    return blocked\n'''
+          replace_once('backend/order_flow_adaptive_oct4.py', old, new)
+
+          # Synchronize the strategy lock with the files that influence the main PAPER engine.
+          lock_path = Path('strategy-lock.json')
+          lock = json.loads(lock_path.read_text(encoding='utf-8'))
+          def digest(path):
+              text = Path(path).read_text(encoding='utf-8').replace('\r\n', '\n')
+              return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+          lock['sha256'] = digest(lock['strategy_file'])
+          for path in ('backend/engine_entry_policy.py', 'backend/order_flow_adaptive_oct4.py'):
+              lock['support_files_sha256'][path] = digest(path)
+
+          reasons = lock.setdefault('hash_change_reasons', {})
+          entry_note = (' 2026-10-18: executable-entry stop-protection envelope rejects >1.0% entry impact, '
+                        '>1.5% immediate round-trip cost or >2.75% conservative round-trip cost so new PAPER '
+                        'positions do not begin too close to the -5% stop.')
+          if entry_note.strip() not in reasons.get('backend/engine_entry_policy.py', ''):
+              reasons['backend/engine_entry_policy.py'] = reasons.get('backend/engine_entry_policy.py', '') + entry_note
+          oct4_note = (' 2026-10-18: losing mints use a 3x same-token cooldown to avoid repeating the same failed setup; '
+                       'winning-mint cooldown remains unchanged.')
+          if oct4_note.strip() not in reasons.get('backend/order_flow_adaptive_oct4.py', ''):
+              reasons['backend/order_flow_adaptive_oct4.py'] = reasons.get('backend/order_flow_adaptive_oct4.py', '') + oct4_note
+          main_note = (' 2026-10-18: user-fixed PAPER stops are armed 1.5 percentage points before the configured stop '
+                       'and checked every 0.25s; fills remain uncapped and market-observed.')
+          if main_note.strip() not in reasons.get('backend/market_monitor.py', ''):
+              reasons['backend/market_monitor.py'] = reasons.get('backend/market_monitor.py', '') + main_note
+
+          lock_path.write_text(json.dumps(lock, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          PY
+
+      - name: Focused regression checks
+        shell: bash
+        run: |
+          PYTHONPATH=backend python3 -m unittest tests.test_stop_protection_v2 -v
+          node scripts/verify-strategy-lock.mjs
+          git diff --check
+
+      - name: Commit synchronized patch
+        shell: bash
+        run: |
+          git config user.name "neo-paper-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/market_monitor.py backend/order_flow_adaptive_oct4.py strategy-lock.json
+          if git diff --cached --quiet; then
+            echo "No synchronization commit needed."
+          else
+            git commit -m "Protect PAPER stop with earlier exit and cleaner entries [lock-sync]"
+            git push origin HEAD:fix/paper-stop-entry-quality-v2
+          fi
