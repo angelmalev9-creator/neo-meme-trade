@@ -308,14 +308,18 @@ def exit_reason(context, *, net_pct, peak_net_pct, hold_minutes,
     return None
 
 
-def cooldown_addresses(history, now, seconds=CONFIG['same_token_cooldown_seconds']):
-    """Tokens closed within the cooldown, win or loss alike."""
-    cutoff = now - seconds * 1000
+def cooldown_addresses(history, now, seconds=CONFIG['same_token_cooldown_seconds'], *, loss_multiplier=1.0):
+    """Block recent re-entry; optionally hold losing mints out for longer."""
     blocked = set()
+    loss_multiplier = max(1.0, float(loss_multiplier or 1.0))
     for trade in history:
         address = trade.get('address')
         closed_at = _n(trade.get('closed_at'))
-        if address and closed_at > 0 and closed_at >= cutoff:
+        if not address or closed_at <= 0:
+            continue
+        multiplier = loss_multiplier if _n(trade.get('pnl_pct')) < 0 else 1.0
+        cutoff = now - seconds * multiplier * 1000
+        if closed_at >= cutoff:
             blocked.add(address)
     return blocked
 

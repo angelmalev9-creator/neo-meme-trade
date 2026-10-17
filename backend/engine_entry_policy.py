@@ -8,11 +8,17 @@ import math
 import re
 from typing import Any
 
-POLICY_VERSION = 'ORDER_FLOW_HIGH_FREQ_SCOUT_V10'
+POLICY_VERSION = 'ORDER_FLOW_HIGH_FREQ_SCOUT_V11_EXECUTION_GUARD'
 import gold_order_flow
 MAX_FEED_AGE_MS = 30_000
 MAX_ENTRY_QUOTE_AGE_MS = 10_000
 MAX_QUOTED_CANDIDATES = 12
+# Fixed-target PAPER execution envelope. This is opt-in so the separate adaptive
+# learner keeps its own validated cost policy while the user's -5% stop profile
+# gets extra room before the stop.
+PAPER_MAX_ENTRY_IMPACT_PCT = 1.00
+PAPER_MAX_ROUNDTRIP_COST_PCT = 1.50
+PAPER_MAX_WORST_CASE_COST_PCT = 2.75
 _ADDRESS = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 LABELS = {
     'risk_budget_unavailable': 'недостатъчен оставащ дневен бюджет за минималната позиция',
@@ -117,19 +123,28 @@ def signal_rejections(coin, flow, context, *, min_score, min_liquidity,
 
 
 def quote_rejections(entry, expected_roundtrip_pct, conservative_roundtrip_pct,
-                     *, max_impact, max_cost, max_conservative_cost, now):
+                     *, max_impact, max_cost, max_conservative_cost, now,
+                     protect_stop=False):
     impact = number(entry.get('price_impact_pct'), math.inf)
     quoted_at = number(entry.get('quoted_at'))
     reasons = []
+    if protect_stop:
+        effective_max_impact = min(number(max_impact, math.inf), PAPER_MAX_ENTRY_IMPACT_PCT)
+        effective_max_cost = min(number(max_cost, math.inf), PAPER_MAX_ROUNDTRIP_COST_PCT)
+        effective_max_conservative_cost = min(number(max_conservative_cost, math.inf), PAPER_MAX_WORST_CASE_COST_PCT)
+    else:
+        effective_max_impact = number(max_impact, math.inf)
+        effective_max_cost = number(max_cost, math.inf)
+        effective_max_conservative_cost = number(max_conservative_cost, math.inf)
     if number(entry.get('token_raw_expected')) <= 0 or not all(math.isfinite(number(x, math.nan)) for x in (expected_roundtrip_pct, conservative_roundtrip_pct)):
         reasons.append('invalid_quote')
     if quoted_at <= 0 or not 0 <= now - quoted_at <= MAX_ENTRY_QUOTE_AGE_MS:
         reasons.append('quote_age')
-    if not math.isfinite(impact) or impact > max_impact:
+    if not math.isfinite(impact) or impact > effective_max_impact:
         reasons.append('impact')
-    if number(expected_roundtrip_pct, -math.inf) < -max_cost:
+    if number(expected_roundtrip_pct, -math.inf) < -effective_max_cost:
         reasons.append('roundtrip_cost')
-    if number(conservative_roundtrip_pct, -math.inf) < -max_conservative_cost:
+    if number(conservative_roundtrip_pct, -math.inf) < -effective_max_conservative_cost:
         reasons.append('worst_case_cost')
     return reasons
 

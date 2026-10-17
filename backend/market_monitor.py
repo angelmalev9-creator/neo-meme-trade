@@ -77,7 +77,7 @@ WIN_REENTRY_SECONDS = max(0, int(float(os.getenv('NEO_WIN_REENTRY_SECONDS', '120
 LOSS_REENTRY_SECONDS = max(WIN_REENTRY_SECONDS, int(float(os.getenv('NEO_LOSS_REENTRY_SECONDS', '300'))))
 STOP_LOSS_PCT = 5.0
 STOP_EXECUTION_BUFFER_PCT = 0.5  # Planned risk allowance, never a fill clamp.
-FIXED_STOP_TRIGGER_BUFFER_PCT = 1.0  # Arm user PAPER stop early; realized PnL stays market-accurate.
+FIXED_STOP_TRIGGER_BUFFER_PCT = 1.5  # Arm user PAPER stop earlier; realized PnL stays market-accurate.
 STOP_EXECUTION_ARM_NET_PCT = 5.0
 EXIT_IMPACT_EMERGENCY_PCT = 0.75
 TAKE_PROFIT_PCT = 10.0
@@ -197,7 +197,7 @@ def _oct4_fixed_settings() -> dict[str, Any]:
     """
     settings = _oct4_settings()
     settings.update(
-        POSITION_SCAN_SECONDS=0.5,
+        POSITION_SCAN_SECONDS=0.25,
         STOP_LOSS_PCT=USER_ENGINE_SETTINGS_DEFAULTS['stop_loss_pct'],
         TAKE_PROFIT_PCT=USER_ENGINE_SETTINGS_DEFAULTS['take_profit_pct'],
         MAX_HOLD_MINUTES=0,
@@ -2550,7 +2550,7 @@ class Monitor:
         # Outcome-aware cooldown: keep sampling many different coins, but avoid
         # immediate revenge loops on the same mint.
         fixed_cooldown = is_adaptive() and not is_learner()
-        recent = oct4.cooldown_addresses(STATE.history, now, LOSS_REENTRY_SECONDS) if fixed_cooldown else set()
+        recent = oct4.cooldown_addresses(STATE.history, now, LOSS_REENTRY_SECONDS, loss_multiplier=3.0 if STRATEGY_PROFILE == OCT4_FIXED_PROFILE else 1.0) if fixed_cooldown else set()
         learned = learning_table(STATE.history, now) if is_learner() else None
         for trade in ([] if fixed_cooldown else STATE.history):
             recent_address = trade.get('address')
@@ -2758,6 +2758,7 @@ class Monitor:
                 max_impact=STRICT_MAX_ENTRY_IMPACT_PCT,
                 max_cost=STRICT_MAX_ROUNDTRIP_COST_PCT,
                 max_conservative_cost=STRICT_MAX_WORST_CASE_COST_PCT, now=now_ms(),
+                protect_stop=(STRATEGY_PROFILE == OCT4_FIXED_PROFILE),
             )
             if quote_rejected:
                 reject(report, quote_rejected, coin, {
