@@ -48,7 +48,8 @@ jobs:
               raise SystemExit('API constant not found')
           s = s.replace(old, new, 1)
           s = s.replace("await fetch(`${API}${path}`,", "await resilientApiFetch(path,", 2)
-          if "`${API}${path}`" in s:
+          s = s.replace("await fetch(`${API}/user/reset`,", "await resilientApiFetch('/user/reset',", 1)
+          if "`${API}" in s:
               raise SystemExit('old API fetch still present')
           p.write_text(s, encoding='utf-8', newline='\n')
           PY
