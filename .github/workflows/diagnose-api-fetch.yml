@@ -1,0 +1,38 @@
+name: Diagnose API fetch
+on:
+  push:
+    branches: [diag/api-fetch-20261018]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: DNS and HTTPS checks
+        shell: bash
+        run: |
+          set +e
+          HOST=neo-meme-api.169-58-211-177.sslip.io
+          echo '=== DNS ==='
+          getent ahosts "$HOST"
+          python - <<'PY'
+          import socket
+          host='neo-meme-api.169-58-211-177.sslip.io'
+          try:
+              print('getaddrinfo=', socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM))
+          except Exception as e:
+              print('getaddrinfo_error=', repr(e))
+          PY
+          echo '=== NORMAL HTTPS HEALTH ==='
+          curl -vkS --connect-timeout 8 --max-time 15 "https://$HOST/user/health" -o /tmp/normal.out
+          echo "curl_exit=$?"
+          cat /tmp/normal.out 2>/dev/null || true
+          echo
+          echo '=== BYPASS DNS TO VPS IP ==='
+          curl -vkS --resolve "$HOST:443:169.58.211.177" --connect-timeout 8 --max-time 15 "https://$HOST/user/health" -o /tmp/resolve.out
+          echo "curl_exit=$?"
+          cat /tmp/resolve.out 2>/dev/null || true
+          echo
+          echo '=== PORT REACHABILITY ==='
+          timeout 8 bash -c 'cat < /dev/null > /dev/tcp/169.58.211.177/443' && echo 'tcp443=open' || echo 'tcp443=closed_or_timeout'
+          timeout 8 bash -c 'cat < /dev/null > /dev/tcp/169.58.211.177/80' && echo 'tcp80=open' || echo 'tcp80=closed_or_timeout'
