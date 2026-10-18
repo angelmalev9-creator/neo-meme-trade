@@ -8,7 +8,24 @@ import {
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { supabase } from './lib/supabase';
 
-const API = 'https://neo-meme-api.169-58-211-177.sslip.io';
+const DIRECT_API = 'https://neo-meme-api.169-58-211-177.sslip.io';
+const PROXY_API = typeof window !== 'undefined' && window.location.hostname.endsWith('.vercel.app')
+  ? `${window.location.origin}/api/proxy`
+  : 'https://neo-meme-trade.vercel.app/api/proxy';
+
+async function resilientApiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 1200);
+  try {
+    const response = await fetch(`${DIRECT_API}${path}`, { ...init, signal: controller.signal });
+    if (![502, 503, 504].includes(response.status)) return response;
+  } catch {
+    // Direct browser access can be blocked by DNS/CORS/network policy; use the stable Vercel relay.
+  } finally {
+    window.clearTimeout(timer);
+  }
+  return fetch(`${PROXY_API}?path=${encodeURIComponent(path)}`, init);
+}
 
 type Signal = { kind: 'positive' | 'neutral' | 'risk'; title: string; detail: string };
 type TxWindow = { buys: number; sells: number };
@@ -146,7 +163,7 @@ async function authedJson<T>(path: string): Promise<T> {
   const { data: { session } } = await supabase.auth.getSession();
   const token = session?.access_token;
   if (!token) throw new Error('Session expired');
-  const response = await fetch(`${API}${path}`, { cache: 'no-store', headers: { Authorization: `Bearer ${token}` } });
+  const response = await resilientApiFetch(path, { cache: 'no-store', headers: { Authorization: `Bearer ${token}` } });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json() as Promise<T>;
 }
@@ -156,7 +173,7 @@ async function authedPost<T>(path: string, payload: Record<string, number | stri
   const { data: { session } } = await supabase.auth.getSession();
   const token = session?.access_token;
   if (!token) throw new Error('Session expired');
-  const response = await fetch(`${API}${path}`, {
+  const response = await resilientApiFetch(path, {
     method: 'POST', cache: 'no-store',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -560,7 +577,7 @@ export default function App() {
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
       if (!token) throw new Error('Session expired');
-      const response = await fetch(`${API}/user/reset`, { method: 'POST', cache: 'no-store', headers: { Authorization: `Bearer ${token}` } });
+      const response = await resilientApiFetch('/user/reset', { method: 'POST', cache: 'no-store', headers: { Authorization: `Bearer ${token}` } });
       if (!response.ok) throw new Error(`Backend HTTP ${response.status}`);
       setState(await response.json() as MonitorState);
       setError('');
