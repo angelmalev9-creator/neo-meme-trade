@@ -24,24 +24,26 @@ jobs:
           p = Path('src/App.tsx')
           s = p.read_text(encoding='utf-8')
           old = "const API = 'https://neo-meme-api.169-58-211-177.sslip.io';"
-          new = """const DIRECT_API = 'https://neo-meme-api.169-58-211-177.sslip.io';
-const PROXY_API = typeof window !== 'undefined' && window.location.hostname.endsWith('.vercel.app')
-  ? `${window.location.origin}/api/proxy`
-  : 'https://neo-meme-trade.vercel.app/api/proxy';
-
-async function resilientApiFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), 1200);
-  try {
-    const response = await fetch(`${DIRECT_API}${path}`, { ...init, signal: controller.signal });
-    if (![502, 503, 504].includes(response.status)) return response;
-  } catch {
-    // Direct browser access can be blocked by DNS/CORS/network policy; use the stable Vercel relay.
-  } finally {
-    window.clearTimeout(timer);
-  }
-  return fetch(`${PROXY_API}?path=${encodeURIComponent(path)}`, init);
-}"""
+          new = "\n".join([
+              "const DIRECT_API = 'https://neo-meme-api.169-58-211-177.sslip.io';",
+              "const PROXY_API = typeof window !== 'undefined' && window.location.hostname.endsWith('.vercel.app')",
+              "  ? `${window.location.origin}/api/proxy`",
+              "  : 'https://neo-meme-trade.vercel.app/api/proxy';",
+              "",
+              "async function resilientApiFetch(path: string, init: RequestInit = {}): Promise<Response> {",
+              "  const controller = new AbortController();",
+              "  const timer = window.setTimeout(() => controller.abort(), 1200);",
+              "  try {",
+              "    const response = await fetch(`${DIRECT_API}${path}`, { ...init, signal: controller.signal });",
+              "    if (![502, 503, 504].includes(response.status)) return response;",
+              "  } catch {",
+              "    // Direct browser access can be blocked by DNS/CORS/network policy; use the stable Vercel relay.",
+              "  } finally {",
+              "    window.clearTimeout(timer);",
+              "  }",
+              "  return fetch(`${PROXY_API}?path=${encodeURIComponent(path)}`, init);",
+              "}",
+          ])
           if old not in s:
               raise SystemExit('API constant not found')
           s = s.replace(old, new, 1)
