@@ -77,7 +77,8 @@ WIN_REENTRY_SECONDS = max(0, int(float(os.getenv('NEO_WIN_REENTRY_SECONDS', '120
 LOSS_REENTRY_SECONDS = max(WIN_REENTRY_SECONDS, int(float(os.getenv('NEO_LOSS_REENTRY_SECONDS', '300'))))
 STOP_LOSS_PCT = 5.0
 STOP_EXECUTION_BUFFER_PCT = 0.5  # Planned risk allowance, never a fill clamp.
-FIXED_STOP_TRIGGER_BUFFER_PCT = 1.5  # Arm user PAPER stop earlier; realized PnL stays market-accurate.
+FIXED_STOP_TRIGGER_BUFFER_PCT = 1.75  # More room for quote jumps; fill remains market-accurate.
+FIXED_LOSS_COOLDOWN_MULTIPLIER = 9.0  # 3h quarantine when base cooldown is 20m.
 STOP_EXECUTION_ARM_NET_PCT = 5.0
 EXIT_IMPACT_EMERGENCY_PCT = 0.75
 TAKE_PROFIT_PCT = 10.0
@@ -398,6 +399,8 @@ def buy_pressure_rejections(coin: dict[str, Any], flow: dict[str, Any], context:
         if flow_ratio < BUY_PRESSURE_MIN_FLOW_RATIO: reasons.append('flow_ratio')
     elif not flow_optional_setup:
         reasons.append('flow_count')
+    if STRATEGY_PROFILE == OCT4_FIXED_PROFILE:
+        reasons.extend(entry_policy.fixed_target_quality_rejections(coin, context))
     return list(dict.fromkeys(reasons))
 
 
@@ -412,8 +415,8 @@ if BUY_PRESSURE_FIXED:
         STRICT_ENTRY_SCORE, STRICT_MIN_LIQUIDITY_USD, STRICT_MIN_CONVICTION
     )
     SIGNAL_STRATEGY = 'EARLY_BUY_PRESSURE_FIXED'
-    ENTRY_POLICY_VERSION = 'EARLY_BUY_PRESSURE_M1_V2'
-    STRATEGY_VERSION = f'{STRATEGY_VERSION}+buy-pressure-m1-v2'
+    ENTRY_POLICY_VERSION = 'EARLY_BUY_PRESSURE_M1_V3_PRIME'
+    STRATEGY_VERSION = f'{STRATEGY_VERSION}+buy-pressure-m1-v3-prime'
     CONFIG_SOURCE = f'{CONFIG_SOURCE} + early buy-pressure PAPER overlay'
 
 # Legacy deterministic PAPER friction model; quote-backed positions use the
@@ -2550,7 +2553,7 @@ class Monitor:
         # Outcome-aware cooldown: keep sampling many different coins, but avoid
         # immediate revenge loops on the same mint.
         fixed_cooldown = is_adaptive() and not is_learner()
-        recent = oct4.cooldown_addresses(STATE.history, now, LOSS_REENTRY_SECONDS, loss_multiplier=3.0 if STRATEGY_PROFILE == OCT4_FIXED_PROFILE else 1.0) if fixed_cooldown else set()
+        recent = oct4.cooldown_addresses(STATE.history, now, LOSS_REENTRY_SECONDS, loss_multiplier=FIXED_LOSS_COOLDOWN_MULTIPLIER if STRATEGY_PROFILE == OCT4_FIXED_PROFILE else 1.0) if fixed_cooldown else set()
         learned = learning_table(STATE.history, now) if is_learner() else None
         for trade in ([] if fixed_cooldown else STATE.history):
             recent_address = trade.get('address')

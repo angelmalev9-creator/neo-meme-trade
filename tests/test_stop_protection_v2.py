@@ -21,16 +21,46 @@ class StopProtectionV2Tests(unittest.TestCase):
         )
 
     def test_clean_execution_inside_stop_buffer_passes(self):
-        self.assertEqual(self.check(0.8, -1.40, -2.60), [])
+        self.assertEqual(self.check(0.8, -2.70, -3.70), [])
 
     def test_roundtrip_near_stop_is_rejected_in_fixed_stop_profile(self):
-        self.assertIn('roundtrip_cost', self.check(0.8, -1.51, -2.60))
+        self.assertIn('roundtrip_cost', self.check(0.8, -2.76, -3.60))
 
     def test_worst_case_near_stop_is_rejected(self):
-        self.assertIn('worst_case_cost', self.check(0.8, -1.30, -2.76))
+        self.assertIn('worst_case_cost', self.check(0.8, -2.60, -3.76))
 
     def test_entry_impact_above_one_percent_is_rejected(self):
         self.assertIn('impact', self.check(1.01, -1.0, -2.0))
+
+
+    def test_prime_quality_gate_accepts_clean_structure(self):
+        coin = {
+            'score': 98, 'liquidityUsd': 120000,
+            'volume': {'h1': 240000}, 'priceChange': {'m5': 5.0},
+            'txns': {'m5': {'buys': 30, 'sells': 15}},
+        }
+        self.assertEqual(entry_policy.fixed_target_quality_rejections(coin, {'conviction': 95}), [])
+
+    def test_prime_quality_gate_rejects_churn_and_chase(self):
+        coin = {
+            'score': 96, 'liquidityUsd': 50000,
+            'volume': {'h1': 350000}, 'priceChange': {'m5': 15.0},
+            'txns': {'m5': {'buys': 20, 'sells': 20}},
+        }
+        reasons = entry_policy.fixed_target_quality_rejections(coin, {'conviction': 90})
+        self.assertIn('momentum', reasons)
+        self.assertIn('market_buyers', reasons)
+        self.assertIn('turnover_churn', reasons)
+
+    def test_prime_quality_gate_rejects_low_score_or_conviction(self):
+        coin = {
+            'score': 84, 'liquidityUsd': 100000,
+            'volume': {'h1': 150000}, 'priceChange': {'m5': 4.0},
+            'txns': {'m5': {'buys': 30, 'sells': 10}},
+        }
+        reasons = entry_policy.fixed_target_quality_rejections(coin, {'conviction': 60})
+        self.assertIn('score', reasons)
+        self.assertIn('conviction', reasons)
 
     def test_other_profiles_keep_their_validated_execution_limits(self):
         self.assertEqual(self.check(1.20, -2.0, -4.0, protect=False), [])
