@@ -26,6 +26,27 @@ LIVE_TAPE_PATH = os.getenv("NEO_LIVE_TAPE_PATH", "/var/lib/neo-market/live_tape.
 STRATEGY_LAB_PATH = os.getenv("NEO_STRATEGY_LAB_PATH", "/var/lib/neo-market/strategy_lab.json")
 BASE_USER_PORT = int(os.getenv("NEO_USER_ENGINE_PORT_START", "18800"))
 MAX_USER_PORT = int(os.getenv("NEO_USER_ENGINE_PORT_END", "19800"))
+
+ENGINE_ALLOWLIST = {
+    item.strip()
+    for item in os.getenv("NEO_USER_ENGINE_ALLOWLIST", "").split(",")
+    if item.strip()
+}
+
+def _external_engine_ports():
+    mapping = {}
+    for item in os.getenv("NEO_USER_EXTERNAL_ENGINES", "").split(","):
+        item = item.strip()
+        if not item or ":" not in item:
+            continue
+        user_id, port = item.rsplit(":", 1)
+        try:
+            mapping[user_id.strip()] = int(port)
+        except ValueError:
+            continue
+    return mapping
+
+EXTERNAL_ENGINE_PORTS = _external_engine_ports()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://qziuovwcauaklgqscqys.supabase.co").rstrip("/")
 SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
 STARTING_BALANCE = 1000.0
@@ -263,6 +284,23 @@ def bootstrap_if_needed(user, account):
 
 def start_engine(user, account):
     user_id = str(user["id"])
+
+    if ENGINE_ALLOWLIST and user_id not in ENGINE_ALLOWLIST:
+        raise RuntimeError("PAPER engine capacity is reserved for the configured account on this VPS.")
+
+    external_port = EXTERNAL_ENGINE_PORTS.get(user_id)
+    if external_port:
+        if int(account.get("engine_port") or 0) != external_port:
+            account["engine_port"] = external_port
+            account["updated_at"] = now_ms()
+            save_store()
+        if engine_health(external_port):
+            return external_port
+        # Never spawn a duplicate for an engine owned by systemd. During startup
+        # the dashboard will retry instead of creating a second multi-GB process
+        # that can push the VPS into an OOM restart loop.
+        raise RuntimeError("Dedicated PAPER engine is starting or unavailable.")
+
     existing = ENGINE_PROCESSES.get(user_id)
     if existing is not None and existing.poll() is None:
         port = int(account.get("engine_port") or 0)
