@@ -17,8 +17,14 @@ MAX_QUOTED_CANDIDATES = 12
 # learner keeps its own validated cost policy while the user's -5% stop profile
 # gets extra room before the stop.
 PAPER_MAX_ENTRY_IMPACT_PCT = 1.00
-PAPER_MAX_ROUNDTRIP_COST_PCT = 1.50
-PAPER_MAX_WORST_CASE_COST_PCT = 2.75
+PAPER_MAX_ROUNDTRIP_COST_PCT = 2.75
+PAPER_MAX_WORST_CASE_COST_PCT = 3.75
+FIXED_PRIME_MIN_SCORE = 90.0
+FIXED_PRIME_MIN_CONVICTION = 75.0
+FIXED_PRIME_MIN_M5_PCT = 0.0
+FIXED_PRIME_MAX_M5_PCT = 12.0
+FIXED_PRIME_MIN_MARKET_RATIO = 1.30
+FIXED_PRIME_MAX_H1_TURNOVER = 4.0
 _ADDRESS = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 LABELS = {
     'risk_budget_unavailable': 'недостатъчен оставащ дневен бюджет за минималната позиция',
@@ -91,6 +97,7 @@ LABELS = {
     'invalid_quote': 'невалидни данни в котировката',
     'impact': 'твърде голямо ценово въздействие',
     'roundtrip_cost': 'твърде скъпи вход и изход',
+    'turnover_churn': 'прекалено голям 1h оборот спрямо ликвидността',
     'worst_case_cost': 'недостатъчен запас до стопа',
     'quote_budget': 'изчакване на следващата проверка на котировките',
     'daily_limit': 'достигнат дневен лимит',
@@ -119,6 +126,39 @@ def signal_rejections(coin, flow, context, *, min_score, min_liquidity,
     if str(flow.get('quality', flow.get('status', 'UNKNOWN'))).upper() not in {'GOOD', 'COMPLETE', 'HEALTHY', 'VALID'}:
         reasons.append('flow_quality')
     if not gold_order_flow.qualifies(coin,flow,context,thresholds):reasons.append('gold_signal')
+    return reasons
+
+
+def fixed_target_quality_rejections(coin, context):
+    """Quality gate learned from the fixed-target PAPER history.
+
+    It rejects low-conviction chase setups and hyperactive turnover relative to
+    available liquidity.  The rules use market structure only; they never look
+    at future PnL and are deliberately independent from the executable quote
+    checks below.
+    """
+    score = number(coin.get('score'))
+    liquidity = number(coin.get('liquidityUsd'))
+    volume = coin.get('volume') or {}
+    h1_volume = number(volume.get('h1'))
+    m5 = number((coin.get('priceChange') or {}).get('m5'), -math.inf)
+    tx5 = (coin.get('txns') or {}).get('m5') or {}
+    buys = number(tx5.get('buys'))
+    sells = number(tx5.get('sells'))
+    market_ratio = buys / max(sells, 1.0)
+    conviction = number(context.get('conviction'), -math.inf)
+    turnover = h1_volume / max(liquidity, 1.0)
+    reasons = []
+    if score < FIXED_PRIME_MIN_SCORE:
+        reasons.append('score')
+    if conviction < FIXED_PRIME_MIN_CONVICTION:
+        reasons.append('conviction')
+    if not FIXED_PRIME_MIN_M5_PCT <= m5 <= FIXED_PRIME_MAX_M5_PCT:
+        reasons.append('momentum')
+    if market_ratio < FIXED_PRIME_MIN_MARKET_RATIO:
+        reasons.append('market_buyers')
+    if liquidity <= 0 or h1_volume <= 0 or turnover > FIXED_PRIME_MAX_H1_TURNOVER:
+        reasons.append('turnover_churn')
     return reasons
 
 
