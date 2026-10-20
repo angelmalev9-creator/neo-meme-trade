@@ -20,6 +20,89 @@
             });
           };
         }
+
+        // GitHub Pages must talk directly to the NEO API. The app historically
+        // used a Vercel relay as a fallback; intercept that legacy fallback here
+        // so this deployment has no runtime dependency on Vercel.
+        const directApi = 'https://neo-meme-api.169-58-211-177.sslip.io';
+        const legacyProxy = 'https://neo-meme-trade.vercel.app/api/proxy';
+        const nativeFetch = window.fetch.bind(window);
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const gatewayStatuses = new Set([502, 503, 504]);
+
+        window.fetch = async (input, init = {}) => {
+          const originalUrl = typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.href
+              : input.url;
+          const requestMethod = String(
+            init.method || (input instanceof Request ? input.method : 'GET') || 'GET'
+          ).toUpperCase();
+
+          let targetUrl = originalUrl;
+          const isLegacyProxy = originalUrl.startsWith(legacyProxy);
+
+          if (isLegacyProxy) {
+            const parsed = new URL(originalUrl);
+            const path = parsed.searchParams.get('path') || '';
+
+            if (!path.startsWith('/user/')) {
+              return new Response(JSON.stringify({ message: 'Invalid API path' }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' },
+              });
+            }
+
+            // Never replay state-changing requests through a fallback transport.
+            // GETs are safe to retry and are redirected to the real API only.
+            if (requestMethod !== 'GET') {
+              return new Response(JSON.stringify({ message: 'Direct API temporarily unavailable' }), {
+                status: 503,
+                headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+              });
+            }
+
+            targetUrl = `${directApi}${path}`;
+          }
+
+          const isDirectRead = requestMethod === 'GET' && targetUrl.startsWith(`${directApi}/user/`);
+          if (!isDirectRead) {
+            return nativeFetch(targetUrl === originalUrl ? input : targetUrl, init);
+          }
+
+          let lastResponse = null;
+          let lastError = null;
+
+          for (let attempt = 0; attempt < 4; attempt += 1) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 4500);
+
+            try {
+              const response = await nativeFetch(targetUrl, {
+                ...init,
+                cache: 'no-store',
+                signal: controller.signal,
+              });
+              lastResponse = response;
+
+              if (!gatewayStatuses.has(response.status)) {
+                return response;
+              }
+            } catch (error) {
+              lastError = error;
+            } finally {
+              clearTimeout(timeout);
+            }
+
+            if (attempt < 3) {
+              await sleep(250 * (attempt + 1));
+            }
+          }
+
+          if (lastResponse) return lastResponse;
+          throw lastError || new Error('NEO API unavailable');
+        };
       })();
     </script>
   </head>
