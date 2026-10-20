@@ -2,12 +2,15 @@
 """One isolated PAPER learner process consuming the main engine's shared stream."""
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 import compat_file_lock as fcntl
 from engine_runtime import atomic_json as _atomic_json
 from paper_training import PaperTrainingEngine
 from paper_state_reset import archive_files
+
+DEFAULT_MAX_STATE_BYTES = 128 * 1024 * 1024
 
 
 def atomic_json(path, data):
@@ -25,9 +28,20 @@ def atomic_json(path, data):
 def follow(root, config):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    state_path = root / 'training.json'
+    max_state_bytes = max(32 * 1024 * 1024, int(os.getenv('NEO_TRAINING_MAX_STATE_BYTES', str(DEFAULT_MAX_STATE_BYTES))))
     with (root / 'training.process.lock').open('a+') as singleton:
         fcntl.flock(singleton, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        engine = PaperTrainingEngine(root / 'training.json', config=config)
+        if state_path.exists() and state_path.stat().st_size > max_state_bytes:
+            atomic_json(root / 'training_snapshot.json', {
+                'status': 'degraded', 'paper_only': True,
+                'reason': 'training_state_safety_cap',
+                'state_bytes': state_path.stat().st_size,
+                'max_state_bytes': max_state_bytes,
+                'worker_paused': True,
+            })
+            return
+        engine = PaperTrainingEngine(state_path, config=config)
         offset = int(engine.state.get('recording_start_offset', 0))
         minimum_time = int(engine.state.get('recording_start_at', 0))
         source = root / 'observations.jsonl'
@@ -79,6 +93,18 @@ def follow(root, config):
                 if changed or cursor_needs_save:
                     engine.state['recording_start_offset'] = offset
                     engine.save()
+                    state_bytes = state_path.stat().st_size if state_path.exists() else 0
+                    if state_bytes > max_state_bytes:
+                        snapshot = engine.snapshot()
+                        snapshot.update({
+                            'status': 'degraded',
+                            'reason': 'training_state_safety_cap',
+                            'state_bytes': state_bytes,
+                            'max_state_bytes': max_state_bytes,
+                            'worker_paused': True,
+                        })
+                        atomic_json(root / 'training_snapshot.json', snapshot)
+                        return
             if changed or not source.exists() or minimum_time:
                 atomic_json(root / 'training_snapshot.json', engine.snapshot())
             time.sleep(.05)

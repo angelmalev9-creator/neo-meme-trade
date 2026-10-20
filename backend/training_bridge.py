@@ -20,6 +20,7 @@ from paper_training import USDC, digest, number, raw_int
 _BRIDGE = None
 ROUTE_EVIDENCE_TTL_MS = 30_000
 DEFAULT_MAX_JOURNAL_BYTES = 2 * 1024 * 1024 * 1024
+DEFAULT_MAX_STATE_BYTES = 128 * 1024 * 1024
 DEFAULT_OBSERVATION_INTERVAL_MS = 30_000
 SOL = 'So11111111111111111111111111111111111111112'
 
@@ -32,13 +33,19 @@ class TrainingBridge:
         self.cache = {}
         self.lock = threading.Lock()
         self.dropped = 0
+        self.max_state_bytes = max(32 * 1024 * 1024, int(os.getenv('NEO_TRAINING_MAX_STATE_BYTES', str(DEFAULT_MAX_STATE_BYTES))))
+        state_path = self.root / 'training.json'
         try:
-            previous = json.loads((self.root / 'training.json').read_text(encoding='utf-8'))
-            # Keep the producer count monotonic across parent-process restarts;
-            # the worker stores a reset baseline for the current PAPER epoch.
-            self.dropped = int(number(previous.get('recording_drops_baseline'))) + int(number(previous.get('recording_drops_total')))
-        except (OSError, ValueError, TypeError):
-            pass
+            self.state_bytes = state_path.stat().st_size
+        except OSError:
+            self.state_bytes = 0
+        self.state_oversized = self.state_bytes > self.max_state_bytes
+        if not self.state_oversized:
+            try:
+                previous = json.loads((self.root / 'training_snapshot.json').read_text(encoding='utf-8'))
+                self.dropped = int(number(previous.get('recording_drops_baseline'))) + int(number(previous.get('recording_drops_total')))
+            except (OSError, ValueError, TypeError):
+                pass
         self.error = None
         self.processed = 0
         self.latest = {'status': 'starting', 'paper_only': True}
@@ -48,14 +55,14 @@ class TrainingBridge:
         self.max_journal_bytes = max(64 * 1024 * 1024, int(os.getenv('NEO_TRAINING_MAX_JOURNAL_BYTES', str(DEFAULT_MAX_JOURNAL_BYTES))))
         self.min_observation_interval_ms = max(0, int(os.getenv('NEO_TRAINING_OBSERVE_MIN_INTERVAL_MS', str(DEFAULT_OBSERVATION_INTERVAL_MS))))
         self.last_observed = {}
-        self.recovery_note = None
+        self.recovery_note = (f"Training state isolated at {self.state_bytes} bytes; safe cap is {self.max_state_bytes} bytes") if self.state_oversized else None
         journal = self.root / 'observations.jsonl'
         try:
             self.journal_bytes = journal.stat().st_size
         except OSError:
             self.journal_bytes = 0
-        self.paused_reason = None
-        if self.journal_bytes > self.max_journal_bytes:
+        self.paused_reason = (f"Training worker paused: durable state exceeds safe cap ({self.state_bytes} > {self.max_state_bytes} bytes)") if self.state_oversized else None
+        if self.journal_bytes > self.max_journal_bytes and not self.paused_reason:
             try:
                 archive = self._rotate_journal(journal, 'startup_safety_cap', reset_cursor=True)
                 self.recovery_note = f'Oversized training journal archived to {archive.name}; recording resumed'
