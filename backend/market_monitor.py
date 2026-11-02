@@ -20,6 +20,7 @@ import discovery_universe
 import engine_runtime as runtime
 import engine_exit_policy as exit_policy
 import order_flow_adaptive_oct4 as oct4
+import paper_quality_guard
 import adaptive_learning as learner
 import training_bridge
 from lab_dashboard_projection import book_trades, compact_strategy_lab
@@ -121,6 +122,7 @@ if MAX_POSITION_RISK_USD <= 0 or not 0 < MAX_TOTAL_EXPOSURE_PCT <= 100 or not 0 
 # EARLY_SCOUT_V10 keeps the 2026-10-05 environment-driven values captured
 # above. An unknown profile refuses to start.
 V10_PROFILE = 'EARLY_SCOUT_V10'
+OCT4_PLUS_PROFILE = 'ORDER_FLOW_ADAPTIVE_OCT4_PLUS'
 OCT4_FIXED_PROFILE = 'ORDER_FLOW_OCT4_USER_FIXED'
 OCT4_FIXED_PROFILE_LEGACY = 'ORDER_FLOW_OCT4_FIXED_5_10'
 USER_ENGINE_SETTINGS_VERSION = exit_policy.USER_FIXED_VERSION
@@ -189,6 +191,18 @@ def _oct4_settings() -> dict[str, Any]:
     )
 
 
+def _oct4_plus_settings() -> dict[str, Any]:
+    """Restored Oct-4 adaptive PAPER strategy plus forward-only quality guards."""
+    settings = _oct4_settings()
+    settings.update(
+        STRATEGY_VERSION='gold-2026-10-04-plus-quality-v1',
+        ENTRY_POLICY_VERSION=f'{oct4.ENTRY_POLICY_VERSION}+{paper_quality_guard.VERSION}',
+        LEARNING_MODE=f'{oct4.LEARNING_MODE}+BUYER_CLUSTER+EXECUTION_BASIS+REGIME_BRAKE',
+        CONFIG_SOURCE='order_flow_adaptive_oct4.CONFIG + paper_quality_guard',
+    )
+    return settings
+
+
 def _oct4_fixed_settings() -> dict[str, Any]:
     """Oct-4 GOLD entries with user-controlled PAPER size and fixed SL/TP.
 
@@ -253,6 +267,8 @@ def apply_strategy_profile(name: str | None = None) -> str:
         settings = _learner_settings()
     elif profile == oct4.PROFILE:
         settings = _oct4_settings()
+    elif profile == OCT4_PLUS_PROFILE:
+        settings = _oct4_plus_settings()
     elif profile in (OCT4_FIXED_PROFILE, OCT4_FIXED_PROFILE_LEGACY):
         settings = _oct4_fixed_settings()
         profile = OCT4_FIXED_PROFILE
@@ -271,7 +287,7 @@ def is_learner() -> bool:
 
 def is_adaptive() -> bool:
     """Profiles that use the Oct-4 conviction/GOLD entry family."""
-    return STRATEGY_PROFILE in (oct4.PROFILE, OCT4_FIXED_PROFILE, learner.PROFILE)
+    return STRATEGY_PROFILE in (oct4.PROFILE, OCT4_PLUS_PROFILE, OCT4_FIXED_PROFILE, learner.PROFILE)
 
 
 def policy_module():
@@ -1504,6 +1520,7 @@ class State:
                         if is_adaptive() else
                         'PAPER only; high-frequency early micro scouts, observed quotes with modeled fills, full fees and uncapped gap losses. Main journal learns scout size; validated strategy experiments remain separate.'),
                     'entry_policy_version': ENTRY_POLICY_VERSION,
+                    'paper_quality_guard_version': paper_quality_guard.VERSION if STRATEGY_PROFILE == OCT4_PLUS_PROFILE else None,
                     'exit_policy': EXIT_POLICY, 'exit_policy_version': EXIT_POLICY_VERSION,
                     'effective_config_hash': effective_config_hash(),
                     'effective_entry_thresholds': effective_entry_thresholds(),
@@ -2613,6 +2630,9 @@ class Monitor:
             flow = STATE.live_flow(address, flow_seconds, str(coin.get('pairAddress') or ''))
             context = self.market_context(coin)
             rejected = signal_check(coin, flow, context)
+            if not rejected and STRATEGY_PROFILE == OCT4_PLUS_PROFILE:
+                rejected = (paper_quality_guard.regime_rejections(STATE.history, now_ms(), strategy_id=oct4.STRATEGY_ID)
+                            + paper_quality_guard.market_rejections(coin, flow, context))
             if rejected:
                 reject(report, rejected, coin, {
                     'score': score, 'liquidity_usd': liquidity, 'conviction': context.get('conviction'),
@@ -2777,6 +2797,15 @@ class Monitor:
             decimals=int(safety['metrics']['decimals'])
             quantity=expected_token_raw/(10**decimals)
             quote_fill_price=notional/max(quantity,1e-18)
+            if STRATEGY_PROFILE == OCT4_PLUS_PROFILE:
+                quality_rejected, quality_metrics = paper_quality_guard.execution_rejections(
+                    market_price=price, fill_price=quote_fill_price, impact_pct=impact_pct,
+                    immediate_roundtrip_pct=immediate_roundtrip_pct,
+                    conservative_roundtrip_pct=worst_case_roundtrip_pct,
+                )
+                if quality_rejected:
+                    reject(report, quality_rejected, coin, quality_metrics)
+                    continue
             if price_review:
                 validation=price_integrity.jupiter_tiebreak(validation,quote_fill_price)
                 if validation.get('status')!='pass':
@@ -2809,6 +2838,9 @@ class Monitor:
                 final_flow = STATE.live_flow(address, flow_seconds, str(coin.get('pairAddress') or ''))
                 final_context = self.market_context(current_coin)
                 final_rejections = signal_check(current_coin,final_flow,final_context)
+                if not final_rejections and STRATEGY_PROFILE == OCT4_PLUS_PROFILE:
+                    final_rejections = (paper_quality_guard.regime_rejections(STATE.history, now_ms(), strategy_id=oct4.STRATEGY_ID)
+                                        + paper_quality_guard.market_rejections(current_coin, final_flow, final_context))
                 if final_rejections:
                     reject(report,final_rejections,coin)
                     continue
