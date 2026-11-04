@@ -34,6 +34,8 @@ POLL_SECONDS = max(0.5, float(os.getenv('NEO_TAPE_POLL_SECONDS', '2.0')))
 FLOW_WINDOW_MS = max(30_000, int(os.getenv('NEO_TAPE_FLOW_WINDOW_MS', '60000')))
 STICKY_MS = max(FLOW_WINDOW_MS, int(float(os.getenv('NEO_TAPE_STICKY_SECONDS', '210')) * 1000))
 RPC_BATCH = max(1, min(60, int(os.getenv('NEO_TAPE_RPC_BATCH_SIZE', '60'))))
+MAX_TX_PER_POLL = max(1, min(60, int(os.getenv('NEO_TAPE_MAX_TX_PER_POLL', '6'))))
+MAX_PENDING_TX = max(MAX_TX_PER_POLL, int(os.getenv('NEO_TAPE_MAX_PENDING_TX', '120')))
 # The tape is a pre-warm layer, not an entry gate. Track a wider set of young
 # near-setup pools so verified order-flow already exists if/when the stricter
 # EARLY_BUY_PRESSURE entry rules later become true. These thresholds are tape-only:
@@ -48,6 +50,10 @@ SESSION = requests.Session()
 SESSION.headers.update({'content-type': 'application/json', 'user-agent': 'NEO-LiveTape-Oct4/1.0'})
 EVENTS: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
 SEEN: set[str] = set()
+# Keep unhydrated signatures for a retry instead of silently discarding them.
+PENDING_TX: dict[str, tuple[str, Any, dict[str, Any], int]] = {}
+PAIR_GAPS: dict[str, int] = {}
+PAIR_LAST_SIGNATURE: dict[str, str] = {}
 INITIALIZED_PAIRS: set[str] = set()
 PAIR_STARTED: dict[str, int] = {}
 PAIR_LAST_POLL: dict[str, int] = {}
@@ -186,6 +192,10 @@ def feed_snapshot() -> list[dict[str, Any]]:
             PAIR_STARTED.pop(pair, None)
             PAIR_LAST_POLL.pop(pair, None)
             PAIR_LATEST_EVENT.pop(pair, None)
+            PAIR_LAST_SIGNATURE.pop(pair, None)
+            for sig, row in list(PENDING_TX.items()):
+                if row[2]['pair'] == pair:
+                    PENDING_TX.pop(sig, None)
 
     ranked = sorted(
         TRACKED.values(),
@@ -219,6 +229,10 @@ def feed_snapshot() -> list[dict[str, Any]]:
             PAIR_STARTED.pop(pair, None)
             PAIR_LAST_POLL.pop(pair, None)
             PAIR_LATEST_EVENT.pop(pair, None)
+            PAIR_LAST_SIGNATURE.pop(pair, None)
+            for sig, row in list(PENDING_TX.items()):
+                if row[2]['pair'] == pair:
+                    PENDING_TX.pop(sig, None)
     return [dict(row) for row in ranked]
 
 
@@ -249,9 +263,16 @@ def _rpc_request(url: str, calls: list[tuple[str, list[Any]]]) -> list[dict[str,
         chunk = calls[start:start + cap]
         payload = [{'jsonrpc': '2.0', 'id': i + 1, 'method': method, 'params': params}
                    for i, (method, params) in enumerate(chunk)]
-        response = SESSION.post(url, json=payload, timeout=(1.5, 8.0))
-        response.raise_for_status()
-        answers.extend(align_answers(chunk, response.json()))
+        try:
+            response = SESSION.post(url, json=payload, timeout=(1.5, 8.0))
+            response.raise_for_status()
+            answers.extend(align_answers(chunk, response.json()))
+        except (requests.RequestException, RuntimeError, ValueError, TypeError) as exc:
+            # A rate limit on one chunk must not discard successful earlier
+            # chunks. Allow rpc_batch to retry only the affected calls.
+            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            code = 'HTTP_429' if status == 429 else ('HTTP_' + str(status) if status else type(exc).__name__)
+            answers.extend({'error': {'code': code}} for _ in chunk)
     return answers
 
 
@@ -350,16 +371,21 @@ def coverage_snapshot(feed: list[dict[str, Any]], stamp: int) -> dict[str, dict[
         pair = meta['pair']
         started = PAIR_STARTED.get(pair)
         last_poll = PAIR_LAST_POLL.get(pair, 0)
-        complete = bool(started and stamp - started >= FLOW_WINDOW_MS and stamp - last_poll <= max(6000, int(POLL_SECONDS * 4000)))
+        pending_count = sum(row[2]['pair'] == pair for row in PENDING_TX.values())
+        complete = bool(started and stamp - started >= FLOW_WINDOW_MS
+                        and stamp - last_poll <= max(6000, int(POLL_SECONDS * 4000))
+                        and pending_count == 0)
         latest = PAIR_LATEST_EVENT.get(pair)
         coverage[pair] = {
             'address': meta['address'], 'pairAddress': pair,
             'status': 'COMPLETE' if complete else 'UNKNOWN',
             'complete_since_ms': started if complete else None,
-            'last_poll_at': last_poll, 'backlog': 0, 'oldest_pending_at': None,
+            'last_poll_at': last_poll, 'backlog': pending_count,
+            'oldest_pending_at': min((row[3] for row in PENDING_TX.values()
+                                      if row[2]['pair'] == pair), default=None),
             'pagination_pending': False, 'unclassified': 0,
             'max_lag_ms': max(0, stamp - latest) if latest else None,
-            'reason': None if complete else 'OCT4_FLOW_WARMING',
+            'reason': None if complete else ('OCT4_TX_BACKLOG' if pending_count else 'OCT4_FLOW_WARMING'),
         }
     return coverage
 
@@ -388,10 +414,14 @@ def poll_once() -> dict[str, Any]:
 
     calls = [('getSignaturesForAddress', [meta['pair'], {'limit': 4, 'commitment': 'confirmed'}]) for meta in feed]
     answers = rpc_batch(calls)
-    new: list[tuple[str, Any, dict[str, Any]]] = []
+    signature_errors = 0
+    tx_errors = 0
+    hydrated = 0
     for meta, answer in zip(feed, answers):
         pair = meta['pair']
         if answer.get('error') or not isinstance(answer.get('result'), list):
+            signature_errors += 1
+            PAIR_STARTED[pair] = stamp
             continue
         PAIR_LAST_POLL[pair] = stamp
         rows = answer.get('result') or []
@@ -402,13 +432,30 @@ def poll_once() -> dict[str, Any]:
                     SEEN.add(signature)
             INITIALIZED_PAIRS.add(pair)
             PAIR_STARTED[pair] = stamp
+            PAIR_LAST_SIGNATURE[pair] = str(rows[0].get('signature') or '') if rows else ''
             continue
+        # A missing overlap means the newest signatures rotated faster than
+        # our limited RPC sample. Do not advertise complete 60-second coverage.
+        last_signature = PAIR_LAST_SIGNATURE.get(pair)
+        signatures = {str(row.get('signature') or '') for row in rows}
+        if last_signature and len(rows) >= 4 and last_signature not in signatures:
+            PAIR_STARTED[pair] = stamp
+            PAIR_GAPS[pair] = stamp
+        if rows:
+            PAIR_LAST_SIGNATURE[pair] = str(rows[0].get('signature') or '')
         for row in reversed(rows):
             signature = row.get('signature')
             if not signature or signature in SEEN or row.get('err') is not None:
                 continue
             SEEN.add(signature)
-            new.append((signature, row.get('slot'), meta))
+            PENDING_TX[signature] = (signature, row.get('slot'), meta, stamp)
+
+    # Retain only transaction details still relevant to a 60-second signal.
+    # A lost on-chain interval must restart coverage; never count it as complete.
+    for signature, row in list(PENDING_TX.items()):
+        if stamp - row[3] > FLOW_WINDOW_MS or len(PENDING_TX) > MAX_PENDING_TX:
+            PAIR_STARTED[row[2]['pair']] = stamp
+            PENDING_TX.pop(signature, None)
 
     if len(SEEN) > 20000:
         keep = {event.get('signature') for event in EVENTS if event.get('signature')}
@@ -416,23 +463,36 @@ def poll_once() -> dict[str, Any]:
         # Re-prime rather than risking a false uninterrupted window.
         INITIALIZED_PAIRS.clear(); PAIR_STARTED.clear()
 
-    if new:
-        new = new[-60:]
+    # Prioritize verified Oct-4 GOLD prefilter candidates over loose prewarm
+    # pools under a rate-limited public RPC. This changes data collection only.
+    def _tx_priority(row: tuple[str, Any, dict[str, Any], int]) -> tuple[int, int]:
+        meta = row[2]
+        gold = (number(meta.get('score')) >= 85.0
+                and number(meta.get('liquidity')) >= 15_000.0
+                and -5.0 <= number(meta.get('m5'), -999.0) <= 25.0)
+        return (0 if gold else 1, row[3])
+
+    chosen = sorted(PENDING_TX.values(), key=_tx_priority)[:MAX_TX_PER_POLL]
+    if chosen:
         tx_calls = [('getTransaction', [signature, {'encoding': 'jsonParsed', 'commitment': 'confirmed',
                                                     'maxSupportedTransactionVersion': 0}])
-                    for signature, _, _ in new]
+                    for signature, _, _, _ in chosen]
         tx_answers = rpc_batch(tx_calls)
         available = now_ms()
-        for (signature, slot, meta), answer in zip(new, tx_answers):
-            tx = answer.get('result') if not answer.get('error') else None
-            trade = parse_trade(tx, meta, available_at=available) if tx else None
-            if not trade:
+        for (signature, slot, meta, queued_at), answer in zip(chosen, tx_answers):
+            if answer.get('error') or answer.get('result') is None:
+                tx_errors += 1
+                PAIR_STARTED[meta['pair']] = available
                 continue
-            trade['signature'] = signature
-            trade['slot'] = slot
-            trade['event_id'] = f"{signature}:{meta['pair']}:0"
-            PAIR_LATEST_EVENT[meta['pair']] = int(trade['ts'])
-            EVENTS.appendleft(trade)
+            PENDING_TX.pop(signature, None)
+            hydrated += 1
+            trade = parse_trade(answer['result'], meta, available_at=available)
+            if trade:
+                trade['signature'] = signature
+                trade['slot'] = slot
+                trade['event_id'] = f"{signature}:{meta['pair']}:0"
+                PAIR_LATEST_EVENT[meta['pair']] = int(trade['ts'])
+                EVENTS.appendleft(trade)
 
     stamp = now_ms()
     coverage = coverage_snapshot(feed, stamp)
@@ -445,8 +505,11 @@ def poll_once() -> dict[str, Any]:
         'status': 'online' if complete_count else 'warming',
         'updated_at': stamp, 'events': list(EVENTS), 'pair_coverage': coverage,
         'coverage': complete_count / max(1, len(feed)), 'warming_pairs': len(feed) - complete_count,
-        'backlog': 0, 'current_backlog': 0, 'stale_pending': 0,
-        'events_total': len(EVENTS), 'lag_ms': 0,
+        'backlog': len(PENDING_TX), 'current_backlog': len(PENDING_TX), 'stale_pending': 0,
+        'events_total': len(EVENTS),
+        'lag_ms': max((stamp - row[3] for row in PENDING_TX.values()), default=0),
+        'signature_rpc_errors': signature_errors, 'transaction_rpc_errors': tx_errors,
+        'transactions_hydrated': hydrated, 'transaction_calls': len(chosen),
     }
     payload.pop('error', None)
     atomic_write(payload)

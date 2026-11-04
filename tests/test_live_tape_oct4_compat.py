@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import patch
 
+import requests
+
 import live_tape_oct4_compat as tape
 
 
@@ -33,6 +35,90 @@ class Oct4CompatRpcTests(unittest.TestCase):
             rows = tape.rpc_batch(calls)
         self.assertIsNone(rows[0]['result'])
         request.assert_called_once()
+
+
+
+class Oct4CompatTransportRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        tape.SEEN.clear()
+        tape.PENDING_TX.clear()
+        tape.INITIALIZED_PAIRS.clear()
+        tape.PAIR_STARTED.clear()
+        tape.PAIR_LAST_POLL.clear()
+        tape.PAIR_LATEST_EVENT.clear()
+        tape.EVENTS.clear()
+
+    def tearDown(self):
+        self.setUp()
+
+    def test_rpc_keeps_successful_chunks_before_later_429(self):
+        class FakeResponse:
+            def __init__(self, ok):
+                self.ok = ok
+                self.status_code = 200 if ok else 429
+            def raise_for_status(self):
+                if not self.ok:
+                    r = requests.Response()
+                    r.status_code = 429
+                    raise requests.HTTPError('rate limited', response=r)
+            def json(self):
+                return [{'id': 1, 'result': {'blockTime': 1000}}]
+        calls = [('getTransaction', ['sig1']), ('getTransaction', ['sig2'])]
+        with patch.object(tape.SESSION, 'post', side_effect=[FakeResponse(True), FakeResponse(False)]):
+            rows = tape._rpc_request('https://solana-rpc.publicnode.com', calls)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['result']['blockTime'], 1000)
+        self.assertEqual(rows[1]['error']['code'], 'HTTP_429')
+
+    def test_transaction_retries_after_provider_error(self):
+        meta = {'pair': 'pool-1', 'address': 'mint-1', 'symbol': 'TEST', 'price': 1}
+        def answer(signature):
+            return [{'result': [{'signature': signature, 'slot': 123}]}]
+        responses = [
+            answer('seed'),
+            answer('new'), [{'error': {'code': 'HTTP_429'}}],
+            answer('new'), [{'result': {'blockTime': 1234}}],
+        ]
+        example = {'ts': 1_000_010, 'available_at': 1_000_010, 'usd_amount': 8.0,
+                   'direction': 'BUY', 'wallet': 'wallet1', 'quality_flags': []}
+        with patch.object(tape, 'feed_snapshot', return_value=[meta]), \
+             patch.object(tape, 'rpc_batch', side_effect=responses), \
+             patch.object(tape, 'parse_trade', return_value=example), \
+             patch.object(tape, 'now_ms', return_value=1_000_010), \
+             patch.object(tape, 'atomic_write'):
+            tape.poll_once()
+            failed = tape.poll_once()
+            self.assertEqual(failed['transaction_rpc_errors'], 1)
+            self.assertEqual(failed['backlog'], 1)
+            self.assertEqual(failed['pair_coverage']['pool-1']['status'], 'UNKNOWN')
+            succeeded = tape.poll_once()
+        self.assertEqual(succeeded['backlog'], 0)
+        self.assertEqual(succeeded['transactions_hydrated'], 1)
+        self.assertEqual(len(tape.EVENTS), 1)
+
+    def test_high_activity_signature_gap_restarts_coverage(self):
+        meta = {'pair': 'pool-1', 'address': 'mint-1', 'symbol': 'TEST', 'price': 1}
+        rows = lambda names: [{'result': [{'signature': x, 'slot': 1} for x in names]}]
+        with patch.object(tape, 'feed_snapshot', return_value=[meta]), \
+             patch.object(tape, 'rpc_batch', side_effect=[rows(['old1', 'old2']),
+                                                          rows(['new1', 'new2', 'new3', 'new4']),
+                                                          [{'error': {'code': 429}}]]), \
+             patch.object(tape, 'now_ms', side_effect=[100_000, 100_001, 200_000, 200_001, 200_002]), \
+             patch.object(tape, 'atomic_write'):
+            tape.poll_once()
+            result = tape.poll_once()
+        self.assertEqual(tape.PAIR_GAPS['pool-1'], 200_000)
+        self.assertEqual(result['pair_coverage']['pool-1']['status'], 'UNKNOWN')
+
+    def test_pending_tx_marks_pair_incomplete(self):
+        meta = {'pair': 'pool-1', 'address': 'mint-1', 'symbol': 'TEST', 'price': 1}
+        tape.PAIR_STARTED['pool-1'] = 1
+        tape.PAIR_LAST_POLL['pool-1'] = 120_001
+        tape.PENDING_TX['sig'] = ('sig', 1, meta, 120_000)
+        row = tape.coverage_snapshot([meta], 120_002)['pool-1']
+        self.assertEqual(row['status'], 'UNKNOWN')
+        self.assertEqual(row['backlog'], 1)
+        self.assertEqual(row['reason'], 'OCT4_TX_BACKLOG')
 
 
 class _StateResponse:
