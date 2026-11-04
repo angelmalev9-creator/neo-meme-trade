@@ -1,7 +1,7 @@
 [Unit]
 Description=NEO Angel PAPER self-healing watchdog
-After=network-online.target neo-user-angel-paper.service neo-live-tape-angel.service
-Wants=network-online.target neo-user-angel-paper.service neo-live-tape-angel.service
+After=network-online.target neo-user-angel-paper.service neo-live-stream-paper-angel.service
+Wants=network-online.target neo-user-angel-paper.service neo-live-stream-paper-angel.service
 
 [Service]
 Type=simple
@@ -10,7 +10,7 @@ WorkingDirectory=/root/neo-meme-trade
 Environment=PYTHONUNBUFFERED=1
 Environment=NEO_SELF_HEAL_ENGINE_URL=http://127.0.0.1:18804/state
 Environment=NEO_SELF_HEAL_ENGINE_SERVICE=neo-user-angel-paper.service
-Environment=NEO_SELF_HEAL_TAPE_SERVICE=neo-live-tape-angel.service
+Environment=NEO_SELF_HEAL_TAPE_SERVICE=neo-live-stream-paper-angel.service
 Environment=NEO_SELF_HEAL_STATUS_PATH=/var/lib/neo-market/users/42d3192d-f033-4061-85d6-2408c5e168e7/self_heal.json
 ExecStart=/usr/bin/python3 /root/neo-meme-trade/backend/self_heal.py
 Restart=always
