@@ -62,7 +62,22 @@ class Oct4CompatPrewarmTests(unittest.TestCase):
 
     def test_prewarm_accepts_near_setup_before_full_entry_threshold(self):
         self.assertTrue(tape.preflow_candidate(self.coin('near', score=35, liquidity=3000, age=70, m5=25)))
-        self.assertFalse(tape.preflow_candidate(self.coin('stale', score=90, liquidity=50000, age=260)))
+        self.assertFalse(tape.preflow_candidate(self.coin('stale', score=60, liquidity=50000, age=260)))
+
+    def test_oct4_gold_candidate_still_prewarms_after_four_hours(self):
+        gold = self.coin('mature-gold', score=97, liquidity=65000, age=1500, m5=4)
+        self.assertTrue(tape.gold_prefilter_candidate(gold))
+        self.assertTrue(tape.preflow_candidate(gold))
+        weak = self.coin('mature-weak', score=60, liquidity=65000, age=1500, m5=4)
+        self.assertFalse(tape.preflow_candidate(weak))
+
+    def test_gold_candidate_wins_priority_for_limited_tape_slots(self):
+        gold = self.coin('mature-gold', score=97, liquidity=65000, age=1500, m5=4, buys=10, sells=8)
+        high_ratio = self.coin('young-hype', score=64, liquidity=65000, age=10, m5=10, buys=200, sells=1)
+        with patch.object(tape.SESSION, 'get', return_value=_StateResponse({'feed': [high_ratio, gold], 'positions': []})), \
+             patch.object(tape, 'MAX_TRACKED', 1):
+            rows = tape.feed_snapshot()
+        self.assertEqual([row['symbol'] for row in rows], ['mature-gold'])
 
     def test_prewarm_is_broader_than_engine_but_still_bounded(self):
         self.assertTrue(tape.preflow_candidate(self.coin('young-low-score', score=24, liquidity=3300, age=28, m5=-6)))

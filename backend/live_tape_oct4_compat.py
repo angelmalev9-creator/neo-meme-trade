@@ -91,6 +91,19 @@ def market_flow_of(coin: dict[str, Any]) -> tuple[float, float, float, float]:
     return buys, sells, ratio, volume
 
 
+def gold_prefilter_candidate(coin: dict[str, Any]) -> bool:
+    """Prewarm every market-eligible Oct-4 GOLD candidate regardless of pool age.
+
+    The actual trading policy does not use a maximum pool age, so the tape
+    must not prevent it from receiving on-chain evidence for older pools.
+    This only changes observation coverage, never the engine's entry rules.
+    """
+    change = number((coin.get('priceChange') or {}).get('m5'), -999.0)
+    return (number(coin.get('score')) >= 85.0
+            and number(coin.get('liquidityUsd')) >= 15_000.0
+            and -5.0 <= change <= 25.0)
+
+
 def preflow_candidate(coin: dict[str, Any]) -> bool:
     """Broader pre-warm set; the market engine still owns every entry veto."""
     changes = coin.get('priceChange') or {}
@@ -100,7 +113,7 @@ def preflow_candidate(coin: dict[str, Any]) -> bool:
         and number(coin.get('priceUsd')) > 0
         and number(coin.get('score')) >= MIN_SCORE
         and number(coin.get('liquidityUsd')) >= MIN_LIQUIDITY
-        and age <= MAX_AGE_MINUTES
+        and (age <= MAX_AGE_MINUTES or gold_prefilter_candidate(coin))
         and MIN_M5 <= number(changes.get('m5'), -999.0) <= MAX_M5
     )
 
@@ -120,6 +133,7 @@ def coin_meta(coin: dict[str, Any], stamp: int, *, pinned: bool = False) -> dict
         'market_ratio_m5': ratio,
         'volume_m5': volume,
         'age_minutes': number(coin.get('ageMinutes'), 999999.0),
+        'm5': number((coin.get('priceChange') or {}).get('m5'), -999.0),
         'last_eligible': stamp,
         'pinned_position': bool(pinned),
     }
@@ -177,6 +191,11 @@ def feed_snapshot() -> list[dict[str, Any]]:
         TRACKED.values(),
         key=lambda row: (
             1 if row.get('pinned_position') else 0,
+            # Actual Oct-4 entry candidates must win a tape slot even when
+            # the wider prewarm pool list is heavily rotating.
+            1 if (number(row.get('score')) >= 85.0
+                  and number(row.get('liquidity')) >= 15_000.0
+                  and -5.0 <= number(row.get('m5'), -999.0) <= 25.0) else 0,
             # Pre-warm the pools closest to the desired qOMPUTE-style setup:
             # buy pressure first, then real short-volume/activity and youth.
             1 if number(row.get('market_ratio_m5')) >= 1.5 else 0,
