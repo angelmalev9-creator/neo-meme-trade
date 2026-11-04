@@ -1,0 +1,20 @@
+[Unit]
+Description=NEO PAPER read-only broad Solana discovery
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/neo-meme-trade
+Environment=NODE_ENV=production
+Environment=NEO_WIDE_DISCOVERY_PATH=/var/lib/neo-market/users/42d3192d-f033-4061-85d6-2408c5e168e7/wide_discovery.json
+Environment=NEO_WIDE_DISCOVERY_MEMORY_CAP=12000
+Environment=NEO_WIDE_DISCOVERY_OUTPUT_CAP=5000
+Environment=NEO_WIDE_DISCOVERY_TTL_MS=900000
+ExecStart=/root/.nvm/versions/node/v22.23.2/bin/node /root/neo-meme-trade/backend/solana_wide_discovery_paper.cjs
+Restart=always
+RestartSec=5
+CPUQuota=30%
+MemoryMax=220M
+[Install]
+WantedBy=multi-user.target

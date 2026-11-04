@@ -1,0 +1,17 @@
+[Unit]
+Description=NEO read-only broad Solana market observer PAPER
+After=network-online.target neo-wide-discovery-paper.service
+Wants=network-online.target neo-wide-discovery-paper.service
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/neo-meme-trade
+Environment=PYTHONUNBUFFERED=1
+Environment=NEO_WIDE_HTTP_PORT=18805
+ExecStart=/usr/bin/python3 /root/neo-meme-trade/backend/wide_market_observer_paper.py
+Restart=always
+RestartSec=5
+MemoryMax=250M
+CPUQuota=30%
+[Install]
+WantedBy=multi-user.target
