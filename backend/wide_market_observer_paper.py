@@ -14,6 +14,7 @@ import time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 import wide_discovery
@@ -176,9 +177,12 @@ async function update(){try{const r=await fetch('status',{cache:'no-store'});if(
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ('/','/index.html'):
+        # Ignore tracking and other harmless query parameters when routing.
+        # For example /wide-scan/?utm_source=chatgpt.com must render the page.
+        route = urlsplit(self.path).path
+        if route in ('/','/index.html'):
             body=HTML.encode('utf8');ctype='text/html; charset=utf-8'
-        elif self.path.startswith('/status'):
+        elif route in ('/status','/status/'):
             body=json.dumps(OBSERVER.status(),ensure_ascii=False).encode('utf8')
             ctype='application/json; charset=utf-8'
         else:
