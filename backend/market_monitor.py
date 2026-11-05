@@ -1256,7 +1256,7 @@ class State:
             runtime.atomic_json(archive / 'manifest.json', manifest)
             new_session = time.strftime('%Y%m%d-%H%M%S', time.gmtime()) + '-' + uuid.uuid4().hex[:8]
             self.commit('RESET', {'id': new_session, 'session_id': new_session, 'starting_balance_usd': STARTING_BALANCE_USD, 'archive': str(archive)},
-                positions=[], history=[], events=[], price_history={}, position_market={},
+                positions=[], history=[], paper_corrections=[], events=[], price_history={}, position_market={},
                 demo_starting_balance_usd=STARTING_BALANCE_USD, demo_balance_usd=STARTING_BALANCE_USD,
                 demo_started_at=now_ms(), demo_session_id=new_session, trade_seq=0,
                 equity_peak_usd=STARTING_BALANCE_USD,
