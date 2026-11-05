@@ -1107,6 +1107,8 @@ class State:
         self.positions: list[dict[str, Any]] = []
         self.position_market: dict[str, dict[str, Any]] = {}
         self.history: list[dict[str, Any]] = []
+        # Audited, PAPER-only technical reversals. Original fills remain in history.
+        self.paper_corrections: list[dict[str, Any]] = []
         self.events: list[dict[str, Any]] = []
         self.price_history: dict[str, list[dict[str, Any]]] = {}
         self.source_status = {'dexscreener': 'starting'}
@@ -1143,6 +1145,9 @@ class State:
             self.running = bool(data.get('running', True))
             self.status = str(data.get('status') or ('starting' if self.running else 'paused'))
             self.history = data.get('history', [])
+            self.paper_corrections = data.get('paper_corrections', [])
+            if not isinstance(self.paper_corrections, list):
+                raise ValueError('invalid PAPER correction ledger')
             self.position_market = data.get('position_market', {})
             self.pending_audit = data.get('pending_audit', [])
             self.audit_status = 'pending' if self.pending_audit else 'ok'
@@ -1185,6 +1190,7 @@ class State:
             'positions': self.positions,
             'position_market': self.position_market,
             'history': self.history,
+            'paper_corrections': self.paper_corrections,
             'pending_audit': self.pending_audit,
             'events': self.events[-100:],
             'demo_starting_balance_usd': self.demo_starting_balance_usd,
@@ -1292,7 +1298,7 @@ class State:
         total = 0.0
         for trade in self.history:
             stamp = int(trade.get('closed_at', 0)) / 1000
-            if stamp and time.strftime('%Y-%m-%d', time.gmtime(stamp)) == day:
+            if stamp and time.strftime('%Y-%m-%d', time.gmtime(stamp)) == day and not trade.get('technical_voided'):
                 total += num(trade.get('pnl_usd'))
         return total
 
@@ -1355,8 +1361,17 @@ class State:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
-            display_history = read_all_time_history(self.history)
+            full_display_history = read_all_time_history(self.history)
+            # Do not present bug-caused simulated exits as valid strategy outcomes.
+            # Their immutable evidence remains in history and the original audit.
+            display_history = [t for t in full_display_history if not t.get('technical_voided')]
             lifetime = trade_metrics(display_history)
+            raw_lifetime = trade_metrics(full_display_history)
+            raw_session = trade_metrics([t for t in self.history if t.get('session_id') == self.demo_session_id])
+            corrected_session = trade_metrics([t for t in self.history if
+                t.get('session_id') == self.demo_session_id and not t.get('technical_voided')])
+            reversal_usd = round(sum(num(r.get('amount_usd')) for r in self.paper_corrections), 8)
+            void_count = sum(1 for t in self.history if t.get('technical_voided'))
             wins, closed = lifetime['wins'], lifetime['closed_trades']
             closed_total = closed
             tape = read_live_tape()
@@ -1430,11 +1445,17 @@ class State:
                     'closed_trades': closed_total,
                     'wins': wins,
                     'win_rate': round((wins / closed) * 100, 1) if closed else 0,
-                    'metrics': {'lifetime': lifetime,
-                        'session': trade_metrics([t for t in self.history if t.get('session_id') == self.demo_session_id]),
+                    'metrics': {'lifetime': lifetime, 'lifetime_raw': raw_lifetime,
+                        'session': corrected_session, 'session_raw': raw_session,
                         'rolling_100': trade_metrics(display_history[:100]),
                         'policy_versions': {v: trade_metrics([t for t in display_history if str(t.get('exit_policy_version') or 'legacy_unknown') == v])
                             for v in {str(t.get('exit_policy_version') or 'legacy_unknown') for t in display_history}}},
+                    'paper_technical_corrections': {
+                        'trade_count': void_count, 'reversal_usd': reversal_usd,
+                        'source_pnl_usd': round(-reversal_usd, 8),
+                        'audit_retained': True,
+                        'note': 'PAPER-only bug reversal, not trading profit; raw outcomes remain in session_raw/lifetime_raw.'
+                    },
                     'historical_records_missing': max(0, self.trade_seq - len(self.positions) - len(self.history)),
                     'audit_status': self.audit_status,
                     'unavailable_liquidation_positions': sum(1 for p in self.positions if p.get('valuation_status') == 'unavailable'),
