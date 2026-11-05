@@ -2185,9 +2185,9 @@ def make_coin(address: str, pair: dict[str, Any], meta: dict[str, Any]) -> dict[
         'signals': signals, 'updatedAt': now_ms(),
     }
 
-def select_fresh_exact_pair_market(incoming: dict | None, pinned: dict | None, pair: str) -> dict | None:
-    """Select newest matching-pool quote evidence; ignore mismatched pools."""
-    choices = [coin for coin in (incoming, pinned) if isinstance(coin, dict)
+def select_fresh_exact_pair_market(pair: str, *candidates: dict | None) -> dict | None:
+    """Select the newest matching pool across feed, pair-key and persisted pin."""
+    choices = [coin for coin in candidates if isinstance(coin, dict)
                and coin.get('pairAddress') == pair]
     if not choices:
         return None
@@ -2362,10 +2362,10 @@ class Monitor:
         for position in positions:
             address, pair = position.get('address'), position.get('pairAddress')
             key = f'{address}:{pair}'
-            incoming = by_address.get((address,pair)) or by_address.get(address)
-            # Prefer the most recently observed exact-pair market data. A pinned
-            # record may be hours old even while a fresh token snapshot exists.
-            coin = select_fresh_exact_pair_market(incoming, pinned.get(key), pair)
+            # The pair-key entry can be an hours-old pin even when the plain
+            # address feed has a new quote for this exact pool. Consider both.
+            coin = select_fresh_exact_pair_market(
+                pair, by_address.get((address,pair)), by_address.get(address), pinned.get(key))
             coin = coin or position.get('coin_snapshot') or {}
             if coin.get('pairAddress') != pair: coin = {}
             stamp = now_ms()
@@ -2384,8 +2384,10 @@ class Monitor:
             fresh_market = 0 <= stamp-num(coin.get('updatedAt')) <= entry_policy.MAX_FEED_AGE_MS
             if not target_only and fresh_market and num(coin.get('liquidityUsd')) < num(position.get('entry_liquidity_usd'))*.80:
                 reason = reason or 'LIQUIDITY_EMERGENCY'
-            if not target_only and not fresh_market and stamp-num(coin.get('updatedAt')) > 60_000:
-                reason = reason or 'STALE_MARKET_EXIT'
+            # An out-of-date chart is missing evidence, not a liquidation
+            # instruction. Only a current executable quote may trigger the
+            # hard stop while the chart/feed is stale; otherwise retain the
+            # PAPER exposure and retry the market-data refresh.
             is_quote = position.get('execution_mode') in {'JUPITER_QUOTE_V2', 'PUMPSWAP_RPC_ENTRY_V1'}
             sol_usd = sol_usd_from_coin(coin) or sol_usd_market_price()
             network = max(.03, NETWORK_FEE_SOL*sol_usd)
@@ -2429,6 +2431,8 @@ class Monitor:
             decision_stop = max(0.1, own_stop - FIXED_STOP_TRIGGER_BUFFER_PCT) if target_only else own_stop
             def decide(net_now, peak_now):
                 if policy == oct4.EXIT_POLICY:
+                    if not fresh_market:
+                        return 'STOP_LOSS' if net_now <= -own_stop else None
                     return oct4.exit_reason(context, net_pct=net_now, peak_net_pct=peak_now, hold_minutes=hold,
                         signal_pct=signal_pct, peak_signal_pct=peak_signal_pct, stop_pct=own_stop)
                 return exit_policy.exit_reason(position, context, net_pct=net_now, peak_net_pct=peak_now,

@@ -547,6 +547,34 @@ class EngineExits(EngineHarness):
         self.assertFalse(m.STATE.history)
         self.assertEqual(m.STATE.positions[0]['hold_mode'], 'STRONG')
 
+    def test_stale_chart_does_not_trigger_fake_market_exit(self):
+        self.position()
+        stale = {**self.coin, 'updatedAt': self.clock[0] - 120_000}
+        quote = {'net_proceeds_usd': 197.0, 'gross_proceeds_usd': 197.03,
+                 'network_fee_usd': .03, 'dex_fee_usd': 0,
+                 'fill_price': 1.97, 'impact_pct': .2, 'slippage_pct': .1,
+                 'latency_pct': 0, 'quoted_at': self.clock[0],
+                 'from_cache': False, 'execution_source': 'OFFLINE_FIXTURE'}
+        with patch.object(m.paper_quotes, 'position_mark', return_value=quote), \
+             patch.object(self.monitor, 'market_context', return_value=context(90)):
+            self.monitor.update_positions({A: stale})
+        self.assertFalse(m.STATE.history)
+        self.assertEqual(len(m.STATE.positions), 1)
+        self.assertFalse(m.STATE.positions[0].get('pending_exit_reason'))
+
+    def test_stale_chart_still_respects_fresh_quote_stop(self):
+        self.position()
+        stale = {**self.coin, 'updatedAt': self.clock[0] - 120_000}
+        quote = {'net_proceeds_usd': 188.0, 'gross_proceeds_usd': 188.03,
+                 'network_fee_usd': .03, 'dex_fee_usd': 0,
+                 'fill_price': 1.88, 'impact_pct': .2, 'slippage_pct': .1,
+                 'latency_pct': 0, 'quoted_at': self.clock[0],
+                 'from_cache': False, 'execution_source': 'OFFLINE_FIXTURE'}
+        with patch.object(m.paper_quotes, 'position_mark', return_value=quote), \
+             patch.object(self.monitor, 'market_context', return_value=context(90)):
+            self.monitor.update_positions({A: stale})
+        self.assertEqual(self.closed()['exit_reason'], 'STOP_LOSS')
+
     def test_17_trailing_exit_books_the_honest_quote(self):
         self.position()
         self.mark(3.00, 298.0, conviction=75)
