@@ -51,6 +51,10 @@ type Position = {
   exit_price?: number; exit_reason?: string; trade_no?: number; session_id?: string;
   balance_before?: number; balance_after?: number; dex_url?: string;
   stop_loss_pct?: number; take_profit_net_pct?: number; exit_policy?: string; engine_settings_version?: string;
+  adaptive_trail_arm_pct?: number; adaptive_trail_pct?: number;
+  peak_signal_pnl_pct?: number; peak_net_pnl_pct?: number;
+  exit_signal_basis?: 'OBSERVED_POOL_PRICE' | 'NET_MARK_FALLBACK';
+  quote_status?: string; valuation_status?: string; hold_mode?: string;
 };
 type PricePoint = { ts: number; price: number; liquidity: number; volumeH1: number; score: number };
 type TradeMarker = { id: string; kind: 'entry' | 'exit'; ts: number; price: number; tradeNo?: number; pnlPct?: number };
@@ -101,7 +105,7 @@ type MonitorState = {
     worst: { bucket: string; trades: number; mean_pct: number; win_rate: number; avoided: boolean }[];
   } | null;
   stats: { feed_count: number; open_positions: number; closed_trades: number; wins: number; win_rate: number; realized_today_usd: number; realized_today_raw_usd?: number; paper_report_day?: string; paper_report_timezone?: string; paper_voided_today_count?: number; risk_day_timezone?: string; risk_day_pnl_usd?: number; daily_risk_remaining_usd?: number; paper_technical_corrections?: { trade_count: number; reversal_usd: number; audit_retained: boolean }; demo_starting_balance_usd: number; demo_balance_usd: number; demo_equity_usd: number; demo_available_usd: number; demo_reserved_usd: number; unrealized_pnl_usd: number; realized_total_usd: number; return_pct: number; demo_started_at: number; demo_session_id: string; metrics?: { lifetime?: { net_pnl_usd?: number } } };
-  config: { signal_strategy?: string; strategy_profile?: string; entry_policy_version?: string; exit_policy?: string; scan_seconds: number; position_scan_seconds?: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number; paper_only?: boolean; max_quoted_candidates_per_scan?: number; effective_entry_thresholds?: Record<string, number>; user_controls?: { enabled?: boolean; version?: string | null; updated_at?: number; limits?: Record<string, [number, number]>; target_only_exits?: boolean; max_hold_enabled?: boolean }; paper_pool_loss_guard?: { enabled: boolean; version: string; losses_to_block: number; lookback_hours: number; block_hours: number; blocked_pool_count: number; blocked_pools: { mint: string; pool: string; symbol: string; losses: number; blocked_until: number; remaining_seconds: number }[] } };
+  config: { signal_strategy?: string; strategy_profile?: string; entry_policy_version?: string; exit_policy?: string; scan_seconds: number; position_scan_seconds?: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number; paper_only?: boolean; max_quoted_candidates_per_scan?: number; effective_entry_thresholds?: Record<string, number>; adaptive_strategy?: { hold_modes?: { mode: string; min_conviction: number; trail_arm_pct: number; trail_pct: number; target_pct: number | null }[]; exit_policy?: string }; user_controls?: { enabled?: boolean; version?: string | null; updated_at?: number; limits?: Record<string, [number, number]>; target_only_exits?: boolean; max_hold_enabled?: boolean }; paper_pool_loss_guard?: { enabled: boolean; version: string; losses_to_block: number; lookback_hours: number; block_hours: number; blocked_pool_count: number; blocked_pools: { mint: string; pool: string; symbol: string; losses: number; blocked_until: number; remaining_seconds: number }[] } };
 };
 type TokenDetail = { coin: Coin; history: PricePoint[]; position: Position | null; trades: Position[]; live_tape?: LiveTrade[]; flow?: FlowStats };
 type FlowWindow = { buys: number; sells: number; buyers: number; sellers: number; buy_usd?: number; sell_usd?: number; complete?: boolean };
@@ -668,6 +672,56 @@ export default function App() {
             ) : <div className="mt-1.5 text-[10px] text-slate-500">Няма временно блокирани пулове. След две поредни загуби от един и същ токен и пул се спира новият вход за 3 часа.</div>}
             <div className="mt-1.5 text-[9px] leading-4 text-slate-500">Проверява само приключили сделки в същата PAPER сесия, без технически анулираните. Сигналите, SL и TP на стратегията от 4 октомври са непроменени.</div>
           </div>
+        )}
+
+        {state?.config.strategy_profile === 'ORDER_FLOW_ADAPTIVE_OCT4' && !!state?.config.adaptive_strategy?.hold_modes?.length && (
+          <section className="mt-3 rounded-2xl border border-emerald-400/15 bg-emerald-400/[0.035] p-4" data-testid="oct4-adaptive-trailing-panel">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-[11px] font-black text-emerald-200">
+                <TrendingUp className="h-4 w-4" /> Trailing stop · стратегията от 4 октомври
+              </div>
+              <span className="rounded-lg border border-emerald-400/15 bg-emerald-400/[0.05] px-2 py-1 text-[9px] font-bold text-emerald-200">Включен в оригиналната PAPER логика</span>
+            </div>
+            <p className="mt-2 text-[10px] leading-5 text-slate-400">
+              След като цената достигне необходимия връх, trailing stop следи отстъплението от този връх. Прагът на включване е +5% до +15%, а допустимото отстъпление е 3% до 7% според актуалния режим на позицията. Други оригинални правила за изход могат да се задействат по-рано.
+            </p>
+            {(state.positions || []).filter(p => p.exit_policy === 'oct4_adaptive').map(position => {
+              const arm = position.adaptive_trail_arm_pct;
+              const trail = position.adaptive_trail_pct;
+              const peak = position.exit_signal_basis === 'OBSERVED_POOL_PRICE'
+                ? position.peak_signal_pnl_pct : position.peak_net_pnl_pct;
+              const hasData = arm != null && trail != null && peak != null && Number.isFinite(peak);
+              const armed = hasData && peak >= arm;
+              return <div key={position.id} className="mt-3 rounded-xl border border-emerald-400/[0.12] bg-black/20 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <span className="font-black text-white">{position.symbol} · {position.hold_mode || 'адаптивен режим'}</span>
+                  <span className={armed ? 'font-bold text-emerald-200' : 'font-bold text-amber-200'}>
+                    {hasData ? (armed ? 'Trailing прагът е достигнат' : 'Изчаква достигане на прага') : 'Чака актуални котировки'}
+                  </span>
+                </div>
+                <p className="mt-1 text-[10px] text-slate-400">
+                  Включване: {arm != null ? '+' + arm.toFixed(1) + '%' : '—'} · отстъпление: {trail != null ? trail.toFixed(1) + '%' : '—'} · наблюдаван връх: {peak != null ? signed(peak) + '%' : '—'}.
+                  {' '}Основа: {position.exit_signal_basis === 'OBSERVED_POOL_PRICE' ? 'актуална цена на пула' : 'нетна изпълнима котировка'}.
+                </p>
+                {position.valuation_status === 'unavailable' && <p className="mt-1 text-[10px] text-amber-200">Няма потвърдена изпълнима котировка — trailing stop не гарантира продажба.</p>}
+              </div>;
+            })}
+            <details className="mt-2 text-[10px] text-slate-400">
+              <summary className="cursor-pointer py-1 font-bold text-slate-300">Виж точните trailing прагове за петте режима</summary>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                {state.config.adaptive_strategy.hold_modes.map(mode => (
+                  <div key={mode.mode} className="rounded-xl border border-white/[0.07] bg-black/20 px-3 py-2">
+                    <div className="font-bold text-white">{mode.mode}</div>
+                    <div className="mt-1">Включване +{mode.trail_arm_pct}%</div>
+                    <div>Отстъпление {mode.trail_pct}%</div>
+                  </div>
+                ))}
+              </div>
+            </details>
+            <p className="mt-1.5 text-[9px] leading-4 text-slate-500">
+              Това са съществуващите правила, не нова стратегия. Спирането се оценява при обновяване на пазарните данни и симулираната sell котировка; таксите, липсата на ликвидност и резките движения могат да доведат до по-лош резултат от прага.
+            </p>
+          </section>
         )}
 
         {state?.stats.paper_technical_corrections && state.stats.paper_technical_corrections.trade_count > 0 && (
