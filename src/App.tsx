@@ -99,7 +99,7 @@ type MonitorState = {
     best: { bucket: string; trades: number; mean_pct: number; win_rate: number; avoided: boolean }[];
     worst: { bucket: string; trades: number; mean_pct: number; win_rate: number; avoided: boolean }[];
   } | null;
-  stats: { feed_count: number; open_positions: number; closed_trades: number; wins: number; win_rate: number; realized_today_usd: number; demo_starting_balance_usd: number; demo_balance_usd: number; demo_equity_usd: number; demo_available_usd: number; demo_reserved_usd: number; unrealized_pnl_usd: number; realized_total_usd: number; return_pct: number; demo_started_at: number; demo_session_id: string; metrics?: { lifetime?: { net_pnl_usd?: number } } };
+  stats: { feed_count: number; open_positions: number; closed_trades: number; wins: number; win_rate: number; realized_today_usd: number; realized_today_raw_usd?: number; paper_report_day?: string; paper_report_timezone?: string; paper_voided_today_count?: number; risk_day_timezone?: string; risk_day_pnl_usd?: number; daily_risk_remaining_usd?: number; paper_technical_corrections?: { trade_count: number; reversal_usd: number; audit_retained: boolean }; demo_starting_balance_usd: number; demo_balance_usd: number; demo_equity_usd: number; demo_available_usd: number; demo_reserved_usd: number; unrealized_pnl_usd: number; realized_total_usd: number; return_pct: number; demo_started_at: number; demo_session_id: string; metrics?: { lifetime?: { net_pnl_usd?: number } } };
   config: { signal_strategy?: string; strategy_profile?: string; entry_policy_version?: string; exit_policy?: string; scan_seconds: number; position_scan_seconds?: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number; paper_only?: boolean; max_quoted_candidates_per_scan?: number; effective_entry_thresholds?: Record<string, number>; user_controls?: { enabled?: boolean; version?: string | null; updated_at?: number; limits?: Record<string, [number, number]>; target_only_exits?: boolean; max_hold_enabled?: boolean } };
 };
 type TokenDetail = { coin: Coin; history: PricePoint[]; position: Position | null; trades: Position[]; live_tape?: LiveTrade[]; flow?: FlowStats };
@@ -642,12 +642,20 @@ export default function App() {
       {tab === 'engine' && <>
         <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
           <Metric label="Баланс" value={`$${allTimeBalance.toFixed(2)}`} hint={`старт $${startingBalance.toFixed(0)} · ${signed(allTimeReturnPct)}%`} tone={allTimeReturnPct >= 0 ? 'up' : 'down'} />
-          <Metric label="Днес" value={`${signed(state?.stats.realized_today_usd ?? 0)}$`} hint={`нереализирано ${signed(state?.stats.unrealized_pnl_usd ?? 0)}$`} tone={(state?.stats.realized_today_usd ?? 0) >= 0 ? 'up' : 'down'} />
+          <Metric label="Днес · София" value={`${signed(state?.stats.realized_today_usd ?? 0)}$`} hint={`валидни PAPER сделки · нереализирано ${signed(state?.stats.unrealized_pnl_usd ?? 0)}$`} tone={(state?.stats.realized_today_usd ?? 0) >= 0 ? 'up' : 'down'} />
           <Metric label="Отворени" value={`${state?.stats.open_positions ?? 0} / ${state?.config.max_positions ?? '—'}`} hint={`до $${state?.config.trade_notional_usd ?? '—'} на позиция`} />
           <Metric label="Затворени" value={String(state?.stats.closed_trades ?? 0)} hint={state?.stats.closed_trades ? `win rate ${state.stats.win_rate.toFixed(0)}%` : 'още няма'} />
           <Metric label="Последен scan" value={state?.last_scan_at ? agoLabel(state.last_scan_at) : '—'} hint={`${(state?.discovery_stats?.scanned_address_slots_since_start ?? 0).toLocaleString()} общо проверки · ${state?.stats.feed_count ?? 0} валидни в batch · ${diagnostics?.signal_passed ?? 0} сигнал OK`} />
           <Metric label="Статус" value={state ? (state.running ? 'РАБОТИ' : 'ПАУЗА') : '—'} hint={`${state?.config.signal_strategy ?? '—'} · стоп −${state?.config.stop_loss_pct ?? '—'}%`} tone={state?.running ? 'up' : 'down'} />
         </section>
+
+        {state?.stats.paper_technical_corrections && state.stats.paper_technical_corrections.trade_count > 0 && (
+          <div className="mt-2 px-1 text-[10px] leading-4 text-slate-500">
+            PAPER корекция: {state.stats.paper_technical_corrections.trade_count} невалидни технически изхода · +${state.stats.paper_technical_corrections.reversal_usd.toFixed(2)} симулиран баланс (не е печалба).
+            {state.stats.paper_voided_today_count ? ` За днес са изключени ${state.stats.paper_voided_today_count} сделки от статистиката.` : ''}
+            {' '}Дневният защитен лимит продължава да се отчита по UTC, независимо от календара за София.
+          </div>
+        )}
 
         {state?.config.user_controls?.enabled && <Card className="mt-4" kicker="Контроли" title="Настройки на главния PAPER engine" right={<div className="text-[9px] font-black text-emerald-300">GOLD входове · фиксирани цели</div>}>
           <div className="grid gap-3 p-4 md:grid-cols-[1fr_1fr_1fr_auto] md:items-end">

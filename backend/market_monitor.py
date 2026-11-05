@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 import requests
@@ -1094,6 +1095,31 @@ def signal(kind: str, title: str, detail: str) -> dict[str, str]:
     return {'kind': kind, 'title': title, 'detail': detail}
 
 
+PAPER_REPORT_TZ = ZoneInfo('Europe/Sofia')
+PAPER_RISK_TZ = 'UTC'  # Historical hard gate: never migrate/reset intraday.
+
+
+def paper_report_day(stamp_ms: int | float) -> str:
+    """Display-day boundary for the Bulgarian PAPER calendar (not the UTC risk gate)."""
+    return datetime.fromtimestamp(float(stamp_ms) / 1000, PAPER_REPORT_TZ).date().isoformat()
+
+
+def paper_day_results(history: list[dict[str, Any]], stamp_ms: int | float) -> dict[str, Any]:
+    """Keep raw trades, technical voids and strategy PnL distinct."""
+    day = paper_report_day(stamp_ms)
+    rows = [t for t in history
+            if isinstance(t, dict) and t.get('closed_at')
+            and paper_report_day(t['closed_at']) == day]
+    valid = [t for t in rows if not t.get('technical_voided')]
+    return {
+        'day': day, 'timezone': PAPER_REPORT_TZ.key,
+        'valid_pnl_usd': round(sum(num(t.get('pnl_usd')) for t in valid), 8),
+        'raw_pnl_usd': round(sum(num(t.get('pnl_usd')) for t in rows), 8),
+        'technical_voided_count': len(rows) - len(valid),
+        'valid_trade_count': len(valid), 'raw_trade_count': len(rows),
+    }
+
+
 class State:
     def __init__(self, load_state: bool = True) -> None:
         self.lock = threading.RLock()
@@ -1294,13 +1320,9 @@ class State:
         return self.equity_usd() - self.risk_day_start_balance_usd
 
     def realized_today(self) -> float:
-        day = time.strftime('%Y-%m-%d', time.gmtime())
-        total = 0.0
-        for trade in self.history:
-            stamp = int(trade.get('closed_at', 0)) / 1000
-            if stamp and time.strftime('%Y-%m-%d', time.gmtime(stamp)) == day and not trade.get('technical_voided'):
-                total += num(trade.get('pnl_usd'))
-        return total
+        # Calendar-day PnL follows the UI's Bulgarian day. The protective
+        # risk gate intentionally remains UTC to preserve the live limit.
+        return paper_day_results(self.history, now_ms())['valid_pnl_usd']
 
     def live_flow(self, address: str, seconds: int = 30, pair_address: str | None = None) -> dict[str, Any]:
         tape = read_live_tape()
@@ -1370,6 +1392,7 @@ class State:
             raw_session = trade_metrics([t for t in self.history if t.get('session_id') == self.demo_session_id])
             corrected_session = trade_metrics([t for t in self.history if
                 t.get('session_id') == self.demo_session_id and not t.get('technical_voided')])
+            day_results = paper_day_results(self.history, now_ms())
             reversal_usd = round(sum(num(r.get('amount_usd')) for r in self.paper_corrections), 8)
             void_count = sum(1 for t in self.history if t.get('technical_voided'))
             wins, closed = lifetime['wins'], lifetime['closed_trades']
@@ -1461,7 +1484,12 @@ class State:
                     'unavailable_liquidation_positions': sum(1 for p in self.positions if p.get('valuation_status') == 'unavailable'),
                     'conservative_open_risk_usd': sum(num(p.get('conservative_risk_usd'), num(p.get('capital_committed_usd'))) for p in self.positions),
                     'drawdown_pct': max(0,1-self.equity_usd()/max(self.equity_peak_usd,1))*100,
-                    'realized_today_usd': round(self.realized_today(), 2),
+                    'realized_today_usd': round(day_results['valid_pnl_usd'], 2),
+                    'realized_today_raw_usd': round(day_results['raw_pnl_usd'], 2),
+                    'paper_report_day': day_results['day'],
+                    'paper_report_timezone': day_results['timezone'],
+                    'paper_voided_today_count': day_results['technical_voided_count'],
+                    'risk_day_timezone': PAPER_RISK_TZ,
                     'risk_day_pnl_usd': round(self.risk_day_pnl(), 2),
                     'daily_risk_remaining_usd': (round(max(0.,MAX_DAILY_LOSS_USD+self.risk_day_pnl()),4) if MAX_DAILY_LOSS_USD > 0 else None),
                     'daily_risk_cap_enabled': MAX_DAILY_LOSS_USD > 0,
