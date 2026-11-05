@@ -101,7 +101,7 @@ type MonitorState = {
     worst: { bucket: string; trades: number; mean_pct: number; win_rate: number; avoided: boolean }[];
   } | null;
   stats: { feed_count: number; open_positions: number; closed_trades: number; wins: number; win_rate: number; realized_today_usd: number; realized_today_raw_usd?: number; paper_report_day?: string; paper_report_timezone?: string; paper_voided_today_count?: number; risk_day_timezone?: string; risk_day_pnl_usd?: number; daily_risk_remaining_usd?: number; paper_technical_corrections?: { trade_count: number; reversal_usd: number; audit_retained: boolean }; demo_starting_balance_usd: number; demo_balance_usd: number; demo_equity_usd: number; demo_available_usd: number; demo_reserved_usd: number; unrealized_pnl_usd: number; realized_total_usd: number; return_pct: number; demo_started_at: number; demo_session_id: string; metrics?: { lifetime?: { net_pnl_usd?: number } } };
-  config: { signal_strategy?: string; strategy_profile?: string; entry_policy_version?: string; exit_policy?: string; scan_seconds: number; position_scan_seconds?: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number; paper_only?: boolean; max_quoted_candidates_per_scan?: number; effective_entry_thresholds?: Record<string, number>; user_controls?: { enabled?: boolean; version?: string | null; updated_at?: number; limits?: Record<string, [number, number]>; target_only_exits?: boolean; max_hold_enabled?: boolean } };
+  config: { signal_strategy?: string; strategy_profile?: string; entry_policy_version?: string; exit_policy?: string; scan_seconds: number; position_scan_seconds?: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number; paper_only?: boolean; max_quoted_candidates_per_scan?: number; effective_entry_thresholds?: Record<string, number>; user_controls?: { enabled?: boolean; version?: string | null; updated_at?: number; limits?: Record<string, [number, number]>; target_only_exits?: boolean; max_hold_enabled?: boolean }; paper_pool_loss_guard?: { enabled: boolean; version: string; losses_to_block: number; lookback_hours: number; block_hours: number; blocked_pool_count: number; blocked_pools: { mint: string; pool: string; symbol: string; losses: number; blocked_until: number; remaining_seconds: number }[] } };
 };
 type TokenDetail = { coin: Coin; history: PricePoint[]; position: Position | null; trades: Position[]; live_tape?: LiveTrade[]; flow?: FlowStats };
 type FlowWindow = { buys: number; sells: number; buyers: number; sellers: number; buy_usd?: number; sell_usd?: number; complete?: boolean };
@@ -650,6 +650,25 @@ export default function App() {
           <Metric label="Последен scan" value={state?.last_scan_at ? agoLabel(state.last_scan_at) : '—'} hint={`${(state?.discovery_stats?.scanned_address_slots_since_start ?? 0).toLocaleString()} общо проверки · ${state?.stats.feed_count ?? 0} валидни в batch · ${diagnostics?.signal_passed ?? 0} сигнал OK`} />
           <Metric label="Статус" value={state ? (state.running ? 'РАБОТИ' : 'ПАУЗА') : '—'} hint={`${state?.config.signal_strategy ?? '—'} · стоп −${state?.config.stop_loss_pct ?? '—'}%`} tone={state?.running ? 'up' : 'down'} />
         </section>
+
+        {state?.config.paper_pool_loss_guard?.enabled && (
+          <div className="mt-3 rounded-2xl border border-sky-400/20 bg-sky-400/[0.05] px-4 py-3" data-testid="paper-pool-loss-guard">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-[11px] font-black text-sky-200"><ShieldCheck className="h-4 w-4" /> Защита от поредица загуби · PAPER</div>
+              <span className="rounded-lg border border-sky-400/15 px-2 py-1 text-[9px] font-bold text-sky-200">Активна · {state.config.paper_pool_loss_guard.losses_to_block} загуби / {state.config.paper_pool_loss_guard.block_hours} часа</span>
+            </div>
+            {state.config.paper_pool_loss_guard.blocked_pools.length ? (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {state.config.paper_pool_loss_guard.blocked_pools.map(pool => (
+                  <div key={`${pool.mint}:${pool.pool}`} className="rounded-xl border border-amber-400/15 bg-amber-400/[0.045] px-3 py-2 text-[10px] text-slate-300">
+                    <span className="font-black text-amber-200">{pool.symbol || shortAddress(pool.mint)}</span> · {pool.losses} загуби · без нов вход до <span className="font-bold text-white">{new Date(pool.blocked_until).toLocaleTimeString('bg-BG', { timeZone: 'Europe/Sofia', hour: '2-digit', minute: '2-digit' })}</span> (София)
+                  </div>
+                ))}
+              </div>
+            ) : <div className="mt-1.5 text-[10px] text-slate-500">Няма временно блокирани пулове. След две поредни загуби от един и същ токен и пул се спира новият вход за 3 часа.</div>}
+            <div className="mt-1.5 text-[9px] leading-4 text-slate-500">Проверява само приключили сделки в същата PAPER сесия, без технически анулираните. Сигналите, SL и TP на стратегията от 4 октомври са непроменени.</div>
+          </div>
+        )}
 
         {state?.stats.paper_technical_corrections && state.stats.paper_technical_corrections.trade_count > 0 && (
           <div className="mt-2 px-1 text-[10px] leading-4 text-slate-500">

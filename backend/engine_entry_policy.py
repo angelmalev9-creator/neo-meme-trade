@@ -27,6 +27,7 @@ FIXED_PRIME_MIN_MARKET_RATIO = 1.30
 FIXED_PRIME_MAX_H1_TURNOVER = 4.0
 _ADDRESS = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 LABELS = {
+    'pool_loss_streak_cooldown': 'пулът е в 3-часова PAPER пауза след две поредни загуби',
     'risk_budget_unavailable': 'недостатъчен оставащ дневен бюджет за минималната позиция',
     'gold_signal': 'няма достатъчно ранен buy-flow импулс',
     'learned_avoid': 'контекст, който наскоро губи — пропуска се, докато данните остареят',

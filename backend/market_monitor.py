@@ -22,6 +22,7 @@ import engine_runtime as runtime
 import engine_exit_policy as exit_policy
 import order_flow_adaptive_oct4 as oct4
 import paper_quality_guard
+import paper_pool_loss_guard
 import adaptive_learning as learner
 import training_bridge
 from lab_dashboard_projection import book_trades, compact_strategy_lab
@@ -326,6 +327,14 @@ def _env_enabled(name: str, default: bool = False) -> bool:
 
 
 BUY_PRESSURE_FIXED = STRATEGY_PROFILE == OCT4_FIXED_PROFILE and _env_enabled('NEO_BUY_PRESSURE_FIXED')
+# Additive PAPER safety overlay, separate from Oct4 signal/exit policy.
+# Never activate for non-PAPER execution modes or non-restored profiles.
+PAPER_POOL_LOSS_GUARD_ENABLED = (
+    STRATEGY_PROFILE == oct4.PROFILE
+    and os.getenv('NEO_ENGINE_MODE', 'PAPER').upper() == 'PAPER'
+    and os.getenv('NEO_EXECUTION_MODE', 'PAPER').upper() == 'PAPER'
+    and _env_enabled('NEO_PAPER_POOL_LOSS_GUARD', True)
+)
 BUY_PRESSURE_FLOW_SECONDS = max(10, min(60, int(float(os.getenv('NEO_BUY_PRESSURE_FLOW_SECONDS', '60')))))
 BUY_PRESSURE_SCAN_SECONDS = max(4.0, float(os.getenv('NEO_BUY_PRESSURE_SCAN_SECONDS', '6')))
 BUY_PRESSURE_MIN_SCORE = float(os.getenv('NEO_BUY_PRESSURE_MIN_SCORE', '60'))
@@ -1521,6 +1530,8 @@ class State:
                     'config_source': CONFIG_SOURCE,
                     'ignored_env_overrides': list(IGNORED_ENV_OVERRIDES),
                     'same_token_cooldown_seconds': LOSS_REENTRY_SECONDS if is_adaptive() and not is_learner() else None,
+                    'paper_pool_loss_guard': paper_pool_loss_guard.description(
+                        self.history, now_ms(), self.demo_session_id, enabled=PAPER_POOL_LOSS_GUARD_ENABLED),
                     'entry_flow_window_seconds': (BUY_PRESSURE_FLOW_SECONDS if BUY_PRESSURE_FIXED else
                                                   policy_module().CONFIG['entry_flow_window_seconds']) if is_adaptive() else None,
                     'entry_on_position_guard': ENTRY_ON_POSITION_GUARD,
@@ -2637,6 +2648,8 @@ class Monitor:
         fixed_cooldown = is_adaptive() and not is_learner()
         recent = oct4.cooldown_addresses(STATE.history, now, LOSS_REENTRY_SECONDS, loss_multiplier=FIXED_LOSS_COOLDOWN_MULTIPLIER if STRATEGY_PROFILE == OCT4_FIXED_PROFILE else 1.0) if fixed_cooldown else set()
         learned = learning_table(STATE.history, now) if is_learner() else None
+        blocked_pools = (paper_pool_loss_guard.blocked_pools(
+            STATE.history, now, session_at_check) if PAPER_POOL_LOSS_GUARD_ENABLED else {})
         for trade in ([] if fixed_cooldown else STATE.history):
             recent_address = trade.get('address')
             closed_at = int(trade.get('closed_at') or 0)
@@ -2651,6 +2664,15 @@ class Monitor:
             address = coin.get('address')
             if not address or address in open_addresses or address in recent:
                 reject(report, ['cooldown'], coin)
+                continue
+            # Independent, read-only PAPER pool-loss quarantine. The original
+            # Oct4 signal checks and trade exit rules remain untouched.
+            blocked = blocked_pools.get(paper_pool_loss_guard.pool_key(coin))
+            if blocked:
+                reject(report, [paper_pool_loss_guard.REJECTION_CODE], coin, {
+                    'pool_loss_count': blocked['losses'],
+                    'blocked_until': blocked['blocked_until'],
+                })
                 continue
             report['evaluated'] += 1
             score = num(coin.get('score'))
@@ -2899,6 +2921,17 @@ class Monitor:
             with STATE.lock:
                 if STATE.demo_session_id!=session_at_check or not STATE.running or slots_in_use(STATE.positions)>=MAX_POSITIONS:
                     return
+                # Recheck at commit, after network/quote latency, to ensure no
+                # just-closed loss reopens the same pool while a quote is pending.
+                if PAPER_POOL_LOSS_GUARD_ENABLED:
+                    current_block = paper_pool_loss_guard.blocked_pools(
+                        STATE.history, now_ms(), STATE.demo_session_id).get(paper_pool_loss_guard.pool_key(coin))
+                    if current_block:
+                        reject(report, [paper_pool_loss_guard.REJECTION_CODE], coin, {
+                            'pool_loss_count': current_block['losses'],
+                            'blocked_until': current_block['blocked_until'],
+                        })
+                        continue
                 current_coin = next((c for c in STATE.feed if c.get('address') == address and c.get('pairAddress') == coin.get('pairAddress')), coin)
                 final_flow = STATE.live_flow(address, flow_seconds, str(coin.get('pairAddress') or ''))
                 final_context = self.market_context(current_coin)
