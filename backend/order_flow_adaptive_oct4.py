@@ -265,14 +265,15 @@ def exit_reason(context, *, net_pct, peak_net_pct, hold_minutes,
     """Decide whether to exit, in the 2026-10-04 priority order.
 
     `net_pct` is the net PnL of a full simulated sale right now. `signal_pct`
-    is the move of the exact entry pool's observed price since entry. The stop
-    uses only the net figure. The context triggers use the observed price as
-    they did historically, and fall back to the net figure whenever a fresh
-    observed price is unavailable (pass None) so a stale chart cannot hold a
-    position open or fake a profit.
+    is the move of the exact entry pool's fresh observed price since entry.
+    The 2026-10-04 stop triggers on either net loss or this fresh price move.
+    With no fresh observed price, use net PnL alone (never a stale chart).
+    Adaptive conviction/flow triggers otherwise keep historical priority.
     """
     net_pct = _n(net_pct, -math.inf)
     if net_pct <= -stop_pct:
+        return 'STOP_LOSS'
+    if signal_pct is not None and _n(signal_pct, math.inf) <= -stop_pct:
         return 'STOP_LOSS'
     signal = net_pct if signal_pct is None else _n(signal_pct, net_pct)
     peak = _n(peak_net_pct, net_pct) if signal_pct is None else _n(peak_signal_pct, signal)

@@ -201,9 +201,18 @@ class ExitDecision(unittest.TestCase):
         self.assertEqual(self.decide(20, -5.0, hold=500, fast=self.SELL_HEAVY), 'STOP_LOSS')
         self.assertEqual(self.decide(95, -5.0), 'STOP_LOSS')
         self.assertIsNone(self.decide(95, -4.99))
-        # The stop reads the net executable mark only, never the chart.
+        # Original Oct 4: net loss OR a fresh exact-pool signal can arm the stop.
         self.assertEqual(self.decide(95, -5.0, signal=+3.0), 'STOP_LOSS')
-        self.assertIsNone(self.decide(95, -1.0, signal=-9.0))
+        self.assertEqual(self.decide(95, -1.0, signal=-9.0), 'STOP_LOSS')
+
+    def test_oct4_fresh_exact_pool_price_triggers_historical_stop(self):
+        # Legacy code stopped on the exact-pool observed move as well as net.
+        ctx = context(90)
+        self.assertEqual(oct4.exit_reason(ctx, net_pct=-1.5, peak_net_pct=0,
+                         signal_pct=-5.1, peak_signal_pct=0, hold_minutes=.5), 'STOP_LOSS')
+        # Without fresh chart evidence, a non-triggered net mark must not stop.
+        self.assertIsNone(oct4.exit_reason(ctx, net_pct=-1.5, peak_net_pct=0,
+                         signal_pct=None, peak_signal_pct=None, hold_minutes=.5))
 
     def test_14_runner_and_strong_are_not_closed_at_plus_18(self):
         self.assertIsNone(self.decide(90, 18.0))
