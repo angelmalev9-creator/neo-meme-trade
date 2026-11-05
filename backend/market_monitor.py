@@ -2185,6 +2185,16 @@ def make_coin(address: str, pair: dict[str, Any], meta: dict[str, Any]) -> dict[
         'signals': signals, 'updatedAt': now_ms(),
     }
 
+def select_fresh_exact_pair_market(incoming: dict | None, pinned: dict | None, pair: str) -> dict | None:
+    """Select newest matching-pool quote evidence; ignore mismatched pools."""
+    choices = [coin for coin in (incoming, pinned) if isinstance(coin, dict)
+               and coin.get('pairAddress') == pair]
+    if not choices:
+        return None
+    return max(choices, key=lambda coin: num(coin.get('updatedAt')))
+
+
+
 class Monitor:
     def __init__(self) -> None:
         self.stop_event = threading.Event()
@@ -2353,7 +2363,9 @@ class Monitor:
             address, pair = position.get('address'), position.get('pairAddress')
             key = f'{address}:{pair}'
             incoming = by_address.get((address,pair)) or by_address.get(address)
-            coin = incoming if incoming and incoming.get('pairAddress') == pair else pinned.get(key)
+            # Prefer the most recently observed exact-pair market data. A pinned
+            # record may be hours old even while a fresh token snapshot exists.
+            coin = select_fresh_exact_pair_market(incoming, pinned.get(key), pair)
             coin = coin or position.get('coin_snapshot') or {}
             if coin.get('pairAddress') != pair: coin = {}
             stamp = now_ms()
