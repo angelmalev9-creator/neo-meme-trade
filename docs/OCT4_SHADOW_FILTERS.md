@@ -24,3 +24,11 @@ All four variants (observed baseline, cost cap, loss brake, both overlays) use e
 This method cannot predict replacement trades, changed cooldown timers, market movement, future quote availability, liquidity, execution impact, or profits. If both guards screen out nearly every observed entry, the correct result is **insufficient evidence**, not proof of a winning system. There is no automatic adoption into the original engine.
 
 Only compare forward PAPER experiments on new, unseen periods; keep the original October 4 logic and history intact.
+
+## Private dashboard integration (read-only)
+
+The NEO site now has a separate **Сравнение на стратегии** tab under the user's authenticated account. It calls `GET /user/shadow-comparison?period=today` or `?period=since_restore` through the existing `/user/*` gateway and Vercel fallback. The gateway reads only `users/<authenticated-id>/state.json`; it never supplies any other user's data, and it never touches engine settings or calls a swap endpoint.
+
+The tab refreshes approximately every 15 seconds while open and shows the four observed-screen variants, rejection reasons and evidence window. It explicitly labels selected historical PnL as non-counterfactual and declines to auto-promote a screen into the original bot.
+
+The `since_restore` period starts at 2026-11-05 12:08 Europe/Sofia and extends to the report request time. The `today` period uses the current Sofia calendar day. Both exclude technical-voided trades and positions not yet closed by the report time.

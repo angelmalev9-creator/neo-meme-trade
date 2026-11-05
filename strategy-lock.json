@@ -75,8 +75,9 @@
     "backend/strategy_lab.py": "3fd3fa98f832f4a7479e6aabc7db1a378818db2c0e5e61c1bd2873e9b3d94030",
     "backend/training_bridge.py": "9b47c744f10f79ad19250a27d87c861faeb13f0d1f18acca683b8fcb0a8c54f8",
     "backend/training_worker.py": "60908a3a28fd10a99a45f02c92d7247ee08ae0f0ce05ea181079387fe626cdfd",
-    "backend/user_gateway.py": "05e4851622e17531a0d41e91f5d38ad43120170ddceaaf2b879c281fda9693b4",
-    "backend/x_signal_monitor.py": "eb7c3f952a8f4048ebfd956c2d6a479fb04c31c83b9925b2a3ebb691a138298a"
+    "backend/user_gateway.py": "4573ec24a0f6c5e4d8a585e0918a4747c2d4f936961db1e941e2be996026a5b9",
+    "backend/x_signal_monitor.py": "eb7c3f952a8f4048ebfd956c2d6a479fb04c31c83b9925b2a3ebb691a138298a",
+    "scripts/shadow_oct4_filters.py": "aeb761fbcda2432c484390a1dda854f00eaf320d0bcf1bb77c4a5cd69a7b165c"
   },
   "runtime_version": "RUNTIME_DURABLE_PAPER_V2",
   "runtime_note": "PAPER account uses Oct 4 GOLD flow entry with 1 position max and 20m reentry cooldown. Strong/runner positions use adaptive trailing; no guaranteed gains.",

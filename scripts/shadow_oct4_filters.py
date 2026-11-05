@@ -71,7 +71,7 @@ def score_subset(rows, accepted_ids):
             "observed_recorded_pnl_usd": round(pnl, 4)}
 
 
-def analyze(state, day="2026-11-05", session_id=None, since_ms=None):
+def analyze(state, day="2026-11-05", session_id=None, since_ms=None, until_ms=None):
     rows = list(state.get("history") or [])
     session_id = session_id or state.get("demo_session_id")
     timeline = sorted([r for r in rows if isinstance(r, dict) and r.get("session_id")==session_id
@@ -83,7 +83,10 @@ def analyze(state, day="2026-11-05", session_id=None, since_ms=None):
     start_ms, end_ms = int(cutoff.timestamp()*1000), int(end.timestamp()*1000)
     if since_ms is not None:
         start_ms = max(start_ms,int(since_ms))
-    observed = [r for r in base if start_ms<=int(r["opened_at"])<end_ms]
+    if until_ms is not None:
+        end_ms = max(start_ms, int(until_ms))
+    observed = [r for r in base if start_ms<=int(r["opened_at"])<end_ms
+                and int(r["closed_at"]) <= end_ms]
     # Simulate as-of decisions using *only* closes strictly before each entry;
     # do not read its own result, future trades, or voided technical exits.
     history = sorted(base, key=lambda r: (int(r["closed_at"]), str(r.get("id"))))
@@ -115,6 +118,7 @@ def analyze(state, day="2026-11-05", session_id=None, since_ms=None):
     result = {
         "version": LABEL, "day": day, "timezone": "Europe/Sofia",
         "observation_start": datetime.fromtimestamp(start_ms/1000,TZ).isoformat(),
+        "observation_end": datetime.fromtimestamp(end_ms/1000,TZ).isoformat(),
         "session_id": session_id, "input_closed_valid_trades": len(base),
         "original_strategy_modified": False, "execution": "OFFLINE_READONLY_PAPER",
         "assumptions": {

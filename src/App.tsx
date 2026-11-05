@@ -1,5 +1,6 @@
 import LabPairedPanel, { type LabPairedSnapshot } from './components/LabPairedPanel';
 import PaperTrainingPanel, { type PaperTrainingSnapshot } from './components/PaperTrainingPanel';
+import StrategyComparisonPanel from './components/StrategyComparisonPanel';
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Activity, Bot, CircleDollarSign, ExternalLink, Flame, FlaskConical, Gauge, RefreshCw, Search,
@@ -130,7 +131,7 @@ type HypeRadar = {
   themes: HypeTheme[]; stale_themes: number; source_lines: { source: string; text: string }[]; matches: HypeMatch[]; feed_count: number; checked_at: number;
 };
 type Filter = 'ALL' | 'SETUP' | 'WATCH' | 'NEW' | 'BOOSTED';
-type Tab = 'engine' | 'lab' | 'coins' | 'hype';
+type Tab = 'engine' | 'lab' | 'compare' | 'coins' | 'hype';
 const WINDOW_LABELS: Record<string, string> = { m1: '1м', m5: '5м', m15: '15м', m30: '30м', h1: '1ч', h6: '6ч', h24: '24ч' };
 
 const fmtMoney = (value = 0) => value >= 1_000_000 ? `$${(value / 1_000_000).toFixed(2)}M` : value >= 1_000 ? `$${(value / 1_000).toFixed(1)}K` : `$${value.toFixed(0)}`;
@@ -610,6 +611,7 @@ export default function App() {
   const tabs: { id: Tab; label: string; icon: ReactNode; badge?: string }[] = [
     { id: 'engine', label: 'Engine', icon: <Bot className="h-3.5 w-3.5" />, badge: state ? `${state.stats.open_positions}/${state.config.max_positions}` : undefined },
     { id: 'lab', label: 'Лаборатория', icon: <FlaskConical className="h-3.5 w-3.5" />, badge: state ? `${activeBooks.length} активни` : undefined },
+    { id: 'compare', label: 'Сравнение на стратегии', icon: <ShieldCheck className="h-3.5 w-3.5" /> },
     { id: 'coins', label: 'Койн фийд', icon: <Activity className="h-3.5 w-3.5" />, badge: state ? `${state.stats.feed_count}` : undefined },
   ];
   const hypeBook = state?.strategy_lab?.books?.HYPE_RADAR;
@@ -724,6 +726,8 @@ export default function App() {
         </Card>
         <div className="mt-3 flex items-center justify-between text-[9px] text-slate-700"><span>Сесия {state?.stats.demo_session_id || '—'} · от {fullTimeLabel(state?.stats.demo_started_at || 0)}</span><button onClick={() => { if (window.confirm('Да започна ли НОВА ЛИЧНА demo сесия с $1,000? Старата история се архивира.')) resetMyDemo(); }} className="rounded-lg border border-white/[0.07] px-2 py-1 font-black text-slate-600 hover:text-white">RESET DEMO → $1,000</button></div>
       </>}
+
+      {tab === 'compare' && <StrategyComparisonPanel fetchJson={authedJson} activeProfile={state?.config.strategy_profile} />}
 
       {tab === 'lab' && <>
         <Card kicker="Лаборатория" title="Тестови стратегии · натисни стратегия за всяка нейна сделка" right={<div className={`rounded-lg border px-2.5 py-1.5 text-[9px] font-black ${state?.strategy_lab?.status === 'online' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>{(state?.strategy_lab?.status || 'CONNECTING').toUpperCase()}</div>}>

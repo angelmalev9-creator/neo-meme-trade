@@ -11,9 +11,15 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 from engine_runtime import atomic_json
+
+# Independent, read-only PAPER research: no imports from live engine decisions.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts import shadow_oct4_filters as shadow_filters
 
 HOST = os.getenv("NEO_USER_GATEWAY_HOST", "127.0.0.1")
 PORT = int(os.getenv("NEO_USER_GATEWAY_PORT", "8789"))
@@ -392,6 +398,42 @@ def proxy_user_engine(user, method, path, payload=None):
     return data
 
 
+PAPER_COMPARISON_SINCE_MS = int(datetime(2026, 11, 5, 12, 8, tzinfo=ZoneInfo("Europe/Sofia")).timestamp() * 1000)
+
+
+def authenticated_shadow_report(user_id: str, period: str = "today", *, at_ms: int | None = None):
+    """Never fetch another user's ledger or change a balance/trade.
+
+    The per-user state file is updated atomically by PAPER engine. Only its
+    already-closed, non-voided trades are screened. No model predictions.
+    """
+    if period not in ("today", "since_restore"):
+        raise ValueError("unknown comparison period")
+    stamp = now_ms() if at_ms is None else int(at_ms)
+    path = engine_state_path(user_id)
+    if not path.is_file():
+        raise FileNotFoundError("PAPER account state not initialized")
+    if path.stat().st_size > 32_000_000:
+        raise ValueError("PAPER state file exceeds read-only analysis limit")
+    raw = path.read_bytes()
+    state = json.loads(raw)
+    if not isinstance(state, dict) or not isinstance(state.get("history"), list):
+        raise ValueError("Invalid PAPER account state")
+    if period == "today":
+        date = datetime.fromtimestamp(stamp / 1000, ZoneInfo("Europe/Sofia")).date().isoformat()
+        start = None
+    else:
+        date = "2026-11-05"
+        start = PAPER_COMPARISON_SINCE_MS
+    report = shadow_filters.analyze(state, day=date, since_ms=start, until_ms=stamp)
+    report.update({
+        "period": period, "generated_at": stamp, "source": "AUTHENTICATED_ACCOUNT_PAPER_STATE",
+        "input_sha256": hashlib.sha256(raw).hexdigest(),
+        "report_only": True,
+    })
+    return report
+
+
 def revive_known_engines():
     # Engines are restarted automatically after a gateway/system restart so
     # previously activated accounts keep paper-trading even while logged out.
@@ -494,6 +536,18 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/user/state":
                 self.json_response(proxy_user_engine(user, "GET", "/state"))
+                return
+            if parsed.path == "/user/shadow-comparison":
+                period = (parse_qs(parsed.query).get("period") or ["today"])[0]
+                if period not in ("today", "since_restore"):
+                    self.json_response({"error": "invalid_period"}, 400)
+                    return
+                try:
+                    report = authenticated_shadow_report(str(user["id"]), period)
+                except FileNotFoundError:
+                    self.json_response({"error": "paper_state_pending"}, 503)
+                    return
+                self.json_response(report)
                 return
             if parsed.path == "/user/settings":
                 self.json_response(proxy_user_engine(user, "GET", "/settings"))
