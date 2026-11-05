@@ -149,6 +149,8 @@ class VpsAutoDeploy(unittest.TestCase):
         result = self.run_deploy()
         self.assertEqual((result.returncode, self.calls(), self.head(self.live)), (0, [], self.start))
         self.assertFalse((self.stub / 'verify_runs').exists())
+        self.assertEqual(self.status()['result'], 'up_to_date')
+        self.assertEqual(self.status()['restarted_services'], [])
 
     def test_docs_only_change_is_pulled_without_restarting_anything(self):
         target = self.push_change('docs/a.md', 'src/App.tsx')

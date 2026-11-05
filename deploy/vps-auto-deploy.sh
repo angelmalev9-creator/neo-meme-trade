@@ -176,7 +176,13 @@ PY
   git -C "$REPO" fetch --quiet "$REMOTE" "$BRANCH"
   current="$(git -C "$REPO" rev-parse HEAD)"
   target="$(git -C "$REPO" rev-parse FETCH_HEAD)"
-  [ "$current" = "$target" ] && exit 0
+  if [ "$current" = "$target" ]; then
+    # A previous blocked/degraded status must not outlive a successful
+    # up-to-date check; otherwise the dashboard reports a stale deploy error.
+    write_status up_to_date "local checkout matches $REMOTE/$BRANCH; no restart needed"
+    log "up to date ${current:0:12}; no service changes"
+    exit 0
+  fi
 
   if [ -f "$STATE_DIR/failed_commit" ] && [ "$(cat "$STATE_DIR/failed_commit")" = "$target" ]; then
     log "skipping ${target:0:12}: it already failed; waiting for a newer commit"
