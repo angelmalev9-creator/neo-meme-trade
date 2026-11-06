@@ -1,4 +1,5 @@
 import LabPairedPanel, { type LabPairedSnapshot } from './components/LabPairedPanel';
+import TokenEvidencePanel from './components/TokenEvidencePanel';
 import PaperTrainingPanel, { type PaperTrainingSnapshot } from './components/PaperTrainingPanel';
 import StrategyComparisonPanel from './components/StrategyComparisonPanel';
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
@@ -909,6 +910,8 @@ export default function App() {
               </div>
               <div className="grid grid-cols-2 gap-px bg-white/[0.05] sm:grid-cols-4">{([['Market cap', fmtMoney(selectedCoin.marketCap || selectedCoin.fdv)], ['Ликвидност', fmtMoney(selectedCoin.liquidityUsd)], ['Обем 1ч', fmtMoney(selectedCoin.volume.h1)], ['1ч', `${signed(selectedCoin.priceChange.h1, 1)}%`]] as [string, string][]).map(([label, value]) => <div key={label} className="bg-[#0b0e11] p-4"><div className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-700">{label}</div><div className="mt-1 text-base font-black text-white">{value}</div></div>)}</div>
             </div>
+
+            <TokenEvidencePanel coin={selectedCoin} wallets={wallets?.address === selectedCoin.address && wallets?.pairAddress === selectedCoin.pairAddress ? wallets : null} flow={flow} />
 
             <Card kicker="Купувачи · продавачи" title={`$${selectedCoin.symbol} · по периоди`} right={<div className="text-[9px] text-slate-500">{wallets?.trade_sources.rpc_live_rows ? `on-chain live · ${wallets.trade_sources.rpc_live_rows} сделки` : flow?.tape.status === 'online' ? `on-chain tape · покритие ${flow.tape.coverage ?? '—'}` : 'on-chain live: свързване…'}</div>}>
               <div className="flex flex-wrap gap-1.5 border-b border-white/[0.07] p-3">
