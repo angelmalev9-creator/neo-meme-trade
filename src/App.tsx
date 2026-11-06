@@ -75,7 +75,8 @@ type LabStats = { trades: number; wins: number; losses: number; win_rate: number
 type LabFlowQuality = { status?: string; source_status?: string; tracked_pairs?: number; complete_pairs?: number; coverage_pct?: number; snapshot_age_seconds?: number; current_pending?: number; older_pending?: number; reasons?: string[]; missing_flow_is_unknown_not_zero?: boolean; performance_validated?: boolean };
 type AuditMetric = { trades: number; wins: number; losses: number; net_pnl_usd: number; profit_factor: number | null; expectancy_usd_per_trade: number | null; sample_sufficient_for_preliminary_review: boolean };
 type LabResearchAudit = { version: string; mode: string; changes_trade_execution: boolean; overall: AuditMetric; estimated_costs: { average_roundtrip_cost_pct: number | null; starting_net_cost_over_1pct: number }; historical_entry_evidence: { price_crosscheck_pass?: number; price_crosscheck_review?: number; price_crosscheck_blocked?: number; entry_quote_proof_missing_or_stale?: number; limit_target_assumed_fill?: number }; market_data_quality: { flow_status: string; independent_intratrade_quote_replay_available: boolean }; time_split: { cutoff_at_ms: number | null; earlier_period: AuditMetric; later_period: AuditMetric }; scenarios: Array<{ initial_roundtrip_cost_cap_pct?: number; historically_observed_entries_passing?: number; extra_roundtrip_cost_bps?: number; stressed_observed_pnl_usd?: number }>; by_strategy: Record<string,{ historical: AuditMetric; time_split: { later_period: AuditMetric }; evidence: {price_crosscheck_pass?: number; price_crosscheck_review?: number; price_crosscheck_blocked?: number} }> };
-type StrategyLab = { research_audit?: LabResearchAudit; paired?: LabPairedSnapshot; flow_data_quality?: LabFlowQuality; status: string; updated_at: number; started_at: number; books: Record<string, LabBook>; stats: Record<string, LabStats>; error?: string; activity_config?: { rejection_labels?: Record<string, string>; exit_overrides?: Record<string, { stop_loss?: number; take_profit?: number }> } };
+type LabSafetyBrakes = { version: string; mode: string; status: string; pause_new_entries: boolean; evaluated_at_ms?: number; day_start_equity_usd?: number; realized_balance_usd?: number; daily_drawdown_usd?: number; daily_loss_limit_usd?: number; recent_loss_streak?: number; pool_cooldown_count?: number; active_book_count?: number; limits?: { loss_streak_count?: number; pool_loss_count?: number; daily_drawdown_pct?: number; max_entry_impact_pct?: number; max_exit_impact_pct?: number; max_roundtrip_cost_pct?: number } };
+type StrategyLab = { safety_brakes?: LabSafetyBrakes; research_audit?: LabResearchAudit; paired?: LabPairedSnapshot; flow_data_quality?: LabFlowQuality; status: string; updated_at: number; started_at: number; books: Record<string, LabBook>; stats: Record<string, LabStats>; error?: string; activity_config?: { rejection_labels?: Record<string, string>; exit_overrides?: Record<string, { stop_loss?: number; take_profit?: number }> } };
 type LiveTrade = { ts: number; direction: 'BUY' | 'SELL'; token_amount: number; usd_amount: number; wallet: string; note: string; address: string; pairAddress: string; symbol: string; signature: string; slot: number };
 type FlowStats = { seconds: number; trades: number; buys: number; sells: number; buy_usd: number; sell_usd: number; buy_sell_usd_ratio: number; unique_wallets: number; max_buy_usd: number; max_sell_usd: number };
 type TapeStatus = { status?: string; tracked_pairs?: number; complete_pairs?: number; warming_pairs?: number; coverage?: number | null; updated_at?: number; source?: string; error?: string | null };
@@ -564,6 +565,7 @@ export default function App() {
   const labLabels = state?.strategy_lab?.activity_config?.rejection_labels || {};
   const exitOverrides = state?.strategy_lab?.activity_config?.exit_overrides || {};
   const labAudit = state?.strategy_lab?.research_audit;
+  const paperSafety = state?.strategy_lab?.safety_brakes;
   const sortedHistory = useMemo(() => [...(state?.history || [])].sort((a, b) => (b.closed_at ?? b.updated_at ?? 0) - (a.closed_at ?? a.updated_at ?? 0)), [state?.history]);
   const historyRows = showAllHistory ? sortedHistory : sortedHistory.slice(0, 15);
 
@@ -879,6 +881,34 @@ export default function App() {
           </div>
           {quietBooks.length > 0 && <div className="border-t border-white/[0.06] p-3 text-center"><button onClick={() => setShowQuietBooks(v => !v)} className="text-[10px] font-black text-slate-400 hover:text-white">{showQuietBooks ? 'Скрий стратегиите без сделки' : `Покажи и ${quietBooks.length} стратегии без нито една сделка (с причината защо)`}</button></div>}
         </Card>
+        {paperSafety && <Card className="mt-4" kicker="PAPER защити" title="Автоматични защитни паузи · само странични стратегии">
+          <div className="px-4 pt-3 text-[11px] leading-5 text-slate-400">
+            <span className={paperSafety.pause_new_entries ? 'font-black text-amber-200' : 'font-black text-cyan-200'}>
+              {paperSafety.status === 'ALLOW_NEW_PAPER_ENTRIES' ? 'Няма активна пауза' : paperSafety.status === 'STREAK_PAUSE' ? 'Пауза: серия загуби' : paperSafety.status === 'DAILY_PAUSE' ? 'Пауза: дневен лимит' : 'Пауза: проверка за безопасност'}
+            </span>
+            <span className="ml-2 text-slate-500">Версия {paperSafety.version} · {paperSafety.evaluated_at_ms ? agoLabel(paperSafety.evaluated_at_ms) : '—'}</span>
+          </div>
+          <div className="grid gap-2 px-4 py-3 sm:grid-cols-3">
+            <div className="rounded-xl border border-white/[0.07] bg-white/[0.025] p-3">
+              <div className="text-[9px] uppercase text-slate-500">Дневен реализиран спад</div>
+              <div className="mt-1 text-sm font-black text-white">${(paperSafety.daily_drawdown_usd ?? 0).toFixed(2)} / ${(paperSafety.daily_loss_limit_usd ?? 0).toFixed(2)}</div>
+              <div className="mt-1 text-[9px] text-slate-600">Пауза на новите PAPER входове при достигане на лимита</div>
+            </div>
+            <div className="rounded-xl border border-white/[0.07] bg-white/[0.025] p-3">
+              <div className="text-[9px] uppercase text-slate-500">Последователни загуби</div>
+              <div className="mt-1 text-sm font-black text-white">{paperSafety.recent_loss_streak ?? 0} / {paperSafety.limits?.loss_streak_count ?? 3}</div>
+              <div className="mt-1 text-[9px] text-slate-600">Пауза след поредица загуби в рамките на час</div>
+            </div>
+            <div className="rounded-xl border border-white/[0.07] bg-white/[0.025] p-3">
+              <div className="text-[9px] uppercase text-slate-500">Блокирани пулове</div>
+              <div className="mt-1 text-sm font-black text-white">{paperSafety.pool_cooldown_count ?? 0}</div>
+              <div className="mt-1 text-[9px] text-slate-600">Повтарящи се губещи пулове · тричасова пауза</div>
+            </div>
+          </div>
+          <div className="border-t border-white/[0.06] px-4 py-2.5 text-[10px] leading-5 text-slate-500">
+            Отхвърля и нови симулирани входове с липсващи данни за изпълнение или висок моделиран price impact. Управлението на отворени позиции продължава. Основният робот и стратегията от 4 октомври не се променят. Не гарантира печалба или максимален реален стоп.
+          </div>
+        </Card>}
         <div className="mt-4"><LabPairedPanel data={state?.strategy_lab?.paired} /></div>
         <PaperTrainingPanel data={state?.paper_training} />
       </>}
