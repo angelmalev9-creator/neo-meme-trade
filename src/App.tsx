@@ -1,4 +1,5 @@
 import LabPairedPanel, { type LabPairedSnapshot } from './components/LabPairedPanel';
+import StrategyRiskPanel from './components/StrategyRiskPanel';
 import TokenEvidencePanel from './components/TokenEvidencePanel';
 import PaperTrainingPanel, { type PaperTrainingSnapshot } from './components/PaperTrainingPanel';
 import StrategyComparisonPanel from './components/StrategyComparisonPanel';
@@ -570,6 +571,17 @@ export default function App() {
   const historyRows = showAllHistory ? sortedHistory : sortedHistory.slice(0, 15);
 
   const refreshDashboard = () => { setBusy(true); setRefreshTick(value => value + 1); window.setTimeout(() => setBusy(false), 500); };
+  const applyPaperRiskScenario = async (values: { trade_notional_usd: number; stop_loss_pct: number; take_profit_pct: number }) => {
+    if (!state?.config.user_controls?.enabled || !state.config.paper_only) {
+      throw new Error('Този PAPER профил не разрешава промяна на активните параметри.');
+    }
+    const next = await authedPost<MonitorState>('/user/settings', values);
+    if (!next?.config?.user_controls?.enabled) {
+      throw new Error('Backend-ът не потвърди промяната на активния профил.');
+    }
+    setState(next);
+  };
+
   const saveEngineSettings = async () => {
     const trade_notional_usd = Number(engineAmount);
     const stop_loss_pct = Number(engineStop);
@@ -738,6 +750,8 @@ export default function App() {
             {' '}Дневният защитен лимит продължава да се отчита по UTC, независимо от календара за София.
           </div>
         )}
+
+        {state && <StrategyRiskPanel config={state.config} stats={state.stats} onApplyPaper={applyPaperRiskScenario} />}
 
         {state?.config.user_controls?.enabled && <Card className="mt-4" kicker="Контроли" title="Настройки на главния PAPER engine" right={<div className="text-[9px] font-black text-emerald-300">GOLD входове · фиксирани цели</div>}>
           <div className="grid gap-3 p-4 md:grid-cols-[1fr_1fr_1fr_auto] md:items-end">
