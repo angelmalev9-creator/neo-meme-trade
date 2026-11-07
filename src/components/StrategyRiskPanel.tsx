@@ -367,3 +367,4 @@ export default function StrategyRiskPanel({
       </div>
     </div>
   </section>;
+}
