@@ -1,5 +1,6 @@
 import LabPairedPanel, { type LabPairedSnapshot } from './components/LabPairedPanel';
 import StrategyRiskPanel from './components/StrategyRiskPanel';
+import StopProfitAuditPanel from './components/StopProfitAuditPanel';
 import TokenEvidencePanel from './components/TokenEvidencePanel';
 import PaperTrainingPanel, { type PaperTrainingSnapshot } from './components/PaperTrainingPanel';
 import StrategyComparisonPanel from './components/StrategyComparisonPanel';
@@ -752,6 +753,7 @@ export default function App() {
         )}
 
         {state && <StrategyRiskPanel config={state.config} stats={state.stats} onApplyPaper={applyPaperRiskScenario} />}
+        {state && <StopProfitAuditPanel history={state.history} stopPct={state.config.stop_loss_pct} currentProfile={state.config.strategy_profile} />}
 
         {state?.config.user_controls?.enabled && <Card className="mt-4" kicker="Контроли" title="Настройки на главния PAPER engine" right={<div className="text-[9px] font-black text-emerald-300">GOLD входове · фиксирани цели</div>}>
           <div className="grid gap-3 p-4 md:grid-cols-[1fr_1fr_1fr_auto] md:items-end">
