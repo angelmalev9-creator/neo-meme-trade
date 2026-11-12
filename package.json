@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "check:extension": "node --check extension/page-tap-v081.js && node --check extension/visual-label-discovery-v09.js && node --check extension/sentinel-v5.js && node --check extension/resolver-v081.js && node --check extension/background-main-v4.js && node --check extension/realtime-bg.js && node --check extension/engine-v2.js && node --check extension/popup.js",
-    "build": "npm run check:strategy && npm run check:extension && vite build && node scripts/package-extension.mjs",
+    "build": "npm run test:verified-momentum && npm run check:strategy && npm run check:extension && vite build && node scripts/package-extension.mjs",
+    "test:verified-momentum": "node --import tsx --test scripts/verified-momentum.test.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "lint": "tsc --noEmit",
     "check:strategy": "node scripts/verify-strategy-lock.mjs"
