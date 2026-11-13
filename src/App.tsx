@@ -5,6 +5,7 @@ import PaperRepoPatternPanel from './components/PaperRepoPatternPanel';
 import TokenEvidencePanel from './components/TokenEvidencePanel';
 import VerifiedMomentumPanel from './components/VerifiedMomentumPanel';
 import EarlyTokenCohortPanel from './components/EarlyTokenCohortPanel';
+import EarlyPaperCandidatePanel from './components/EarlyPaperCandidatePanel';
 import { useEarlyCohortResearch } from './hooks/useEarlyCohortResearch';
 import PaperTrainingPanel, { type PaperTrainingSnapshot } from './components/PaperTrainingPanel';
 import StrategyComparisonPanel from './components/StrategyComparisonPanel';
@@ -671,7 +672,8 @@ export default function App() {
       {error && <div className="mb-4 rounded-2xl border border-red-500/20 bg-red-500/[0.06] px-4 py-3 text-xs text-red-200">{error}</div>}
 
       {tab === 'engine' && <>
-        <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        <EarlyPaperCandidatePanel study={earlyCohortStudy} activeProfile={state?.config.strategy_profile || null} onOpenStudy={() => switchTab('coins')} />
+        <section className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
           <Metric label="Баланс" value={`$${allTimeBalance.toFixed(2)}`} hint={`старт $${startingBalance.toFixed(0)} · ${signed(allTimeReturnPct)}%`} tone={allTimeReturnPct >= 0 ? 'up' : 'down'} />
           <Metric label="Днес · София" value={`${signed(state?.stats.realized_today_usd ?? 0)}$`} hint={`валидни PAPER сделки · нереализирано ${signed(state?.stats.unrealized_pnl_usd ?? 0)}$`} tone={(state?.stats.realized_today_usd ?? 0) >= 0 ? 'up' : 'down'} />
           <Metric label="Отворени" value={`${state?.stats.open_positions ?? 0} / ${state?.config.max_positions ?? '—'}`} hint={`до $${state?.config.trade_notional_usd ?? '—'} на позиция`} />
