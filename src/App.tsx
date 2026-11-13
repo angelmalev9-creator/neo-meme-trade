@@ -4,6 +4,8 @@ import StopProfitAuditPanel from './components/StopProfitAuditPanel';
 import PaperRepoPatternPanel from './components/PaperRepoPatternPanel';
 import TokenEvidencePanel from './components/TokenEvidencePanel';
 import VerifiedMomentumPanel from './components/VerifiedMomentumPanel';
+import EarlyTokenCohortPanel from './components/EarlyTokenCohortPanel';
+import { useEarlyCohortResearch } from './hooks/useEarlyCohortResearch';
 import PaperTrainingPanel, { type PaperTrainingSnapshot } from './components/PaperTrainingPanel';
 import StrategyComparisonPanel from './components/StrategyComparisonPanel';
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
@@ -246,6 +248,7 @@ function RejectionBars({ rows, total }: { rows: { key: string; label: string; co
 
 export default function App() {
   const [state, setState] = useState<MonitorState | null>(null);
+  const earlyCohortStudy = useEarlyCohortResearch(state?.feed || []);
   const [error, setError] = useState('');
   const [tab, setTab] = useState<Tab>(() => { try { const saved = (sessionStorage.getItem('neo-tab') as Tab) || 'engine'; return saved === 'hype' ? 'lab' : saved; } catch { return 'engine'; } });
   const [selectedAddress, setSelectedAddress] = useState('');
@@ -934,6 +937,7 @@ export default function App() {
 
       {tab === 'coins' && <section className="grid gap-4 xl:grid-cols-[390px_minmax(0,1fr)]">
         <VerifiedMomentumPanel coins={state?.feed || []} selectedAddress={selectedAddress} onSelect={setSelectedAddress} />
+        <EarlyTokenCohortPanel study={earlyCohortStudy} onSelect={setSelectedAddress} />
         <Card kicker="Live feed" title="Койнове, които NEO следи" right={<Sparkles className="h-4 w-4 text-emerald-300" />}>
           <div className="border-b border-white/[0.07] p-3">
             <div className="relative"><Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600" /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Coin, symbol или address…" className="h-10 w-full rounded-xl border border-white/10 bg-black/20 pl-9 pr-3 text-xs text-white outline-none placeholder:text-slate-700 focus:border-emerald-400/30" /></div>
