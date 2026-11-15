@@ -4,12 +4,18 @@ on:
   push:
     paths:
       - 'backend/paper_pool_loss_guard.py'
+      - 'backend/paper_quality_guard.py'
+      - 'backend/market_monitor.py'
       - 'scripts/test_pool_loss_guard.py'
+      - 'scripts/test_paper_loss_streak_brake.py'
       - '.github/workflows/neo-paper-risk-guard.yml'
   pull_request:
     paths:
       - 'backend/paper_pool_loss_guard.py'
+      - 'backend/paper_quality_guard.py'
+      - 'backend/market_monitor.py'
       - 'scripts/test_pool_loss_guard.py'
+      - 'scripts/test_paper_loss_streak_brake.py'
       - '.github/workflows/neo-paper-risk-guard.yml'
 
 permissions:
@@ -25,5 +31,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Run deterministic PAPER guard regressions
+      - name: Check PAPER engine syntax
+        run: python3 -m py_compile backend/market_monitor.py backend/paper_quality_guard.py backend/paper_pool_loss_guard.py
+      - name: Test exact-pool cooldown
         run: python3 -m unittest discover -s scripts -p 'test_pool_loss_guard.py' -v
+      - name: Test session-wide loss brake
+        run: python3 -m unittest discover -s scripts -p 'test_paper_loss_streak_brake.py' -v
