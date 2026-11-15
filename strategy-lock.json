@@ -64,12 +64,12 @@
     "backend/live_tape.py": "f3f15e0f6e3f6239a3378f19abaadd8af441a4f54365cd2ebdf1242b093d6bea",
     "backend/live_tape_oct4_compat.py": "191b5cd7bdd54f91e8c71842dee5986611138c7ff4e69585acbc241314952df1",
     "backend/main_replay.py": "f81e4152a61e00d24a1cb354276aca7ff3fbd4d08c2533d09b1c0c8dc657b6f9",
-    "backend/market_monitor.py": "d8d33a991a06fecd592fe2b0e16e2313d9e1361b6dc64dbb457fde271a892d87",
+    "backend/market_monitor.py": "e25ccc806b114aed85126c04d6c22efa532ae125135791db40d74b29aeb495fc",
     "backend/order_flow_adaptive_oct4.py": "307a5e98ebcad210b89c38c03331efb5532a3595a7ec45b64d48aec0c7d48def",
     "backend/pair_price_integrity.py": "f301d4adecf6fa3aa93692bf1d4feb250203a4d76db74dce02fc77c57c43f1cb",
     "backend/paper_execution_quotes.py": "fc5b0582c627800a80edc3fd48f24f8c2a9b4460bbf28cb8571493e1568fe2ac",
-    "backend/paper_pool_loss_guard.py": "713adbc8a4a3696a66f6123b377ffa986ab8de0a2fed75a054ede7501c2d65a3",
-    "backend/paper_quality_guard.py": "e166c0d58140e3cd6102b8525922da74b52ed98732e1c9459299406c0c671e03",
+    "backend/paper_pool_loss_guard.py": "7a3eee2155edad531614ecae3ca21066a9593b6b222889abbbd39a89271260ef",
+    "backend/paper_quality_guard.py": "d93a0a3dfbc19842f85c772974a166dcafc90ffe5e159be7ab10d426bb5fb6f6",
     "backend/paper_state_reset.py": "72a270787ca7af6af6b7d3883aae3e09cba3e5a7bc73359f56ec33e14b7b828b",
     "backend/paper_training.py": "81a20ecee40710adeea9ad8ca4e6254e314dbe86c4835d55bb9c6f8d9b0294e4",
     "backend/pumpswap_stop_quote.py": "518f607710ea738edd94d5e6040fcd0ec8bc5521f6f20814ad20967c8be4be61",
@@ -295,5 +295,14 @@
     "avoid_max_share": 0.6,
     "loss_streak": 5,
     "loss_streak_multiplier": 0.5
+  },
+  "paper_safety_overlay_review_2026_11_15": {
+    "scope": "PAPER_ONLY_NEW_ENTRY_GUARDS",
+    "reviewed_files": ["backend/market_monitor.py", "backend/paper_pool_loss_guard.py", "backend/paper_quality_guard.py"],
+    "reason": "Fix 3-hour pool quarantine disappearing when first loss ages out of lookback; add session-scoped 4-loss/6-hour PAPER pause for new entries; exclude future and technically voided closes.",
+    "validated_tests": ["scripts/test_pool_loss_guard.py", "scripts/test_paper_loss_streak_brake.py"],
+    "unchanged_primary_strategy_sha256": "307a5e98ebcad210b89c38c03331efb5532a3595a7ec45b64d48aec0c7d48def",
+    "not_live_deployed": true,
+    "note": "Updated support hashes are an explicit tracked exception to the strategy lock, not evidence of profitability or a running VPS deployment."
   }
 }
