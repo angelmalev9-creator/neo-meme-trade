@@ -1,0 +1,29 @@
+name: NEO PAPER risk guard regression
+
+on:
+  push:
+    paths:
+      - 'backend/paper_pool_loss_guard.py'
+      - 'scripts/test_pool_loss_guard.py'
+      - '.github/workflows/neo-paper-risk-guard.yml'
+  pull_request:
+    paths:
+      - 'backend/paper_pool_loss_guard.py'
+      - 'scripts/test_pool_loss_guard.py'
+      - '.github/workflows/neo-paper-risk-guard.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  pool-loss-cooldown:
+    name: PAPER exact-pool cooldown / no future data
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run deterministic PAPER guard regressions
+        run: python3 -m unittest discover -s scripts -p 'test_pool_loss_guard.py' -v
