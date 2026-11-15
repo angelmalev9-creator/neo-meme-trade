@@ -117,7 +117,7 @@ type MonitorState = {
     worst: { bucket: string; trades: number; mean_pct: number; win_rate: number; avoided: boolean }[];
   } | null;
   stats: { feed_count: number; open_positions: number; closed_trades: number; wins: number; win_rate: number; realized_today_usd: number; realized_today_raw_usd?: number; paper_report_day?: string; paper_report_timezone?: string; paper_voided_today_count?: number; risk_day_timezone?: string; risk_day_pnl_usd?: number; daily_risk_remaining_usd?: number; paper_technical_corrections?: { trade_count: number; reversal_usd: number; audit_retained: boolean }; demo_starting_balance_usd: number; demo_balance_usd: number; demo_equity_usd: number; demo_available_usd: number; demo_reserved_usd: number; unrealized_pnl_usd: number; realized_total_usd: number; return_pct: number; demo_started_at: number; demo_session_id: string; metrics?: { lifetime?: { net_pnl_usd?: number } } };
-  config: { signal_strategy?: string; strategy_profile?: string; entry_policy_version?: string; exit_policy?: string; scan_seconds: number; position_scan_seconds?: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number; paper_only?: boolean; max_quoted_candidates_per_scan?: number; effective_entry_thresholds?: Record<string, number>; adaptive_strategy?: { hold_modes?: { mode: string; min_conviction: number; trail_arm_pct: number; trail_pct: number; target_pct: number | null }[]; exit_policy?: string }; user_controls?: { enabled?: boolean; version?: string | null; updated_at?: number; limits?: Record<string, [number, number]>; target_only_exits?: boolean; max_hold_enabled?: boolean }; paper_pool_loss_guard?: { enabled: boolean; version: string; losses_to_block: number; lookback_hours: number; block_hours: number; blocked_pool_count: number; blocked_pools: { mint: string; pool: string; symbol: string; losses: number; blocked_until: number; remaining_seconds: number }[] } };
+  config: { signal_strategy?: string; strategy_profile?: string; entry_policy_version?: string; exit_policy?: string; scan_seconds: number; position_scan_seconds?: number; max_positions: number; stop_loss_pct: number; take_profit_pct: number; trade_notional_usd: number; max_daily_loss_usd: number; starting_balance_usd: number; paper_only?: boolean; max_quoted_candidates_per_scan?: number; effective_entry_thresholds?: Record<string, number>; adaptive_strategy?: { hold_modes?: { mode: string; min_conviction: number; trail_arm_pct: number; trail_pct: number; target_pct: number | null }[]; exit_policy?: string }; user_controls?: { enabled?: boolean; version?: string | null; updated_at?: number; limits?: Record<string, [number, number]>; target_only_exits?: boolean; max_hold_enabled?: boolean }; paper_pool_loss_guard?: { enabled: boolean; version: string; losses_to_block: number; lookback_hours: number; block_hours: number; blocked_pool_count: number; blocked_pools: { mint: string; pool: string; symbol: string; losses: number; blocked_until: number; remaining_seconds: number }[] }; paper_loss_streak_brake?: { enabled: boolean; status: 'paused' | 'clear' | 'disabled'; losses_to_pause: number; lookback_hours: number; pause_hours: number; scope: string } };
 };
 type TokenDetail = { coin: Coin; history: PricePoint[]; position: Position | null; trades: Position[]; live_tape?: LiveTrade[]; flow?: FlowStats };
 type FlowWindow = { buys: number; sells: number; buyers: number; sellers: number; buy_usd?: number; sell_usd?: number; complete?: boolean };
@@ -698,6 +698,33 @@ export default function App() {
               </div>
             ) : <div className="mt-1.5 text-[10px] text-slate-500">Няма временно блокирани пулове. След две поредни загуби от един и същ токен и пул се спира новият вход за 3 часа.</div>}
             <div className="mt-1.5 text-[9px] leading-4 text-slate-500">Проверява само приключили сделки в същата PAPER сесия, без технически анулираните. Сигналите, SL и TP на стратегията от 4 октомври са непроменени.</div>
+          </div>
+        )}
+
+        {state?.config.strategy_profile === 'ORDER_FLOW_ADAPTIVE_OCT4' && (
+          <div className="mt-3 rounded-2xl border border-white/[0.08] bg-white/[0.025] px-4 py-3" data-testid="paper-loss-streak-brake-status">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-[11px] font-black text-slate-200">
+                <ShieldCheck className="h-4 w-4" /> Защита при поредица загуби · само PAPER
+              </div>
+              <span className={`rounded-lg border px-2.5 py-1 text-[10px] font-bold ${
+                state.config.paper_loss_streak_brake?.enabled
+                  ? state.config.paper_loss_streak_brake.status === 'paused'
+                    ? 'border-amber-400/20 bg-amber-400/[0.06] text-amber-200'
+                    : 'border-cyan-400/20 bg-cyan-400/[0.06] text-cyan-200'
+                  : 'border-red-400/20 bg-red-400/[0.06] text-red-200'
+              }`}>
+                {state.config.paper_loss_streak_brake?.enabled
+                  ? state.config.paper_loss_streak_brake.status === 'paused' ? 'ВРЕМЕННА ПАУЗА' : 'АКТИВНА · ГОТОВА'
+                  : 'НЕ Е ПОТВЪРДЕНА НА VPS'}
+              </span>
+            </div>
+            <p className="mt-1.5 text-[10px] leading-5 text-slate-400">
+              {state.config.paper_loss_streak_brake?.enabled
+                ? `При ${state.config.paper_loss_streak_brake.losses_to_pause} последователни загуби за ${state.config.paper_loss_streak_brake.lookback_hours} часа новите симулирани входове се спират за ${state.config.paper_loss_streak_brake.pause_hours} часа. Отворените позиции не се променят.`
+                : 'Новият предпазен модул е добавен в кода, но този backend не е потвърдил, че го използва. Не приемай това за активна защита.'}
+            </p>
+            <p className="mt-1 text-[9px] text-slate-600">Това намалява броя на новите рискови PAPER експозиции, но не гарантира доходност и не определя цената на продажба.</p>
           </div>
         )}
 
