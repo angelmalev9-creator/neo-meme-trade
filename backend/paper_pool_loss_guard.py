@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import math
 from typing import Any
 
-VERSION = 'PAPER_EXACT_POOL_LOSS_STREAK_V1'
+VERSION = 'PAPER_EXACT_POOL_LOSS_STREAK_V2'
 LOSSES_TO_BLOCK = 2
 LOOKBACK_MS = 6 * 60 * 60 * 1000
 BLOCK_MS = 3 * 60 * 60 * 1000
@@ -50,7 +50,12 @@ def blocked_pools(history: list[dict[str, Any]], now_ms: int,
     if not now or not session_id:
         return {}
     matching: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    cutoff = now - LOOKBACK_MS
+    # A block remains active for 3h after the *second* consecutive loss.
+    # To establish whether the latest close has a predecessor within the
+    # preceding 6h, keep enough history for BOTH windows (6h + 3h).
+    # Pruning at now - LOOKBACK_MS made valid blocks vanish prematurely
+    # when the first loss crossed that cutoff.
+    earliest_needed = now - BLOCK_MS - LOOKBACK_MS
     for row in history:
         if not isinstance(row, dict):
             continue
@@ -58,7 +63,7 @@ def blocked_pools(history: list[dict[str, Any]], now_ms: int,
             continue
         key = pool_key(row)
         closed = _stamp_ms(row.get('closed_at'))
-        if not key or not cutoff <= closed < now:
+        if not key or not earliest_needed <= closed < now:
             continue
         pnl = _number(row.get('pnl_usd'))
         if pnl is None:
@@ -76,7 +81,13 @@ def blocked_pools(history: list[dict[str, Any]], now_ms: int,
             continue
         if not all(row['pnl_usd'] < 0 for row in recent):
             continue
-        blocked_until = recent[0]['closed_at'] + BLOCK_MS
+        # The latest loss must still be inside its 3-hour cooldown, and
+        # the predecessor must be no more than 6h before that loss.
+        # A win between them is already excluded by the consecutive check.
+        latest_closed, previous_closed = recent[0]['closed_at'], recent[1]['closed_at']
+        if latest_closed - previous_closed > LOOKBACK_MS:
+            continue
+        blocked_until = latest_closed + BLOCK_MS
         if now >= blocked_until:
             continue
         out[key] = {
