@@ -335,6 +335,15 @@ PAPER_POOL_LOSS_GUARD_ENABLED = (
     and os.getenv('NEO_EXECUTION_MODE', 'PAPER').upper() == 'PAPER'
     and _env_enabled('NEO_PAPER_POOL_LOSS_GUARD', True)
 )
+# An independent 2-hour *PAPER-only* pause of NEW entries after four
+# consecutive valid losses in six hours. It never modifies open positions,
+# realized journal entries, strategy-owned Oct4 exit rules or real orders.
+PAPER_LOSS_STREAK_BRAKE_ENABLED = (
+    STRATEGY_PROFILE == oct4.PROFILE
+    and os.getenv('NEO_ENGINE_MODE', 'PAPER').upper() == 'PAPER'
+    and os.getenv('NEO_EXECUTION_MODE', 'PAPER').upper() == 'PAPER'
+    and _env_enabled('NEO_PAPER_LOSS_STREAK_BRAKE', True)
+)
 BUY_PRESSURE_FLOW_SECONDS = max(10, min(60, int(float(os.getenv('NEO_BUY_PRESSURE_FLOW_SECONDS', '60')))))
 BUY_PRESSURE_SCAN_SECONDS = max(4.0, float(os.getenv('NEO_BUY_PRESSURE_SCAN_SECONDS', '6')))
 BUY_PRESSURE_MIN_SCORE = float(os.getenv('NEO_BUY_PRESSURE_MIN_SCORE', '60'))
@@ -1532,6 +1541,16 @@ class State:
                     'same_token_cooldown_seconds': LOSS_REENTRY_SECONDS if is_adaptive() and not is_learner() else None,
                     'paper_pool_loss_guard': paper_pool_loss_guard.description(
                         self.history, now_ms(), self.demo_session_id, enabled=PAPER_POOL_LOSS_GUARD_ENABLED),
+                    'paper_loss_streak_brake': {
+                        'enabled': PAPER_LOSS_STREAK_BRAKE_ENABLED,
+                        'status': ('paused' if paper_quality_guard.regime_rejections(
+                            self.history, now_ms(), strategy_id=oct4.STRATEGY_ID,
+                            session_id=self.demo_session_id) else 'clear') if PAPER_LOSS_STREAK_BRAKE_ENABLED else 'disabled',
+                        'losses_to_pause': paper_quality_guard.LOSS_STREAK_COUNT,
+                        'lookback_hours': paper_quality_guard.LOSS_STREAK_WINDOW_MS // 3_600_000,
+                        'pause_hours': paper_quality_guard.LOSS_STREAK_COOLDOWN_MS // 3_600_000,
+                        'scope': 'NEW_PAPER_ENTRIES_ONLY',
+                    },
                     'entry_flow_window_seconds': (BUY_PRESSURE_FLOW_SECONDS if BUY_PRESSURE_FIXED else
                                                   policy_module().CONFIG['entry_flow_window_seconds']) if is_adaptive() else None,
                     'entry_on_position_guard': ENTRY_ON_POSITION_GUARD,
@@ -2625,6 +2644,13 @@ class Monitor:
         if MAX_DAILY_LOSS_USD > 0 and STATE.risk_day_pnl() <= -MAX_DAILY_LOSS_USD:
             reject(report, ['daily_limit'])
             return
+        if PAPER_LOSS_STREAK_BRAKE_ENABLED:
+            reasons = paper_quality_guard.regime_rejections(
+                STATE.history, now_ms(), strategy_id=oct4.STRATEGY_ID,
+                session_id=STATE.demo_session_id)
+            if reasons:
+                reject(report, reasons)
+                return
         # A route that is briefly missing blocks new exposure. One that stayed
         # missing through every retry is written off as reserved capital instead
         # of freezing the engine, when the profile says so.
@@ -2718,7 +2744,7 @@ class Monitor:
             context = self.market_context(coin)
             rejected = signal_check(coin, flow, context)
             if not rejected and STRATEGY_PROFILE == OCT4_PLUS_PROFILE:
-                rejected = (paper_quality_guard.regime_rejections(STATE.history, now_ms(), strategy_id=oct4.STRATEGY_ID)
+                rejected = (paper_quality_guard.regime_rejections(STATE.history, now_ms(), strategy_id=oct4.STRATEGY_ID, session_id=STATE.demo_session_id)
                             + paper_quality_guard.market_rejections(coin, flow, context))
             if rejected:
                 reject(report, rejected, coin, {
@@ -2932,12 +2958,19 @@ class Monitor:
                             'blocked_until': current_block['blocked_until'],
                         })
                         continue
+                if PAPER_LOSS_STREAK_BRAKE_ENABLED:
+                    reasons = paper_quality_guard.regime_rejections(
+                        STATE.history, now_ms(), strategy_id=oct4.STRATEGY_ID,
+                        session_id=STATE.demo_session_id)
+                    if reasons:
+                        reject(report, reasons, coin)
+                        return
                 current_coin = next((c for c in STATE.feed if c.get('address') == address and c.get('pairAddress') == coin.get('pairAddress')), coin)
                 final_flow = STATE.live_flow(address, flow_seconds, str(coin.get('pairAddress') or ''))
                 final_context = self.market_context(current_coin)
                 final_rejections = signal_check(current_coin,final_flow,final_context)
                 if not final_rejections and STRATEGY_PROFILE == OCT4_PLUS_PROFILE:
-                    final_rejections = (paper_quality_guard.regime_rejections(STATE.history, now_ms(), strategy_id=oct4.STRATEGY_ID)
+                    final_rejections = (paper_quality_guard.regime_rejections(STATE.history, now_ms(), strategy_id=oct4.STRATEGY_ID, session_id=STATE.demo_session_id)
                                         + paper_quality_guard.market_rejections(current_coin, final_flow, final_context))
                 if final_rejections:
                     reject(report,final_rejections,coin)
