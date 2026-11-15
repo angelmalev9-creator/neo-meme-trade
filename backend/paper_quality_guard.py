@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-VERSION = 'OCT4_PAPER_QUALITY_V1'
+VERSION = 'OCT4_PAPER_QUALITY_V2'
 
 MIN_BUYER_WALLETS = 3
 MIN_UNIQUE_WALLETS = 4
@@ -25,6 +25,7 @@ MAX_IMMEDIATE_ROUNDTRIP_COST_PCT = 2.75
 MAX_CONSERVATIVE_ROUNDTRIP_COST_PCT = 4.00
 LOSS_STREAK_COUNT = 4
 LOSS_STREAK_COOLDOWN_MS = 2 * 60 * 60 * 1000
+LOSS_STREAK_WINDOW_MS = 6 * 60 * 60 * 1000
 
 
 def _n(value: Any, default: float = 0.0) -> float:
@@ -96,14 +97,33 @@ def execution_rejections(*, market_price: float, fill_price: float, impact_pct: 
     }
 
 
-def regime_rejections(history: list[dict[str, Any]], now_ms: int, *, strategy_id: str) -> list[str]:
-    """Cool the same strategy after four fresh losses; do not mix profiles."""
-    rows = [row for row in history if row.get('strategy_id') == strategy_id and row.get('closed_at')]
-    rows.sort(key=lambda row: int(row.get('closed_at') or 0), reverse=True)
+def regime_rejections(history: list[dict[str, Any]], now_ms: int, *, strategy_id: str,
+                      session_id: str | None = None) -> list[str]:
+    """PAPER pause after four recent consecutive *valid* closed losses.
+
+    Use only earlier closes from the same strategy and PAPER session.
+    Technical reversals and future outcomes never count. Very old losses
+    must not combine with one recent loss to invent a fresh streak.
+    The rule pauses new PAPER entries only; it never modifies open positions,
+    journal history, profit figures, or recorded exit behavior.
+    """
+    if not isinstance(history, list) or not strategy_id or now_ms <= 0:
+        return []
+    cutoff = now_ms - LOSS_STREAK_WINDOW_MS
+    rows = [
+        row for row in history
+        if isinstance(row, dict)
+        and row.get('strategy_id') == strategy_id
+        and (session_id is None or row.get('session_id') == session_id)
+        and not row.get('technical_voided')
+        and cutoff <= _n(row.get('closed_at')) < now_ms
+        and math.isfinite(_n(row.get('pnl_pct'), math.nan))
+    ]
+    rows.sort(key=lambda row: _n(row.get('closed_at')), reverse=True)
     recent = rows[:LOSS_STREAK_COUNT]
     if len(recent) < LOSS_STREAK_COUNT or any(_n(row.get('pnl_pct')) >= 0 for row in recent):
         return []
-    last_closed = int(recent[0].get('closed_at') or 0)
+    last_closed = _n(recent[0].get('closed_at'))
     if 0 <= now_ms - last_closed < LOSS_STREAK_COOLDOWN_MS:
         return ['regime_brake']
     return []
