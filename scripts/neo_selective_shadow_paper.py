@@ -209,7 +209,12 @@ def process_mark(db,row):
                     close_position(db,variant,pos,now,price,liq,
                                    "NET_MARK_TARGET" if pct>=target else "NET_MARK_STOP")
             elif expired:
-                close_position(db,variant,pos,now,price,liq,"MAX_HOLD")
+                # If the market disappeared between samples, the current
+                # indicative mark cannot be treated as a timely exit fill.
+                if prev and now-prev["ts"]>MAX_EVIDENCE_GAP_MS:
+                    close_position(db,variant,pos,now,price,liq,"UNVERIFIABLE_STALE_GAP")
+                else:
+                    close_position(db,variant,pos,now,price,liq,"MAX_HOLD")
             continue
         if pos:
             continue
