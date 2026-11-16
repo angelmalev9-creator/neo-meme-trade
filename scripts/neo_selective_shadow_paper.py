@@ -157,7 +157,12 @@ def init_shadow(db,src,replay_start_ms=None):
 
 
 def close_position(db,variant,pos,ts,price,liq,reason):
-    net=modeled_exit_cash(pos["entry_price"],pos["entry_liq"],price,liq,pos["size_usd"])
+    # Large positive mark jumps are especially vulnerable to provider
+    # inaccuracies and non-executable screen prices. Never count them as
+    # profit in a model that lacks independent two-sided executable quotes.
+    unverifiable_jump = (finite(price) is not None and price > pos["entry_price"] * 1.5)
+    net = None if reason.startswith("UNVERIFIABLE_") or unverifiable_jump else modeled_exit_cash(
+        pos["entry_price"],pos["entry_liq"],price,liq,pos["size_usd"])
     if net is None:
         # The mark is not realizably executable. Keep the unresolved
         # outcome in the denominator, NEVER impute 0 or a winning fill.
@@ -198,8 +203,11 @@ def process_mark(db,row):
             expired=now-pos["opened_ms"]>=MAX_HOLD_MS
             # Never claim target/stop if sale cannot be modeled.
             if pct is not None and (pct>=target or pct<=STOP_NET_PCT):
-                close_position(db,variant,pos,now,price,liq,
-                               "NET_MARK_TARGET" if pct>=target else "NET_MARK_STOP")
+                if pct>=target and prev and now-prev["ts"]>MAX_EVIDENCE_GAP_MS:
+                    close_position(db,variant,pos,now,price,liq,"UNVERIFIABLE_STALE_GAP")
+                else:
+                    close_position(db,variant,pos,now,price,liq,
+                                   "NET_MARK_TARGET" if pct>=target else "NET_MARK_STOP")
             elif expired:
                 close_position(db,variant,pos,now,price,liq,"MAX_HOLD")
             continue
