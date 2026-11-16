@@ -76,6 +76,8 @@ class ShadowTests(unittest.TestCase):
         self.step(T,1)
         self.step(T+20_000,1.03)
         self.step(T+200_000,1.15)
+        # The 10% variant may remain open after the first stale mark.
+        self.step(T+310_000,1.2)
         rows=self.db.execute("SELECT * FROM closed").fetchall()
         self.assertEqual(len(rows),2)
         self.assertTrue(all(r["net_mark_pnl_usd"] is None for r in rows))
