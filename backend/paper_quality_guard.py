@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-VERSION = 'OCT4_PAPER_QUALITY_V2'
+VERSION = 'OCT4_PAPER_QUALITY_V3'
 
 MIN_BUYER_WALLETS = 3
 MIN_UNIQUE_WALLETS = 4
@@ -109,7 +109,10 @@ def regime_rejections(history: list[dict[str, Any]], now_ms: int, *, strategy_id
     """
     if not isinstance(history, list) or not strategy_id or now_ms <= 0:
         return []
-    cutoff = now_ms - LOSS_STREAK_WINDOW_MS
+    # Keep an 8h evidence horizon: a four-loss streak may have formed
+    # over <=6h, and its 2h pause must remain in force even once the
+    # oldest loss falls outside a rolling now-6h query window.
+    cutoff = now_ms - LOSS_STREAK_WINDOW_MS - LOSS_STREAK_COOLDOWN_MS
     rows = [
         row for row in history
         if isinstance(row, dict)
@@ -124,6 +127,10 @@ def regime_rejections(history: list[dict[str, Any]], now_ms: int, *, strategy_id
     if len(recent) < LOSS_STREAK_COUNT or any(_n(row.get('pnl_pct')) >= 0 for row in recent):
         return []
     last_closed = _n(recent[0].get('closed_at'))
+    first_closed = _n(recent[-1].get('closed_at'))
+    # Validate the time span of the actual streak, not just its age now.
+    if last_closed - first_closed > LOSS_STREAK_WINDOW_MS:
+        return []
     if 0 <= now_ms - last_closed < LOSS_STREAK_COOLDOWN_MS:
         return ['regime_brake']
     return []
