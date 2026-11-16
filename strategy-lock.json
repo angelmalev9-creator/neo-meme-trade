@@ -69,7 +69,7 @@
     "backend/pair_price_integrity.py": "f301d4adecf6fa3aa93692bf1d4feb250203a4d76db74dce02fc77c57c43f1cb",
     "backend/paper_execution_quotes.py": "fc5b0582c627800a80edc3fd48f24f8c2a9b4460bbf28cb8571493e1568fe2ac",
     "backend/paper_pool_loss_guard.py": "7a3eee2155edad531614ecae3ca21066a9593b6b222889abbbd39a89271260ef",
-    "backend/paper_quality_guard.py": "d93a0a3dfbc19842f85c772974a166dcafc90ffe5e159be7ab10d426bb5fb6f6",
+    "backend/paper_quality_guard.py": "09b7f7f797c8f5b30fd4b6d7cbd084745c5b93d95db784493cf90b4c31af3e7d",
     "backend/paper_state_reset.py": "72a270787ca7af6af6b7d3883aae3e09cba3e5a7bc73359f56ec33e14b7b828b",
     "backend/paper_training.py": "81a20ecee40710adeea9ad8ca4e6254e314dbe86c4835d55bb9c6f8d9b0294e4",
     "backend/pumpswap_stop_quote.py": "518f607710ea738edd94d5e6040fcd0ec8bc5521f6f20814ad20967c8be4be61",
@@ -304,5 +304,14 @@
     "unchanged_primary_strategy_sha256": "307a5e98ebcad210b89c38c03331efb5532a3595a7ec45b64d48aec0c7d48def",
     "not_live_deployed": true,
     "note": "Updated support hashes are an explicit tracked exception to the strategy lock, not evidence of profitability or a running VPS deployment."
+  }
+,
+  "paper_loss_brake_regression_2026_11_16": {
+    "scope": "PAPER_ONLY_LOSS_BRAKE_REPLAY",
+    "file": "backend/paper_quality_guard.py",
+    "test": "scripts/test_paper_loss_streak_brake.py",
+    "reason": "Ensure two-hour risk pause continues after the oldest of four recent losses ages out of six-hour now-window. Verify six-hour span between actual four closes instead.",
+    "original_oct4_sha256_unchanged": "307a5e98ebcad210b89c38c03331efb5532a3595a7ec45b64d48aec0c7d48def",
+    "not_deployed_to_main_vps": true
   }
 }
