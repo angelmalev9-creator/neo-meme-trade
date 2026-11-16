@@ -73,5 +73,23 @@ class BrakeTests(unittest.TestCase):
         rows = [close(T - 3 * MIN),close(T - H),close(T - 2 * H),close(T - 8 * H)]
         self.assertEqual(reasons(rows), [])
 
+    def test_recent_pause_survives_first_loss_aging_out(self):
+        # Four losses span 5h50m; the first loss becomes older than
+        # now-6h, although the fourth loss closed only 20m ago.
+        rows = [
+            close(T - 6 * H - 10 * MIN),
+            close(T - 6 * H),
+            close(T - 5 * H - 50 * MIN),
+            close(T - 20 * MIN),
+        ]
+        self.assertIn("regime_brake", reasons(rows))
+
+    def test_four_losses_spread_over_seven_hours_do_not_pause(self):
+        rows = [
+            close(T - 7 * H), close(T - 6 * H),
+            close(T - 5 * H), close(T - 20 * MIN),
+        ]
+        self.assertEqual(reasons(rows), [])
+
 if __name__ == "__main__":
     unittest.main()
