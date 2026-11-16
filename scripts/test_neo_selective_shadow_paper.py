@@ -63,6 +63,23 @@ class ShadowTests(unittest.TestCase):
         self.step(T,1,pool=other,category="sharp_move_review")
         self.step(T+20_000,1.03,pool=other,category="sharp_move_review")
         self.assertEqual(self.db.execute("SELECT count(*) FROM positions").fetchone()[0],0)
+    def test_extreme_positive_price_gap_is_unresolved_not_credited_profit(self):
+        self.step(T,1)
+        self.step(T+20_000,1.03)
+        self.step(T+40_000,100)
+        rows=self.db.execute("SELECT * FROM closed").fetchall()
+        self.assertEqual(len(rows),2)
+        self.assertTrue(all(r["net_mark_pnl_usd"] is None for r in rows))
+        self.assertTrue(all(r["reason"].startswith("UNRESOLVED") for r in rows))
+
+    def test_late_target_mark_cannot_claim_an_early_executable_fill(self):
+        self.step(T,1)
+        self.step(T+20_000,1.03)
+        self.step(T+200_000,1.15)
+        rows=self.db.execute("SELECT * FROM closed").fetchall()
+        self.assertEqual(len(rows),2)
+        self.assertTrue(all(r["net_mark_pnl_usd"] is None for r in rows))
+
     def test_stop_not_clamped_to_nominal_five_percent(self):
         self.step(T,1)
         self.step(T+20_000,1.03)
