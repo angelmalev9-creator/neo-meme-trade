@@ -257,6 +257,19 @@ def replay_batch(src,db,max_rows=3000):
     return len(rows)
 
 
+def expire_unobserved_positions(db,now):
+    """A missing pool or exit mark is *unresolved*, not a fabricated fill.
+
+    Releases the shadow slot only after explicitly retaining the unpriced
+    outcome; this prevents an unobserved illiquid position from silently
+    disappearing or freezing the entire shadow experiment forever.
+    """
+    with db:
+        for row in db.execute("SELECT * FROM positions").fetchall():
+            if now-row["opened_ms"] >= MAX_HOLD_MS+2*60000:
+                close_position(db,row["variant"],row,now,None,None,"NO_SELL_MARK")
+
+
 def report(db,now):
     result={"version":VERSION,"mode":getmeta(db,"run_mode"),"generated_at_utc":
             datetime.fromtimestamp(now/1000,timezone.utc).isoformat(),
@@ -321,6 +334,8 @@ def main():
             total+=n
             if n<3000 or total>25000: break
         now=int(time.time()*1000)
+        if getmeta(db,"run_mode") == "FORWARD_ONLY_FROM_START":
+            expire_unobserved_positions(db,now)
         atomic_report(args.report,report(db,now))
         if args.once: break
         time.sleep(max(10,args.interval))
