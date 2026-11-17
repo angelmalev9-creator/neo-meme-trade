@@ -6,6 +6,7 @@ import TokenEvidencePanel from './components/TokenEvidencePanel';
 import VerifiedMomentumPanel from './components/VerifiedMomentumPanel';
 import EarlyTokenCohortPanel from './components/EarlyTokenCohortPanel';
 import EarlyPaperCandidatePanel from './components/EarlyPaperCandidatePanel';
+import LiveSelectivePaperPanel from './components/LiveSelectivePaperPanel';
 import { useEarlyCohortResearch } from './hooks/useEarlyCohortResearch';
 import PaperTrainingPanel, { type PaperTrainingSnapshot } from './components/PaperTrainingPanel';
 import StrategyComparisonPanel from './components/StrategyComparisonPanel';
@@ -672,6 +673,7 @@ export default function App() {
       {error && <div className="mb-4 rounded-2xl border border-red-500/20 bg-red-500/[0.06] px-4 py-3 text-xs text-red-200">{error}</div>}
 
       {tab === 'engine' && <>
+        <LiveSelectivePaperPanel />
         <EarlyPaperCandidatePanel study={earlyCohortStudy} activeProfile={state?.config.strategy_profile || null} onOpenStudy={() => switchTab('coins')} />
         <section className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
           <Metric label="Баланс" value={`$${allTimeBalance.toFixed(2)}`} hint={`старт $${startingBalance.toFixed(0)} · ${signed(allTimeReturnPct)}%`} tone={allTimeReturnPct >= 0 ? 'up' : 'down'} />
