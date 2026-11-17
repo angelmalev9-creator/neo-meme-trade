@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Activity, AlertTriangle, ArrowUpRight, Clock3, FlaskConical, RefreshCw } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowUpRight, Clock3, RefreshCw } from 'lucide-react';
 
 /** Public, sanitized, read-only research status. No wallet/transaction API. */
 const SHADOW_REPORT_URL = 'https://neo-paper.92-242-188-182.sslip.io/report.json';
